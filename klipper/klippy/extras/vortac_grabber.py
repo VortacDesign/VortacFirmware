@@ -14,8 +14,8 @@ class VortacGrabber:
         self.angle_sensor_name = config.get("angleSensor")
 
         # Beispielhafte Keys: steps_per_rev, sample_count, speed, output_path, mcu_stepper
-        self.steps_per_rev = config.getint('steps_per_rev', default=720)
-        self.sample_count = config.getint('sample_count', default=72)
+        self.steps_per_rev = config.getint('steps_per_rev', default=360)
+        self.sample_count = config.getint('sample_count', default=180)
         self.speed = config.getint('speed', default=50)
 
         #TODO better way to grab angle sensor because now it has to be declared before vortac grabber
@@ -48,11 +48,10 @@ class VortacGrabber:
 
     def cmd_vortac_calibrate(self, gcmd):
         """
-              G-Code-Kommando: ANGLE_CALIBRATE [START=<Grad>] [SAMPLES=<Anzahl>] [SPEED=<Wert>] [OUTPUT=<Pfad>]
+              G-Code-Kommando: VORTAC_CALIBRATE [SAMPLES=<Anzahl>] [SPEED=<Wert>]
               Starte Kalibrierung. Führt auf einem eigenen Thread aus, damit Klippy nicht blockiert.
-              """
+        """
         # Parameter auslesen
-        start_angle = gcmd.get_float('START', default=0.0)  # Falls du von einer definierten Anfangsposition startest
         sample_count = gcmd.get_int('SAMPLES', default=self.sample_count)
         speed = gcmd.get_int('SPEED', default=self.speed)
         # Evtl. Warnung, wenn Datei schon existiert?
@@ -62,7 +61,7 @@ class VortacGrabber:
                                                                                        ))
         # Starte Thread, damit Klippy-Scheduler nicht blockiert:
 
-        self._do_calibration(gcmd, start_angle, sample_count, speed)
+        self._do_calibration(gcmd, sample_count, speed)
 
 
     def _is_agc_stable(self,gcmd , n=5, tol=2):
@@ -84,61 +83,63 @@ class VortacGrabber:
             agc = word & 0xFF
             vals.append(agc)
             gcmd.respond_info(f"magnet low?: {magl}, magnet high ?:{magh}, cof: {cof}, lf:{lf}, bootsequence test Value {agc}")
-            time.sleep(0.002)
+            time.sleep(0.05)
 
         gcmd.respond_info(f"bootsequence test max distance: {max(vals) - min(vals)}")
         return max(vals) - min(vals) <= tol
 
-    def _do_calibration(self, gcmd, start_angle, sample_count, speed):
+    def _do_calibration(self, gcmd, sample_count, speed):
         """
         Führt die eigentliche Kalibrierung aus:
-        - Fährt start_angle an (falls nötig)
         - Dreht in sample_count Schritten (jeweils relative Bewegungen) insgesamt 360°
         - Liest nach jedem Schritt den Sensorwert
         - Speichert angle,raw in self.table und in Datei
         """
 
-        max_attempts = 50
-        for attempt in range(1, max_attempts + 1):
-            if self._is_agc_stable(gcmd, n=5, tol=2):
-                gcmd.respond_info(f"Warm-Up abgeschlossen nach {attempt} Versuchen.")
-                break
-            gcmd.respond_info(f"AGC noch instabil (Versuch {attempt}/{max_attempts}), warte...")
-            time.sleep(0.01)
-        else:
-            # kommt hierher, wenn die Schleife nicht per break verlassen wurde
-            gcmd.respond_error("Warm-Up nicht innerhalb der erlaubten Versuche stabil. Abbruch!")
-            return  # oder raise RuntimeError("Warm-Up failed")
+        # max_attempts = 50
+        # for attempt in range(1, max_attempts + 1):
+        #     if self._is_agc_stable(gcmd, n=5, tol=2):
+        #         gcmd.respond_info(f"Warm-Up abgeschlossen nach {attempt} Versuchen.")
+        #         break
+        #     gcmd.respond_info(f"AGC noch instabil (Versuch {attempt}/{max_attempts}), warte...")
+        #     time.sleep(0.01)
+        # else:
+        #     # kommt hierher, wenn die Schleife nicht per break verlassen wurde
+        #     gcmd.respond_error("Warm-Up nicht innerhalb der erlaubten Versuche stabil. Abbruch!")
+        #     return  # oder raise RuntimeError("Warm-Up failed")
 
-        gcmd.respond_info("started internal thread and funktion")
+
         try:
             # Cleanup alte Tabelle
             self.table = []
             # Berechne Schrittzahl pro Sample:
             # steps_per_rev ist total steps für 360°, sample_count Punkte → steps_per_sample evtl. float
             steps_per_sample = float(self.steps_per_rev) / float(sample_count)
-            # Falls Startwinkel != 0: optional initialisieren. Hier angenommen: aktuell bei sensor-Winkel = start_angle.
-            # Falls nicht, musst du Achse zuerst auf bekannten Referenzpunkt fahren. Das ist spezifisch und hier nicht implementiert.
+            estimated_move_duration = float(speed / sample_count) * 0.2
+
+            gcmd.respond_info(f"started calibration with {sample_count} Samples sleeping {estimated_move_duration} for each move")
             # Hauptloop:
             for i in range(sample_count):
+
                     # Fahre relativen Schritt:
                     # `manual_move(self.mcu, step, speed)`: Die Doku sagt: manual_move(mcuname, step_count, speed)
                     # Übergebe hier den Stepperschrittnamen und step count. Der Typ (float) sollte funktionieren, Klipper rundet intern?
+                    raw = self.read_raw(gcmd)
+                    angle = (i * self.steps_per_rev / sample_count) % self.steps_per_rev
+                    self.table.append((angle, raw))
+                    gcmd.respond_info("i={}, angle={:.3f}, raw={}".format(i, angle, raw))
 
                     # Move-Befehl:
                     # force_move.manual_move: signature: manual_move(self, mcu_name, step_count, speed)
                     move = self.angle_sensor.printer.lookup_object('force_move').manual_move
                     self.angle_stepper = self.angle_sensor.calibration.mcu_stepper
                     move(self.angle_stepper, steps_per_sample, speed)
-                    # Gib Klipper kurz Zeit, um ruhig zu stehen:
-                    # Man kann optional time.sleep abhängig von speed und Mechanikzeit
-                    time.sleep(0.05)
-                    raw = self.read_raw(gcmd)
-                    angle = (start_angle + i * self.steps_per_rev / sample_count) % self.steps_per_rev
-                    self.table.append((angle, raw))
-                    gcmd.respond_info("i={}, angle={:.3f}, raw={}".format(i, angle, raw))
-                # Hier evtl. optionale Averaging-Schleife, Retry bei Ausreißer etc.
-            # Nach Loop: evtl. zurück zur Startposition drehen (optional).
+
+                    # Gibt Klipper kurz Zeit, um den move command zu beenden:
+
+                    time.sleep(estimated_move_duration)
+
+
             gcmd.respond_info("{}".format(self.table))
             gcmd.respond_info("Kalibrierung komplett: {} Einträge".format(len(self.table)))
 
