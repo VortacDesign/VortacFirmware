@@ -2,6 +2,7 @@ from . import angle
 import time
 import json
 import bisect
+import ast
 import threading
 
 
@@ -15,8 +16,8 @@ class VortacGrabber:
         self.printer = config.get_printer()
         self.angle_sensor_name = config.get("angleSensor")
         self.name = config.get_name()
+        self.gcode_macro = self.printer.load_object(config, 'gcode_macro')
 
-        # Beispielhafte Keys: steps_per_rev, sample_count, speed, output_path, mcu_stepper
         self.steps_per_rev = config.getint('steps_per_rev', default=360)
         self.sample_count = config.getint('sample_count', default=180)
         self.speed = config.getint('speed', default=50)
@@ -25,36 +26,60 @@ class VortacGrabber:
         self.engage_pos = config.getint('engage_pos', default=130)
         self.zero_pos_offset = config.getint('zero_pos_offset', default=0)
 
+        self.params = get_params_dict(config)
+        config.get_prefix_options('params_')
+
+        self.tool_doc_test_code = self.gcode_macro.load_template(
+            config, 'tool_doc_test_code', '')
+
+        self.tool_doc_load = self.gcode_macro.load_template(
+            config, 'tool_doc_load', '')
+
+        self.tool_doc_unload = self.gcode_macro.load_template(
+            config, 'tool_doc_unload', '')
+
+
+
         #TODO better way to grab angle sensor because now it has to be declared before vortac grabber
+        try:
+             self.angle_sensor = self.printer.lookup_object('angle {}'.format(self.angle_sensor_name))
+        except Exception as e:
+             self.angle_sensor = None
         self.angle_sensor = self.printer.lookup_object('angle {}'.format(self.angle_sensor_name))
 
         cal_str = config.get('lookup_table', None)
         if cal_str is not None:
             try:
-                # wandelt JSON-String direkt in eine Liste von [trueAngle, measuredAngle]
+                # convert JSON-String  in List von [trueAngle, measuredAngle]
                 self.table = json.loads(cal_str)
-                #gcmd.respond_info(f"Kalibrier-Tabelle geladen: {len(self.table)} Einträge")
             except json.JSONDecodeError as e:
                 raise  config.error("Load Config Error: {}".format(e))
-                #gcmd.respond_error(f"Fehler beim Parsen der Kalibrier-Tabelle: {e}")
 
         gcode = self.printer.lookup_object('gcode')
+
         gcode.register_command("VORTAC_CALIBRATE", self.cmd_vortac_calibrate,
                                desc=self.cmd_vortac_calibrate_help)
+
+        gcode.register_command("VORTAC_CALIBRATE_BULK", self.cmd_bulk_vortac_calibrate,
+                               desc=self.cmd_vortac_calibrate_help)
+
         gcode.register_command("VORTAC_MOVE", self.cmd_simple_move,
                                desc=None)
+
         gcode.register_command("VORTAC_SIMPLE_READ", self.cmd_simple_read,
                                desc=None)
 
+        gcode.register_command("VORTAC_SET_SAVE_DOC_POS", self.cmd_set_save_doc_pos,
+                               desc=None)
 
+        gcode.register_command("VORTAC_TEST_DOC_POS", self.cmd_test_tool_doc_pos,
+                               desc=None)
 
-        #NOTE Angle Sensor in mendentory and can just be set as nessesary Object
-        # try:
-        #     self.angle_sensor = self.printer.lookup_object('angle {}'.format(self.angle_sensor_name))
-        # except Exception as e:
-        #     self.angle_sensor = None
-        #     #TODO if logging available give feedback don't raise error because Printer boot would fail
-        #     #raise config.error(f"Failed to load angle sensor {self.angle_sensor_name}: {e}")
+        gcode.register_command("VORTAC_TEST_LOAD", self.cmd_tool_doc_load,
+                               desc=None)
+
+        gcode.register_command("VORTAC_TEST_UNLOAD", self.cmd_tool_doc_unload,
+                               desc=None)
 
     cmd_vortac_calibrate_help = "Populates reference Value Table"
 
@@ -162,6 +187,91 @@ class VortacGrabber:
         except Exception as e:
             gcmd.respond_error(f"Error in simple_move: {e}")
 
+    def cmd_bulk_vortac_calibrate(self, gcmd):
+        """
+              G-Code-Kommando: VORTAC_CALIBRATE [SAMPLES=<Anzahl>] [SPEED=<Wert>]
+              Starte Kalibrierung. Führt auf einem eigenen Thread aus, damit Klippy nicht blockiert.
+        """
+        # Parameter auslesen
+        sample_count = gcmd.get_int('SAMPLES', default=self.sample_count)
+        speed = gcmd.get_int('SPEED', default=self.speed)
+        # Start data collection
+
+        """
+            Starting Bulk Sensor Reading for Current Angle Sensor
+            Collecting Results in msgs [] Bulk Reading continues untill handle_batch returns false
+            this is the case when thin functions sets the is_finished flag to true
+        """
+        msgs = []
+        is_finished = False
+
+
+        def handle_batch(msg):
+            if is_finished:
+                return False
+            msgs.append(msg)
+            return True
+
+        gcmd.respond_info("Startingh Bulk Mesorments for AngleSenseor")
+
+        self.angle_sensor.add_client(handle_batch)
+        steps_per_sample = float(self.steps_per_rev) / float(sample_count)
+        toolhead = self.printer.lookup_object('toolhead')
+        times = []
+
+        #Queue move commands
+        for i in range(sample_count):
+            start_query_time = toolhead.get_last_move_time() + 0.050
+            end_query_time = start_query_time + 0.050
+            times.append((start_query_time, end_query_time))
+            angle = (i * self.steps_per_rev / sample_count) % self.steps_per_rev
+            gcmd.respond_info("i={}, angle={:.3f}".format(i, angle))
+            move = self.angle_sensor.printer.lookup_object('force_move').manual_move
+            self.angle_stepper = self.angle_sensor.calibration.mcu_stepper
+            move(self.angle_stepper, steps_per_sample, speed)
+            toolhead.dwell(0.150)
+
+        toolhead.wait_moves()
+        # Finish data collection
+        is_finished = True
+        gcmd.respond_info("Finished mesurements for AngleSenseor")
+        gcmd.respond_info(f"Got {len(msgs)} and sample times {len(times)}")
+        cal = {}
+        step = 0
+
+        gcmd.respond_info(f"Sample Times: {times}")
+
+        for msg in msgs:
+            for query_time, pos in msg['data']:
+                # Add to step tracking
+                while step < len(times) and query_time > times[step][1]:
+                    step += 1
+                if step < len(times) and query_time >= times[step][0]:
+                    cal.setdefault(step, []).append(pos)
+
+        gcmd.respond_info("Checked messages")
+        gcmd.respond_info(f"cal dictionary: {cal}")
+
+        if len(cal) != len(times):
+            raise self.printer.command_error(
+                "Failed calibration - incomplete sensor data")
+        # fcal = {i: cal[i] for i in range(sample_count)}
+        # rcal = {sample_count - i - 1: cal[i + sample_count] for i in range(sample_count)}
+        #
+        # gcmd.respond_info(f"should get fcal und rcal")
+        # gcmd.respond_info(f"fcal: {fcal}")
+        # gcmd.respond_info(f"rcal: {rcal}")
+
+        return
+        """
+                Saves Results into config file as lookup_table
+        """
+
+        configfile = self.printer.lookup_object('configfile')
+        configfile.remove_section(self.name)
+        table_json = json.dumps(self.table)
+        configfile.set(self.name, 'lookup_table', table_json)
+
     def cmd_vortac_calibrate(self, gcmd):
         """
               G-Code-Kommando: VORTAC_CALIBRATE [SAMPLES=<Anzahl>] [SPEED=<Wert>]
@@ -185,6 +295,50 @@ class VortacGrabber:
         configfile.remove_section(self.name)
         table_json = json.dumps(self.table)
         configfile.set(self.name, 'lookup_table', table_json)
+
+    def cmd_set_save_doc_pos(self, gcmd):
+        # 1) Zugriff auf ToolHead
+        toolhead = self.printer.lookup_object('toolhead')
+        # 2) Aktuelle Positionen abfragen (X, Y, Z, E)
+        pos = toolhead.get_position()
+        # 3) configfile holen
+        configfile = self.printer.lookup_object('configfile')
+
+        # 4) locally save to make testing easier
+        self.params['params_x_doc_pos'] = pos[0]
+        self.params['params_y_doc_pos'] = pos[1]
+        self.params['params_z_doc_pos'] = pos[2]
+
+        #node test if saveing multiple different values if the last Value gets stored on saveConfig
+        # 5) In die Config schreiben
+        configfile.set(self.name, 'params_x_doc_pos', pos[0])
+        configfile.set(self.name, 'params_y_doc_pos', pos[1])
+        configfile.set(self.name, 'params_z_doc_pos', pos[2])
+        # Optional: Save Config, z.B. mit
+        # SAVE_CONFIG RESTART=0
+
+    def cmd_test_tool_doc_pos(self, gcmd):
+        self.run_gcode('vortac.tool_doc_test_code',self.tool_doc_test_code, {}, gcmd)
+
+    def cmd_tool_doc_load(self, gcmd):
+            self.run_gcode('vortac.tool_doc_load', self.tool_doc_load, {}, gcmd)
+
+    def cmd_tool_doc_unload(self, gcmd):
+        self.run_gcode('vortac.tool_doc_unload', self.tool_doc_unload, {}, gcmd)
+
+    def run_gcode(self, name, template, extra_context, gcmd):
+        curtime = self.printer.get_reactor().monotonic()
+        context = {
+            **template.create_template_context(), #generates default context
+            'vortac_grabber': self.get_status(curtime),
+        }
+        gcmd.respond_info(f"context: {context}")
+        template.run_gcode_from_command(context)
+
+    def get_status(self, eventtime):
+        return {**self.params,
+                'name': self.name,
+                }
 
     def _do_calibration(self, gcmd, sample_count, speed):
         """
@@ -319,7 +473,22 @@ class VortacGrabber:
         gcmd.respond_info(f"bootsequence test max distance: {max(vals) - min(vals)}")
         return max(vals) - min(vals) <= tol
 
+
+def get_params_dict(config):
+    result = {}
+    for option in config.get_prefix_options('params_'):
+        try:
+            result[option] = ast.literal_eval(config.get(option))
+        except ValueError as e:
+            raise config.error(
+                "Option '%s' in section '%s' is not a valid literal" % (
+                    option, config.get_name()))
+    return result
+
 def load_config(config):
+    return VortacGrabber(config)
+
+def load_config_prefix(config):
     return VortacGrabber(config)
 
 #push script via
