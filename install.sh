@@ -5,9 +5,8 @@
 # - Deploys Python scripts into Klipper extras
 # ---------------------------------------------
 set -euo pipefail
-
 # Paths for Klipper Python modules\ nKLIPPER_DIR="$HOME/klipper"
-TARGET_PY="$KLIPPER_DIR/klippy/extras"
+TARGET_PY="~klipper/klippy/extras"
 SOURCE_PY="$(pwd)/klipper-scripts"
 
 # Paths for Klipper configuration files
