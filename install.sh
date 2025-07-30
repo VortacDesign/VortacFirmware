@@ -10,9 +10,9 @@ TARGET_PY="~klipper/klippy/extras"
 SOURCE_PY="$(pwd)/klipper-scripts"
 
 # Paths for Klipper configuration files
-CONFIG_SOURCE="$(pwd)/klipper-configs"
+CONFIG_SOURCE="$(pwd)/klipper-configs/vortac_configs"
 # Customize the target folder name as needed
-CONFIG_TARGET="$HOME/printer_data/config/VortacConfig"
+CONFIG_TARGET="$HOME/printer_data/config/vortac_configs"
 
 # Helper for sudo (ensure NOPASSWD for mount/editing fstab or run as root)
 SUDO="sudo"

@@ -8,7 +8,7 @@ set -euo pipefail
 
 # Paths (must match your install.sh)
 CONFIG_SOURCE="$(pwd)/klipper-configs"
-CONFIG_TARGET="~/printer_data/config/vortac"
+CONFIG_TARGET="~/printer_data/config/vortac_configs"
 
 # Helper for sudo (ensure NOPASSWD for mount/editing fstab or run as root)
 SUDO="sudo"
