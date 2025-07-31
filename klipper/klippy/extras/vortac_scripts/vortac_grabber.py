@@ -1,4 +1,4 @@
-from . import angle
+from klipper.klippy.extras import angle
 import time
 import json
 import bisect
