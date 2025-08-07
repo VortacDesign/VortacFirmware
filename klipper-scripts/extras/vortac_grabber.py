@@ -1,10 +1,7 @@
-from .. import angle
 import time
 import json
 import bisect
 import ast
-import threading
-
 
 class VortacGrabber:
     def __init__(self, config):
@@ -490,7 +487,3 @@ def load_config(config):
 
 def load_config_prefix(config):
     return VortacGrabber(config)
-
-#push script via
-#right klick on klippy folder open in terminal
-#pase

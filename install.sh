@@ -1,73 +1,54 @@
 #!/usr/bin/env bash
-# ---------------------------------------------
-# Vortac Install Script (install.sh)
-# - Ensures persistent bind-mount of your custom config folder
-# - Ensures persistent bind-mount of your custom Python scripts folder
-# ---------------------------------------------
+# ----------------------------------------------------------
+# Vortac installer
+# - Copies all addons from klipper-scripts/extras → $KLIPPER_DIR/klippy/extras
+# - Keeps configs bind-mounted for persistence
+# ----------------------------------------------------------
 set -euo pipefail
 
-# Repository root (script location)
-REPO_DIR="$(pwd)"
-# Klipper installation directory (absolute path)
-KLIPPER_DIR="$HOME/klipper"
+# Absolute path to this repo (directory of this script)
+REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 
-# Paths for Configurations
-CONFIG_SOURCE="$REPO_DIR/klipper-configs/vortac_configs"
-CONFIG_TARGET="$HOME/printer_data/config/vortac_configs"
+# Klipper install dir; override with: KLIPPER_DIR=/path ./install.sh
+KLIPPER_DIR="${KLIPPER_DIR:-$HOME/klipper}"
 
-# Paths for Python Scripts
-SCRIPTS_SOURCE="$REPO_DIR/klipper/klippy/extras/vortac_scripts"
-SCRIPTS_TARGET="$KLIPPER_DIR/klippy/extras/vortac_scripts"
+# Sources
+SCRIPTS_SRC="$REPO_DIR/klipper-scripts/extras"
+CONFIG_SRC="${CONFIG_SRC:-$REPO_DIR/klipper-configs/vortac_configs}"
 
-# Helper for sudo (ensure NOPASSWD for mount and fstab edits)
-SUDO="sudo"
+# Targets
+SCRIPTS_DST="$KLIPPER_DIR/klippy/extras"
+CONFIG_DST="${CONFIG_DST:-$HOME/printer_data/config/vortac_configs}"
 
-echo "🔧 Installing Vortac custom modules and configuration..."
+echo "🔧 Syncing extras → $SCRIPTS_DST"
+mkdir -p "$SCRIPTS_DST"
 
-# 1) Ensure target directories exist
-mkdir -p "$CONFIG_TARGET"
-mkdir -p "$SCRIPTS_TARGET"
-
-# 2) Fix ownership so 'pi' can read/write
-echo "🔒 Setting ownership of source directories"
-$SUDO chown -R pi:pi "$CONFIG_SOURCE"
-$SUDO chown -R pi:pi "$SCRIPTS_SOURCE"
-
-# 3) Persistently register bind-mounts in /etc/fstab if not present
-FSTAB_CFG="$CONFIG_SOURCE $CONFIG_TARGET none bind 0 0"
-FSTAB_SCR="$SCRIPTS_SOURCE $SCRIPTS_TARGET none bind 0 0"
-if ! $SUDO grep -qF "$FSTAB_CFG" /etc/fstab; then
-  echo "🔒 Adding config bind-mount to /etc/fstab"
-  echo "$FSTAB_CFG" | $SUDO tee -a /etc/fstab
+# Copy/overwrite addon scripts (no sudo needed if you own the target)
+if [[ -w "$SCRIPTS_DST" ]]; then
+  rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' "$SCRIPTS_SRC/" "$SCRIPTS_DST/"
 else
-  echo "🔄 Config fstab entry already exists"
-fi
-if ! $SUDO grep -qF "$FSTAB_SCR" /etc/fstab; then
-  echo "🔒 Adding scripts bind-mount to /etc/fstab"
-  echo "$FSTAB_SCR" | $SUDO tee -a /etc/fstab
-else
-  echo "🔄 Scripts fstab entry already exists"
+  sudo rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' "$SCRIPTS_SRC/" "$SCRIPTS_DST/"
 fi
 
-# 4) Mount the config and scripts directories (idempotent)
-if ! mountpoint -q "$CONFIG_TARGET"; then
-  echo "🔗 Mounting configs: '$CONFIG_SOURCE' → '$CONFIG_TARGET'"
-  $SUDO mount --bind "$CONFIG_SOURCE" "$CONFIG_TARGET"
-else
-  echo "🔄 '$CONFIG_TARGET' is already mounted"
-fi
-if ! mountpoint -q "$SCRIPTS_TARGET"; then
-  echo "🔗 Mounting scripts: '$SCRIPTS_SOURCE' → '$SCRIPTS_TARGET'"
-  $SUDO mount --bind "$SCRIPTS_SOURCE" "$SCRIPTS_TARGET"
-else
-  echo "🔄 '$SCRIPTS_TARGET' is already mounted"
+echo "🔗 Ensuring bind-mount for configs"
+sudo mkdir -p "$CONFIG_DST"
+# Make sure you can edit your local config source
+sudo chown -R "$USER":"$USER" "$CONFIG_SRC" || true
+
+# Add persistent bind-mount to /etc/fstab if missing
+FSTAB_LINE="$CONFIG_SRC $CONFIG_DST none bind 0 0"
+if ! grep -qsF "$FSTAB_LINE" /etc/fstab; then
+  echo "$FSTAB_LINE" | sudo tee -a /etc/fstab >/dev/null
 fi
 
-# 5) Summary
-cat <<EOF
-✅ Installation complete.
-• Configs bound at '$CONFIG_TARGET' (persistent via fstab).
-• Python scripts bound at '$SCRIPTS_TARGET' (persistent via fstab).
+# Mount (or remount) configs
+if mountpoint -q "$CONFIG_DST"; then
+  sudo mount -o remount,bind "$CONFIG_DST"
+else
+  sudo mount "$CONFIG_DST"
+fi
 
-Please restart Klipper to apply changes.
-EOF
+echo "✅ Done.
+• Extras synced to: $SCRIPTS_DST
+• Configs bind-mounted at: $CONFIG_DST (persistent via /etc/fstab)
+Please restart Klipper."
