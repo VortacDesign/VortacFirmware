@@ -3,6 +3,8 @@ import json
 import bisect
 import ast
 
+#vortac_grabber V0.1
+
 class VortacGrabber:
     def __init__(self, config):
         try:

@@ -1,39 +1,50 @@
 #!/usr/bin/env bash
 # ----------------------------------------------------------
-# Vortac installer
-# - Copies all addons from klipper-scripts/extras → $KLIPPER_DIR/klippy/extras
-# - Keeps configs bind-mounted for persistence
+# Vortac installer (safe)
+# - Copies your addons from klipper-scripts/extras → $KLIPPER_DIR/klippy/extras
+#   without deleting core files (default: only items matching 'vortac_*')
+# - Keeps configs bind-mounted (persistent via /etc/fstab)
 # ----------------------------------------------------------
 set -euo pipefail
 
-# Absolute path to this repo (directory of this script)
+# Paths (override via env if needed)
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
-
-# Klipper install dir; override with: KLIPPER_DIR=/path ./install.sh
 KLIPPER_DIR="${KLIPPER_DIR:-$HOME/klipper}"
 
-# Sources
-SCRIPTS_SRC="$REPO_DIR/klipper-scripts/extras"
-CONFIG_SRC="${CONFIG_SRC:-$REPO_DIR/klipper-configs/vortac_configs}"
+# Addons
+SRC="$REPO_DIR/klipper-scripts/extras"
+DST="$KLIPPER_DIR/klippy/extras"
+# Copy pattern: copy only your files/folders by default (safer).
+# Set PATTERN='*.py' to copy all .py files, or PATTERN='*' for everything.
+PATTERN="${PATTERN:-vortac_*}"
+# Dry-run (0/1) to preview what would be copied
+DRY_RUN="${DRY_RUN:-0}"
 
-# Targets
-SCRIPTS_DST="$KLIPPER_DIR/klippy/extras"
+# Configs (bind-mount)
+CONFIG_SRC="${CONFIG_SRC:-$REPO_DIR/klipper-configs/vortac_configs}"
 CONFIG_DST="${CONFIG_DST:-$HOME/printer_data/config/vortac_configs}"
 
-echo "🔧 Syncing extras → $SCRIPTS_DST"
-mkdir -p "$SCRIPTS_DST"
+echo "🔧 Preparing…"
+[[ -d "$SRC" ]] || { echo "❌ Source not found: $SRC"; exit 1; }
+mkdir -p "$DST"
 
-# Copy/overwrite addon scripts (no sudo needed if you own the target)
-if [[ -w "$SCRIPTS_DST" ]]; then
-  rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' "$SCRIPTS_SRC/" "$SCRIPTS_DST/"
-else
-  sudo rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' "$SCRIPTS_SRC/" "$SCRIPTS_DST/"
-fi
+# Use sudo only if destination not writable
+SUDO=""
+[[ -w "$DST" ]] || SUDO="sudo"
 
-echo "🔗 Ensuring bind-mount for configs"
-sudo mkdir -p "$CONFIG_DST"
-# Make sure you can edit your local config source
-sudo chown -R "$USER":"$USER" "$CONFIG_SRC" || true
+# rsync setup: include only your files/folders, never delete on target
+RSYNC_OPTS=(-a --exclude='__pycache__/' --exclude='*.pyc')
+RSYNC_FILTERS=(--include='*/' --include="${PATTERN}" --include="${PATTERN}/**" --exclude='*')
+[[ "$DRY_RUN" == "1" ]] && RSYNC_OPTS+=(-n -v)
+
+echo "📥 Copying addons (${PATTERN}) from $SRC → $DST (no deletes)"
+$SUDO rsync "${RSYNC_OPTS[@]}" "${RSYNC_FILTERS[@]}" "$SRC/" "$DST/"
+
+# ---------------- Config bind-mount ----------------
+echo "🔗 Ensuring bind-mount for configs: $CONFIG_SRC → $CONFIG_DST"
+sudo mkdir -p "$CONFIG_SRC" "$CONFIG_DST"
+# make sure you can edit your local config source
+sudo chown -R "$USER:$USER" "$CONFIG_SRC" || true
 
 # Add persistent bind-mount to /etc/fstab if missing
 FSTAB_LINE="$CONFIG_SRC $CONFIG_DST none bind 0 0"
@@ -41,14 +52,15 @@ if ! grep -qsF "$FSTAB_LINE" /etc/fstab; then
   echo "$FSTAB_LINE" | sudo tee -a /etc/fstab >/dev/null
 fi
 
-# Mount (or remount) configs
+# Mount (or remount) the configs
 if mountpoint -q "$CONFIG_DST"; then
   sudo mount -o remount,bind "$CONFIG_DST"
 else
-  sudo mount "$CONFIG_DST"
+  # prefer fstab-based mount; fallback to direct bind if needed
+  sudo mount "$CONFIG_DST" || sudo mount --bind "$CONFIG_SRC" "$CONFIG_DST"
 fi
 
 echo "✅ Done.
-• Extras synced to: $SCRIPTS_DST
-• Configs bind-mounted at: $CONFIG_DST (persistent via /etc/fstab)
-Please restart Klipper."
+• Addons copied to: $DST  (core files untouched)
+• Configs bind-mounted at: $CONFIG_DST (persist via /etc/fstab)
+→ Restart Klipper:  sudo systemctl restart klipper
