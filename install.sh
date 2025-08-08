@@ -1,66 +1,115 @@
 #!/usr/bin/env bash
 # ----------------------------------------------------------
-# Vortac installer (safe)
-# - Copies your addons from klipper-scripts/extras → $KLIPPER_DIR/klippy/extras
-#   without deleting core files (default: only items matching 'vortac_*')
-# - Keeps configs bind-mounted (persistent via /etc/fstab)
+# Vortac installer (symlink-first + auto-run on repo updates)
+# Repo layout:
+#   configs/vortac_configs/      -> symlinked to ~/printer_data/config/vortac_configs  (default)
+#   klippy/extras/*.py           -> symlinked into $KLIPPER_DIR/klippy/extras
+#
+# Env knobs:
+#   KLIPPER_DIR=/home/pi/klipper
+#   PATTERN='*.py'            # which addon files to link from klippy/extras
+#   CONFIG_MODE=mount         # set to "mount" to use bind-mount for configs instead of symlink
+#   TARGET_USER=pi            # user for systemd service (defaults to $USER)
 # ----------------------------------------------------------
 set -euo pipefail
 
-# Paths (override via env if needed)
+# --- Paths ---
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 KLIPPER_DIR="${KLIPPER_DIR:-$HOME/klipper}"
 
-# Addons
-SRC="$REPO_DIR/klipper-scripts/extras"
-DST="$KLIPPER_DIR/klippy/extras"
-# Copy pattern: copy only your files/folders by default (safer).
-# Set PATTERN='*.py' to copy all .py files, or PATTERN='*' for everything.
-PATTERN="${PATTERN:-vortac_*}"
-# Dry-run (0/1) to preview what would be copied
-DRY_RUN="${DRY_RUN:-0}"
+SCRIPTS_SRC="$REPO_DIR/klippy/extras"
+SCRIPTS_DST="$KLIPPER_DIR/klippy/extras"
+PATTERN="${PATTERN:-*.py}"
 
-# Configs (bind-mount)
-CONFIG_SRC="${CONFIG_SRC:-$REPO_DIR/klipper-configs/vortac_configs}"
-CONFIG_DST="${CONFIG_DST:-$HOME/printer_data/config/vortac_configs}"
+CONFIG_SRC="$REPO_DIR/configs/vortac_configs"
+CONFIG_DST="$HOME/printer_data/config/vortac_configs"
+CONFIG_MODE="${CONFIG_MODE:-symlink}"   # symlink | mount
 
-echo "🔧 Preparing…"
-[[ -d "$SRC" ]] || { echo "❌ Source not found: $SRC"; exit 1; }
-mkdir -p "$DST"
+TARGET_USER="${TARGET_USER:-$USER}"
 
-# Use sudo only if destination not writable
-SUDO=""
-[[ -w "$DST" ]] || SUDO="sudo"
+SERVICE_NAME="vortac-install"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+PATH_FILE="/etc/systemd/system/${SERVICE_NAME}.path"
 
-# rsync setup: include only your files/folders, never delete on target
-RSYNC_OPTS=(-a --exclude='__pycache__/' --exclude='*.pyc')
-RSYNC_FILTERS=(--include='*/' --include="${PATTERN}" --include="${PATTERN}/**" --exclude='*')
-[[ "$DRY_RUN" == "1" ]] && RSYNC_OPTS+=(-n -v)
+# Detect current branch (for the watcher)
+BRANCH="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo development)"
 
-echo "📥 Copying addons (${PATTERN}) from $SRC → $DST (no deletes)"
-$SUDO rsync "${RSYNC_OPTS[@]}" "${RSYNC_FILTERS[@]}" "$SRC/" "$DST/"
+echo "🔧 Repo:     $REPO_DIR"
+echo "🔧 KLIPPER:  $KLIPPER_DIR"
+echo "🔧 Branch:   $BRANCH"
+echo "🔧 Pattern:  $PATTERN"
+echo "🔧 Configs:  $CONFIG_MODE ($CONFIG_SRC → $CONFIG_DST)"
 
-# ---------------- Config bind-mount ----------------
-echo "🔗 Ensuring bind-mount for configs: $CONFIG_SRC → $CONFIG_DST"
-sudo mkdir -p "$CONFIG_SRC" "$CONFIG_DST"
-# make sure you can edit your local config source
-sudo chown -R "$USER:$USER" "$CONFIG_SRC" || true
+# --- sanity checks ---
+[[ -d "$SCRIPTS_SRC" ]] || { echo "❌ Missing $SCRIPTS_SRC"; exit 1; }
+[[ -d "$KLIPPER_DIR/klippy" ]] || { echo "❌ KLIPPER_DIR seems wrong: $KLIPPER_DIR (no klippy/)"; exit 1; }
 
-# Add persistent bind-mount to /etc/fstab if missing
-FSTAB_LINE="$CONFIG_SRC $CONFIG_DST none bind 0 0"
-if ! grep -qsF "$FSTAB_LINE" /etc/fstab; then
-  echo "$FSTAB_LINE" | sudo tee -a /etc/fstab >/dev/null
-fi
+# --- link addons (per-file symlinks) ---
+echo "🔗 Linking addons into $SCRIPTS_DST"
+mkdir -p "$SCRIPTS_DST"
+shopt -s nullglob
+COUNT=0
+# link only files matching PATTERN at top-level of extras (adjust find if you have subfolders)
+for f in "$SCRIPTS_SRC"/$PATTERN; do
+  base="$(basename "$f")"
+  ln -sfn "$f" "$SCRIPTS_DST/$base"
+  COUNT=$((COUNT+1))
+done
+echo "   → linked $COUNT file(s)."
 
-# Mount (or remount) the configs
-if mountpoint -q "$CONFIG_DST"; then
-  sudo mount -o remount,bind "$CONFIG_DST"
+# --- configs: symlink (default) or bind-mount (fallback) ---
+if [[ "$CONFIG_MODE" == "symlink" ]]; then
+  echo "🔗 Symlinking configs: $CONFIG_DST → $CONFIG_SRC"
+  mkdir -p "$(dirname "$CONFIG_DST")"
+  ln -sfn "$CONFIG_SRC" "$CONFIG_DST"
 else
-  # prefer fstab-based mount; fallback to direct bind if needed
-  sudo mount "$CONFIG_DST" || sudo mount --bind "$CONFIG_SRC" "$CONFIG_DST"
+  echo "🪢 Bind-mounting configs (requires sudo)"
+  sudo mkdir -p "$CONFIG_SRC" "$CONFIG_DST"
+  sudo chown -R "$TARGET_USER":"$TARGET_USER" "$CONFIG_SRC" || true
+  FSTAB_LINE="$CONFIG_SRC $CONFIG_DST none bind 0 0"
+  if ! grep -qsF "$FSTAB_LINE" /etc/fstab; then
+    echo "$FSTAB_LINE" | sudo tee -a /etc/fstab >/dev/null
+  fi
+  if mountpoint -q "$CONFIG_DST"; then
+    sudo mount -o remount,bind "$CONFIG_DST"
+  else
+    sudo mount "$CONFIG_DST" || sudo mount --bind "$CONFIG_SRC" "$CONFIG_DST"
+  fi
 fi
 
-echo "✅ Done.
-• Addons copied to: $DST  (core files untouched)
-• Configs bind-mounted at: $CONFIG_DST (persist via /etc/fstab)
-→ Restart Klipper:  sudo systemctl restart klipper
+# --- systemd path trigger (auto-run this script after repo updates) ---
+echo "🛠  Installing systemd watcher"
+sudo tee "$SERVICE_FILE" >/dev/null <<EOF
+[Unit]
+Description=Run Vortac installer after repo updates
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=$TARGET_USER
+WorkingDirectory=$REPO_DIR
+ExecStart=/bin/bash -lc '$REPO_DIR/install.sh'
+EOF
+
+sudo tee "$PATH_FILE" >/dev/null <<EOF
+[Unit]
+Description=Watch Vortac repo for updates
+
+[Path]
+PathChanged=$REPO_DIR/.git/refs/heads/$BRANCH
+PathChanged=$REPO_DIR/.git/packed-refs
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now "${SERVICE_NAME}.path"
+
+cat <<'MSG'
+✅ Setup complete.
+• Addons are symlinked into Klipper's extras.
+• Configs are symlinked (or bind-mounted if CONFIG_MODE=mount).
+• Auto-installer is active and will re-run after each repo update.
+→ Restart Klipper when convenient:  sudo systemctl restart klipper
+MSG
