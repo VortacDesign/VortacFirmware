@@ -1,7 +1,9 @@
 import time
 import json
 import bisect
+import statistics
 import ast
+import math
 
 #vortac_grabber V0.4
 
@@ -23,7 +25,7 @@ class VortacGrabber:
 
         self.disengage_pos = config.getint('disengage_pos', default=0)
         self.engage_pos = config.getint('engage_pos', default=130)
-        self.zero_pos_offset = config.getint('zero_pos_offset', default=0)
+        self.zero_pos_offset = config.getfloat('zero_pos_offset', default=0.0)
 
         self.params = get_params_dict(config)
         config.get_prefix_options('params_')
@@ -59,8 +61,8 @@ class VortacGrabber:
         gcode.register_command("VORTAC_CALIBRATE", self.cmd_vortac_calibrate,
                                desc=self.cmd_vortac_calibrate_help)
 
-        gcode.register_command("VORTAC_CALIBRATE_BULK", self.cmd_bulk_vortac_calibrate,
-                               desc=self.cmd_vortac_calibrate_help)
+        gcode.register_command("VORTAC_SET_ZERO", self.cmd_vortac_set_zero)
+
 
         gcode.register_command("VORTAC_MOVE", self.cmd_simple_move,
                                desc=None)
@@ -80,220 +82,353 @@ class VortacGrabber:
         gcode.register_command("VORTAC_TEST_UNLOAD", self.cmd_tool_doc_unload,
                                desc=None)
 
+        gcode.register_command("VORTAC_MESURE", self.cmd_tool_messure,
+                               desc=None)
+
     cmd_vortac_calibrate_help = "Populates reference Value Table"
 
-    def cmd_simple_read(self,gcmd):
+    def cmd_vortac_set_zero(self,gcmd):
+        angle_result = self.cmd_simple_read(gcmd, include_offset=False)
+        zero_offset = (angle_result % 360.0 + 360.0) % 360.0
+        gcmd.respond_info("Set Z Offset: {}".format(zero_offset))
+        cfg = self.printer.lookup_object('configfile')
+        self.zero_pos_offset = zero_offset
+        cfg.set(self.name, 'zero_pos_offset', zero_offset)
+
+    def cmd_simple_read(self, gcmd, include_offset = True):
         angle_result = self.read_raw(gcmd)
-        current_angle = self._measured_to_true(gcmd,angle_result)
+        current_angle = self._measured_to_true(gcmd, angle_result, include_offset= include_offset)
         gcmd.respond_info("Current Raw Angle={} and looked up actual angle {}".format(angle_result, current_angle))
-        return angle_result
+        return current_angle
 
-    def _measured_to_true(self, gcmd, measured):
-        """
-        Interpoliert aus self.table den trueAngle zum gegebenen measuredAngle,
-        berücksichtigt den Wrap-Around bei 360°.
-        """
-        # sortiere nach measuredAngle
-        table = sorted(self.table, key=lambda x: x[1])
-        measured_list = [m for _, m in table]
-        true_list = [t for t, _ in table]
+    def cmd_tool_messure(self, gcmd):
+        # Args & handles
 
-        measured = measured % 360.0
+        samples = gcmd.get_int('SAMPLES', default=90)
+        speed = gcmd.get_float('SPEED', default=60.0)
+        toolhead = self.printer.lookup_object('toolhead')
+        force_mv = self.printer.lookup_object('force_move')
+        stepper = self.angle_sensor.calibration.mcu_stepper
 
-        # clamp (optional)
-        if measured <= measured_list[0]:
-            return true_list[0]
-        if measured >= measured_list[-1]:
-            return true_list[-1]
+        step = 360.0 / float(samples)
 
-        # finde Index
-        idx = bisect.bisect_left(measured_list, measured)
-        i0 = (idx - 1) % len(measured_list)
-        i1 = idx % len(measured_list)
+        rawPairs = []
+        lutPairs = []
+        finalPairs = []
 
-        m0, m1 = measured_list[i0], measured_list[i1]
-        t0, t1 = true_list[i0], true_list[i1]
+        gcmd.respond_info(f"{samples} Samples for Testing")
 
-        # Wrap-Around im measured-Bereich
-        if m1 < m0:
-            m1 += 360.0
-            if measured < m0:
-                measured += 360.0
+        for i in range(samples):
+            force_mv.manual_move(stepper, +step, speed)
+            toolhead.dwell(0.05)
+            angle_result = self.read_raw(gcmd)
+            pos = self._measured_to_true(gcmd, angle_result, include_offset= False)
+            posoff = self._measured_to_true(gcmd, angle_result, include_offset= True)
 
-        # Wrap-Around im true-Bereich
-        if t1 < t0:
-            t1 += 360.0
-
-        # lineare Interpolation
-        frac = (measured - m0) / (m1 - m0)
-        true_interp = t0 + frac * (t1 - t0)
-
-        # Ergebnis zurück in [0,360)
-        return ((true_interp % 360.0) + self.zero_pos_offset)
-
-    def cmd_simple_move(self, gcmd, target_true= 0.0, mode = 'shortest', threshold= 2.0):
-        """
-        G-Code: VORTAC_MOVE TARGET=<Winkel> [MODE=shortest|cw|ccw] [SPEED=<v>]
-        Fährt nur im gewünschten Modus:
-          - shortest  (Standard): kürzester Weg (±max 180°)
-          - cw        : nur im Uhrzeigersinn (0→360, immer +)
-          - ccw       : nur gegen den Uhrzeigersinn (360→0, immer -)
-        """
-        try:
-            # 1) Argumente
-            target_true = gcmd.get_float('TARGET', default=target_true)
-            speed = gcmd.get_float('SPEED', default=self.speed)
-            mode = gcmd.get('MODE', default=mode).lower()
-            threshold = gcmd.get_float('THRESHOLD', default=threshold)
-
-            # 2) Aktuellen wahren Winkel ermitteln
-            measured = self.cmd_simple_read(gcmd)
-            current_true = self._measured_to_true(gcmd, measured)
-            toolhead = self.printer.lookup_object('toolhead')
-
-            # 3) Delta berechnen je Modus
-            if mode in ('cw', 'clockwise'):
-                # nur vorwärts: modulo 360, immer positiv
-                delta = (target_true - current_true) % 360.0
-            elif mode in ('ccw', 'counterclockwise'):
-                # nur rückwärts: modulo 360, immer negativ
-                delta = -((current_true - target_true) % 360.0)
-            else:
-                # kürzester Weg: ± maximal 180°
-                # (target - current + 180) mod 360 - 180 → in [-180,180]
-                delta = ((target_true - current_true + 180.0) % 360.0) - 180.0
-
-            reduced_move = delta*0.8
-
-            gcmd.respond_info(
-                f"MODE={mode}  Target={target_true:.2f}°  threshold={threshold}"
-                f"Current={current_true:.2f}°  ΔMove={delta:.2f}°"
-                f"actual move will be {reduced_move:.2f}°"
-            )
-
-            gcmd.respond_info(f"move exeeds threshold")
-            move = self.angle_sensor.printer.lookup_object('force_move').manual_move
-            mcu_stepper = self.angle_sensor.calibration.mcu_stepper
-            move(mcu_stepper, reduced_move, speed)
+            rawPairs.append((i*step, angle_result))
+            lutPairs.append((i*step, pos))
+            finalPairs.append((i * step, posoff))
             toolhead.wait_moves()
 
-            if abs(reduced_move) > threshold:
-                self.cmd_simple_move(gcmd, target_true=target_true, mode=mode, threshold=threshold)
-            else:
-                gcmd.respond_info(f"finished Move Commands!")
-
-
-        except Exception as e:
-            gcmd.respond_error(f"Error in simple_move: {e}")
-
-    def cmd_bulk_vortac_calibrate(self, gcmd):
-        """
-              G-Code-Kommando: VORTAC_CALIBRATE [SAMPLES=<Anzahl>] [SPEED=<Wert>]
-              Starte Kalibrierung. Führt auf einem eigenen Thread aus, damit Klippy nicht blockiert.
-        """
-        # Parameter auslesen
-        sample_count = gcmd.get_int('SAMPLES', default=self.sample_count)
-        speed = gcmd.get_int('SPEED', default=self.speed)
-        # Start data collection
-
-        """
-            Starting Bulk Sensor Reading for Current Angle Sensor
-            Collecting Results in msgs [] Bulk Reading continues untill handle_batch returns false
-            this is the case when thin functions sets the is_finished flag to true
-        """
-        msgs = []
-        is_finished = False
-
-
-        def handle_batch(msg):
-            if is_finished:
-                return False
-            msgs.append(msg)
-            return True
-
-        gcmd.respond_info("Startingh Bulk Mesorments for AngleSenseor")
-
-        self.angle_sensor.add_client(handle_batch)
-        steps_per_sample = float(self.steps_per_rev) / float(sample_count)
-        toolhead = self.printer.lookup_object('toolhead')
-        times = []
-
-        #Queue move commands
-        for i in range(sample_count):
-            start_query_time = toolhead.get_last_move_time() + 0.050
-            end_query_time = start_query_time + 0.050
-            times.append((start_query_time, end_query_time))
-            angle = (i * self.steps_per_rev / sample_count) % self.steps_per_rev
-            gcmd.respond_info("i={}, angle={:.3f}".format(i, angle))
-            move = self.angle_sensor.printer.lookup_object('force_move').manual_move
-            self.angle_stepper = self.angle_sensor.calibration.mcu_stepper
-            move(self.angle_stepper, steps_per_sample, speed)
-            toolhead.dwell(0.150)
-
-        toolhead.wait_moves()
-        # Finish data collection
-        is_finished = True
-        gcmd.respond_info("Finished mesurements for AngleSenseor")
-        gcmd.respond_info(f"Got {len(msgs)} and sample times {len(times)}")
-        cal = {}
-        step = 0
-
-        gcmd.respond_info(f"Sample Times: {times}")
-
-        for msg in msgs:
-            for query_time, pos in msg['data']:
-                # Add to step tracking
-                while step < len(times) and query_time > times[step][1]:
-                    step += 1
-                if step < len(times) and query_time >= times[step][0]:
-                    cal.setdefault(step, []).append(pos)
-
-        gcmd.respond_info("Checked messages")
-        gcmd.respond_info(f"cal dictionary: {cal}")
-
-        if len(cal) != len(times):
-            raise self.printer.command_error(
-                "Failed calibration - incomplete sensor data")
-        # fcal = {i: cal[i] for i in range(sample_count)}
-        # rcal = {sample_count - i - 1: cal[i + sample_count] for i in range(sample_count)}
-        #
-        # gcmd.respond_info(f"should get fcal und rcal")
-        # gcmd.respond_info(f"fcal: {fcal}")
-        # gcmd.respond_info(f"rcal: {rcal}")
-
+        gcmd.respond_info(f"rawPairs: {rawPairs}")
+        gcmd.respond_info(f"lutPairs: {lutPairs}")
+        gcmd.respond_info(f"finalPairs: {finalPairs}")
         return
-        """
-                Saves Results into config file as lookup_table
-        """
 
-        configfile = self.printer.lookup_object('configfile')
-        configfile.remove_section(self.name)
-        table_json = json.dumps(self.table)
-        configfile.set(self.name, 'lookup_table', table_json)
+    def _measured_to_true(self, gcmd, raw_deg, include_offset=True):
+        """
+        Map sensor reading (raw_deg) -> actual (linear) motor angle using LUT
+        stored as [(actual_deg, raw_deg)]. Wrap-aware interpolation + zero offset.
+        """
+        import bisect, json
+
+        def wrap360(v):  # robust wrap [0,360)
+            return (float(v) % 360.0 + 360.0) % 360.0
+
+        # 1) Fetch/parse LUT
+        table = self.table
+
+        if isinstance(table, str):  # if it came from config as JSON text
+            try:
+                table = json.loads(table)
+            except Exception:
+                table = None
+
+        if not table or len(table) < 2:
+            # No LUT -> just zero-adjust the raw reading
+            out = wrap360(float(raw_deg) - (getattr(self, 'zero_pos_offset', 0.0) if include_offset else 0.0))
+            return out
+
+        # 2) Normalize to floats and wrap into 0..360
+        norm = []
+        for entry in table:
+            try:
+                a, r = entry[0], entry[1]  # (actual, raw)
+                norm.append([wrap360(a), wrap360(r)])
+            except Exception:
+                pass
+        if len(norm) < 2:
+            out = wrap360(float(raw_deg) - (getattr(self, 'zero_pos_offset', 0.0) if include_offset else 0.0))
+            return out
+
+        # 3) Sort by measured/raw angle and dedupe identical bins
+        norm.sort(key=lambda x: x[1])
+        m, t = [], []
+        for a, r in norm:
+            if not m or abs(r - m[-1]) > 1e-9:
+                m.append(r);
+                t.append(a)
+        n = len(m)
+        if n < 2:
+            out = wrap360(float(raw_deg) - (getattr(self, 'zero_pos_offset', 0.0) if include_offset else 0.0))
+            return out
+
+        # 4) Locate neighbors on circular domain
+        x = wrap360(float(raw_deg))
+        i = bisect.bisect_right(m, x)
+        i0, i1 = (i - 1) % n, i % n
+        m0, m1 = m[i0], m[i1]
+        t0, t1 = t[i0], t[i1]
+
+        # 5) Unwrap the segment across 360 for linear interpolation
+        xm = x
+        if m1 <= m0:
+            m1 += 360.0
+            if xm < m0:
+                xm += 360.0
+        if t1 <= t0:
+            t1 += 360.0
+
+        # 6) Interpolate (guard zero-length)
+        if abs(m1 - m0) < 1e-12:
+            out = t0
+        else:
+            frac = (xm - m0) / (m1 - m0)
+            out = t0 + frac * (t1 - t0)
+
+        # 7) Apply zero offset and wrap
+        if include_offset:
+            out -= getattr(self, 'zero_pos_offset', 0.0)
+        return wrap360(out)
+
+    def cmd_simple_move(self, gcmd, target_true=0.0, mode='shortest', threshold=8.0):
+        """
+        G-Code: VORTAC_MOVE TARGET=<Angle> [MODE=shortest|cw|ccw] [SPEED=<v>]
+                [TOL=<deg>] [OVERSHOOT_MARGIN=<deg>] [GUARD=<deg>]
+                [MIN_STEP=<deg>] [MAX_STEP=<deg>] [K=<gain>]
+                [MAX_ITERS=<n>] [FINE_SPEED=<v>]
+        """
+        import math
+
+        # --- helpers ---
+        def wrap180(a):  # -> [-180, 180)
+            return ((a + 180.0) % 360.0) - 180.0
+
+        def err_by_mode(cur, tgt, m):
+            if m in ('cw', 'clockwise'):
+                return (tgt - cur) % 360.0  # [0..360)
+            if m in ('ccw', 'counterclockwise', 'cclockwise'):
+                return -((cur - tgt) % 360.0)  # (-360..0]
+            return wrap180(tgt - cur)  # shortest
+
+        # --- args ---
+        tgt = gcmd.get_float('TARGET', default=target_true)
+        mode = gcmd.get('MODE', default=mode).lower()
+        speed = gcmd.get_float('SPEED', default=self.speed)
+        tol = gcmd.get_float('TOL', default=threshold)
+
+        # Tunables
+        overshoot = gcmd.get_float('OVERSHOOT_MARGIN', default=2.0 * tol)
+        guard = gcmd.get_float('GUARD', default=max(1.0, 1.5 * tol))
+        min_step = gcmd.get_float('MIN_STEP', default=1.0)
+        max_step = gcmd.get_float('MAX_STEP', default=3.0)
+        kP = gcmd.get_float('K', default=0.8)
+        max_iters = gcmd.get_int('MAX_ITERS', default=25)
+        fine_speed = gcmd.get_float('FINE_SPEED', default=min(speed, 60.0))
+
+        toolhead = self.printer.lookup_object('toolhead')
+        force_move = self.printer.lookup_object('force_move').manual_move
+        stepper = self.angle_sensor.calibration.mcu_stepper
+
+        # --- read current TRUE angle (already LUT+offset corrected) ---
+        cur_true = float(self.cmd_simple_read(gcmd))
+
+        # --- coarse move: stop safely short of target ---
+        err = err_by_mode(cur_true, tgt, mode)
+        if abs(err) > tol:
+            buf = max(guard, overshoot)
+            sign = 1.0 if err >= 0.0 else -1.0
+            coarse = err - sign * buf
+            # enforce direction constraints
+            if mode in ('cw', 'clockwise') and coarse < 0:   coarse = 0.0
+            if mode in ('ccw', 'counterclockwise', 'cclockwise') and coarse > 0: coarse = 0.0
+            if abs(coarse) > 0.01:
+                force_move(stepper, coarse, speed)
+                toolhead.wait_moves()
+
+        # --- fine loop: never overshoot into the tolerance band ---
+        stable = 0
+        last_err = None
+        for i in range(max_iters):
+            cur_true = float(self.cmd_simple_read(gcmd))
+            err = err_by_mode(cur_true, tgt, mode)
+
+            # done? require two stable reads to debounce
+            if abs(err) <= tol:
+                stable += 1
+                if stable >= 2:
+                    gcmd.respond_info(f"Reached {cur_true:.2f}° (target {tgt:.2f}°, tol {tol}) in {i + 1} iters")
+                    return
+                toolhead.dwell(0.02)
+                continue
+            stable = 0
+
+            # Maximum safe step that cannot cross into the tolerance band.
+            # Leaves a 0.5*TOL cushion so we don't flirt with the boundary.
+            max_safe = max(0.0, abs(err) - 0.5 * tol)
+
+            # Proportional proposal, capped by MAX_STEP
+            proposal = max(-max_step, min(max_step, kP * err))
+
+            # Enforce direction constraint
+            if mode in ('cw', 'clockwise') and proposal < 0:   proposal = abs(proposal)
+            if mode in ('ccw', 'counterclockwise', 'cclockwise') and proposal > 0: proposal = -abs(proposal)
+
+            # Clip to never exceed the safe step
+            step = proposal
+            if abs(step) > max_safe:
+                step = math.copysign(max_safe, step)
+
+            # Respect a minimum step when far away, but NEVER exceed max_safe
+            if abs(step) < min_step and max_safe >= min_step:
+                step = math.copysign(min_step, step)
+            # If max_safe < min_step, we keep step ≤ max_safe (might be tiny) to avoid overshoot.
+
+            if abs(step) < 0.01:  # too tiny to matter; wait for the next read
+                toolhead.dwell(0.02)
+                continue
+
+            force_move(stepper, step, fine_speed)
+            toolhead.wait_moves()
+
+            # If error grew, soften gain a bit to damp oscillation
+            if last_err is not None and abs(err) > abs(last_err) + 0.1:
+                kP *= 0.7
+            last_err = err
+
+        gcmd.respond_info(f"Stopped after {max_iters} iters at {cur_true:.2f}° (target {tgt:.2f}°, err {err:.2f}°)")
 
     def cmd_vortac_calibrate(self, gcmd):
         """
-              G-Code-Kommando: VORTAC_CALIBRATE [SAMPLES=<Anzahl>] [SPEED=<Wert>]
-              Starte Kalibrierung. Führt auf einem eigenen Thread aus, damit Klippy nicht blockiert.
+        VORTAC_CALIBRATE [SAMPLES=<count>] [SPEED=<units/s>]
+        Assumes msg['data'] == [(time, angle_rad_x1e4), ...] (Klipper scale).
+        Saves one LUT: pairs_deg = [[true_deg, measured_deg], ...]
         """
-        # Parameter auslesen
-        sample_count = gcmd.get_int('SAMPLES', default=self.sample_count)
-        speed = gcmd.get_int('SPEED', default=self.speed)
-        # Evtl. Warnung, wenn Datei schon existiert?
+        import math, json
+        RAD2DEG = 180.0 / math.pi
 
-        gcmd.respond_info(
-            "Starte Winkelsensor-Kalibrierung: {} Samples, Speed {}".format(sample_count, speed
-                                                                            ))
-        # Starte Thread, damit Klippy-Scheduler nicht blockiert:
+        def cmean(vals):
+            # circular mean in degrees (handles wrap at 360)
+            sx = sum(math.cos(math.radians(v)) for v in vals)
+            sy = sum(math.sin(math.radians(v)) for v in vals)
+            if sx == 0 and sy == 0:
+                return vals[-1]
+            return (math.degrees(math.atan2(sy, sx)) % 360.0 + 360.0) % 360.0
 
-        self._do_calibration(gcmd, sample_count, speed)
+        samples = gcmd.get_int('SAMPLES', default=90)
+        speed = gcmd.get_float('SPEED', default=50.0)
 
-        # Speichere in CSV: angle,raw
+        toolhead = self.printer.lookup_object('toolhead')
+        force_mv = self.printer.lookup_object('force_move')
+        stepper = self.angle_sensor.calibration.mcu_stepper
 
-        configfile = self.printer.lookup_object('configfile')
-        configfile.remove_section(self.name)
-        table_json = json.dumps(self.table)
-        configfile.set(self.name, 'lookup_table', table_json)
+        step = 360.0 / float(samples)
+
+        # --- collect bulk angle messages ---
+        msgs, done = [], False
+
+        def cb(msg):
+            if done: return False
+            if 'data' in msg: msgs.append(msg)
+            return True
+
+        try:
+            try:
+                cid = self.angle_sensor.add_client(cb)
+            except TypeError:
+                cid = cb;
+                self.angle_sensor.add_client(cb)
+
+            # Build time windows + bin map (forward then reverse)
+            times, idx_map = [], []
+            toolhead.dwell(0.05)
+
+            # forward pass
+            for i in range(samples):
+                force_mv.manual_move(stepper, +step, speed)
+                toolhead.dwell(0.10)
+                end = toolhead.get_last_move_time()
+                times.append((end - 0.09, end));
+                idx_map.append(i)
+
+            # reverse pass (mapped onto the same angle bins)
+            for j in range(samples):
+                force_mv.manual_move(stepper, -step, speed)
+                toolhead.dwell(0.10)
+                end = toolhead.get_last_move_time()
+                times.append((end - 0.09, end));
+                idx_map.append(samples - 1 - j)
+
+            toolhead.wait_moves()
+        finally:
+            done = True
+            for r in ('remove_client', 'del_client'):
+                if hasattr(self.angle_sensor, r):
+                    try:
+                        getattr(self.angle_sensor, r)(cid)
+                    except Exception:
+                        pass
+                    break
+
+        # --- convert to degrees, flatten, sort by time ---
+        pts = []
+        for msg in msgs:
+            for t, raw in msg['data']:  # (time, angle_rad_x1e4)
+                ang_deg = (float(raw) / 10000.0) * RAD2DEG
+                pts.append((float(t), ang_deg % 360.0))
+        if not pts:
+            raise self.printer.command_error("No valid samples from angle stream.")
+        pts.sort(key=lambda x: x[0])
+
+        # --- bin samples into angle bins across both passes ---
+        bins = [[] for _ in range(samples)]
+        w = 0
+        for t, deg in pts:
+            while w < len(times) and t > times[w][1]:
+                w += 1
+            if w >= len(times): break
+            a, b = times[w]
+            if a <= t <= b:
+                bins[idx_map[w]].append(deg)
+
+        missing = [i for i, b in enumerate(bins) if not b]
+        if missing:
+            raise self.printer.command_error(f"Incomplete data, empty bins: {missing}")
+
+        measured = [cmean(b) for b in bins]  # averaged across fwd+rev
+
+        # Build single LUT (true = commanded sample angle; measured = sensor)
+        pairs_deg = [[round(i * step, 2), round(measured[i], 2)] for i in range(samples)]
+
+        # Save
+        cfg = self.printer.lookup_object('configfile')
+        try:
+            cfg.remove_section(self.name)
+        except Exception:
+            pass
+        cfg.set(self.name, 'lookup_table', json.dumps(pairs_deg))
+
+        gcmd.respond_info("Calibration OK. Saved single LUT 'pairs_deg' (true→measured).")
 
     def cmd_set_save_doc_pos(self, gcmd):
         # 1) Zugriff auf ToolHead
@@ -338,53 +473,6 @@ class VortacGrabber:
         return {**self.params,
                 'name': self.name,
                 }
-
-    def _do_calibration(self, gcmd, sample_count, speed):
-        """
-        Führt die eigentliche Kalibrierung aus:
-        - Dreht in sample_count Schritten (jeweils relative Bewegungen) insgesamt 360°
-        - Liest nach jedem Schritt den Sensorwert
-        - Speichert angle,raw in self.table und in Datei
-        """
-        try:
-            # Cleanup alte Tabelle
-            self.table = []
-            # Berechne Schrittzahl pro Sample:
-            # steps_per_rev ist total steps für 360°, sample_count Punkte → steps_per_sample evtl. float
-            steps_per_sample = float(self.steps_per_rev) / float(sample_count)
-            #estimated_move_duration = float(speed / sample_count) * 0.2
-            toolhead = self.printer.lookup_object('toolhead')
-            gcmd.respond_info(f"started calibration with {sample_count} Samples")
-            # Hauptloop:
-            for i in range(sample_count):
-
-                # Fahre relativen Schritt:
-                # `manual_move(self.mcu, step, speed)`: Die Doku sagt: manual_move(mcuname, step_count, speed)
-                # Übergebe hier den Stepperschrittnamen und step count. Der Typ (float) sollte funktionieren, Klipper rundet intern?
-                raw = self.read_raw(gcmd)
-                angle = (i * self.steps_per_rev / sample_count) % self.steps_per_rev
-                self.table.append((angle, raw))
-                gcmd.respond_info("i={}, angle={:.3f}, raw={}".format(i, angle, raw))
-
-                # Move-Befehl:
-                # force_move.manual_move: signature: manual_move(self, mcu_name, step_count, speed)
-                move = self.angle_sensor.printer.lookup_object('force_move').manual_move
-                self.angle_stepper = self.angle_sensor.calibration.mcu_stepper
-                move(self.angle_stepper, steps_per_sample, speed)
-
-                # Gibt Klipper kurz Zeit, um den move command zu beenden:
-
-                toolhead.wait_moves()
-
-
-            gcmd.respond_info("{}".format(self.table))
-            gcmd.respond_info("Kalibrierung komplett: {} Einträge".format(len(self.table)))
-
-
-
-        except Exception as e:
-            # Fehlerbehandlung
-            gcmd.respond_info("Fehler in Kalibrierung: {}".format(e))
 
     def _build_read_command(self, addr):
         """
@@ -447,31 +535,6 @@ class VortacGrabber:
         angle_deg = angle_raw * 360.0 / 16384.0
 
         return angle_deg
-
-    def _is_agc_stable(self,gcmd , n=5, tol=2):
-        """
-            Liest den sensor n mal aus um zu checken ob die werte constant sind
-            als kleine "warmup" routine
-        """
-        vals = []
-        for _ in range(n):
-            cmd = self._build_read_command(0x3FFC)
-            self.angle_sensor.spi.spi_transfer(cmd)
-            resp = self.angle_sensor.spi.spi_transfer([0x00, 0x00])['response']
-            word = (resp[0] << 8) | resp[1]
-            # 4) Bits auslesen
-            magl = bool(word & (1 << 11))
-            magh = bool(word & (1 << 10))
-            cof = bool(word & (1 << 9))
-            lf = bool(word & (1 << 8))
-            agc = word & 0xFF
-            vals.append(agc)
-            gcmd.respond_info(f"magnet low?: {magl}, magnet high ?:{magh}, cof: {cof}, lf:{lf}, bootsequence test Value {agc}")
-            time.sleep(0.05)
-
-        gcmd.respond_info(f"bootsequence test max distance: {max(vals) - min(vals)}")
-        return max(vals) - min(vals) <= tol
-
 
 def get_params_dict(config):
     result = {}
