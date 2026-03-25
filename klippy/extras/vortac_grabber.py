@@ -120,15 +120,14 @@ class VortacGrabber:
 
         for i in range(samples):
             force_mv.manual_move(stepper, +step, speed)
-            toolhead.dwell(0.05)
+            toolhead.wait_moves()  # <-- wait first
+            toolhead.dwell(0.05)  # <-- small settle time after the move completes
             angle_result = self.read_raw(gcmd)
-            pos = self._measured_to_true(gcmd, angle_result, include_offset= False)
-            posoff = self._measured_to_true(gcmd, angle_result, include_offset= True)
-
-            rawPairs.append((i*step, angle_result))
-            lutPairs.append((i*step, pos))
-            finalPairs.append((i * step, posoff))
-            toolhead.wait_moves()
+            pos = self._measured_to_true(gcmd, angle_result, include_offset=False)
+            posoff = self._measured_to_true(gcmd, angle_result, include_offset=True)
+            rawPairs.append([i * step, angle_result])
+            lutPairs.append([i * step, pos])
+            finalPairs.append([i * step, posoff])
 
         gcmd.respond_info(f"rawPairs: {rawPairs}")
         gcmd.respond_info(f"lutPairs: {lutPairs}")
@@ -211,17 +210,19 @@ class VortacGrabber:
             out -= getattr(self, 'zero_pos_offset', 0.0)
         return wrap360(out)
 
-    def cmd_simple_move(self, gcmd, target_true=0.0, mode='shortest', threshold=8.0):
+    def cmd_simple_move(self, gcmd, target_true=0.0, mode='shortest', threshold=2.0):
         """
-        G-Code: VORTAC_MOVE TARGET=<Angle> [MODE=shortest|cw|ccw] [SPEED=<v>]
-                [TOL=<deg>] [OVERSHOOT_MARGIN=<deg>] [GUARD=<deg>]
-                [MIN_STEP=<deg>] [MAX_STEP=<deg>] [K=<gain>]
-                [MAX_ITERS=<n>] [FINE_SPEED=<v>]
+        VORTAC_MOVE TARGET=<Angle> [MODE=shortest|cw|ccw] [SPEED=<v>]
+                    [TOL=<deg>] [OVERSHOOT_MARGIN=<deg>] [GUARD=<deg>]
+                    [MIN_STEP=<deg>] [MAX_STEP=<deg>] [K=<gain>]
+                    [MAX_ITERS=<n>] [FINE_SPEED=<v>]
+                    [READS=<n>] [READ_SETTLE=<s>] [NEAR_SWITCH=<deg>]
+                    [COARSE_RATIO=<0..1>]
         """
         import math
 
-        # --- helpers ---
-        def wrap180(a):  # -> [-180, 180)
+        # ---------- helpers ----------
+        def wrap180(a):  # [-180, 180)
             return ((a + 180.0) % 360.0) - 180.0
 
         def err_by_mode(cur, tgt, m):
@@ -231,46 +232,91 @@ class VortacGrabber:
                 return -((cur - tgt) % 360.0)  # (-360..0]
             return wrap180(tgt - cur)  # shortest
 
-        # --- args ---
+        def circ_median(vals):  # median on the circle for small N
+            vals = [((v % 360.0) + 360.0) % 360.0 for v in vals]
+            vals.sort()
+            n = len(vals)
+            if n == 1:
+                return vals[0]
+            # choose median of the tighter half-arc
+            best_span, best_med = 1e9, vals[0]
+            for i in range(n):
+                j = (i + n // 2) % n
+                a, b = vals[i], vals[j]
+                span = (b - a) if b >= a else (b + 360.0 - a)
+                if span < best_span:
+                    best_span = span
+                    mid_idx = i + (n // 2)
+                    best_med = vals[mid_idx] if mid_idx < n else vals[mid_idx - n]
+            return best_med
+
+        def read_true_quiet(n_reads=3, settle=0.012):
+            toolhead.dwell(settle)
+            vals = []
+            for _ in range(n_reads):
+                raw = self.read_raw(gcmd)
+                vals.append(self._measured_to_true(gcmd, raw, include_offset=True))
+                toolhead.dwell(0.004)
+            return float(circ_median(vals))
+
+        # ---------- args ----------
         tgt = gcmd.get_float('TARGET', default=target_true)
         mode = gcmd.get('MODE', default=mode).lower()
         speed = gcmd.get_float('SPEED', default=self.speed)
         tol = gcmd.get_float('TOL', default=threshold)
 
-        # Tunables
-        overshoot = gcmd.get_float('OVERSHOOT_MARGIN', default=2.0 * tol)
-        guard = gcmd.get_float('GUARD', default=max(1.0, 1.5 * tol))
-        min_step = gcmd.get_float('MIN_STEP', default=1.0)
-        max_step = gcmd.get_float('MAX_STEP', default=3.0)
-        kP = gcmd.get_float('K', default=0.8)
-        max_iters = gcmd.get_int('MAX_ITERS', default=25)
-        fine_speed = gcmd.get_float('FINE_SPEED', default=min(speed, 60.0))
+        # Tunables (good aggressive defaults)
+        overshoot = gcmd.get_float('OVERSHOOT_MARGIN', default=max(0.5 * tol, 0.5))
+        guard = gcmd.get_float('GUARD', default=max(1.0, tol))
+        min_step = gcmd.get_float('MIN_STEP', default=0.20)
+        max_step = gcmd.get_float('MAX_STEP', default=6.0)
+        kP = gcmd.get_float('K', default=1.4)
+        max_iters = gcmd.get_int('MAX_ITERS', default=40)
+        fine_speed = gcmd.get_float('FINE_SPEED', default=max(40.0, min(speed, 80.0)))
+        n_reads = gcmd.get_int('READS', default=2)
+        r_settle = gcmd.get_float('READ_SETTLE', default=0.010)
+        near_sw = gcmd.get_float('NEAR_SWITCH', default=max(2.0 * tol, 2.0))
+        coarse_ratio = gcmd.get_float('COARSE_RATIO', default=0.93)  # 90–95% is a good range
 
         toolhead = self.printer.lookup_object('toolhead')
-        force_move = self.printer.lookup_object('force_move').manual_move
+        force_mv = self.printer.lookup_object('force_move').manual_move
         stepper = self.angle_sensor.calibration.mcu_stepper
 
-        # --- read current TRUE angle (already LUT+offset corrected) ---
-        cur_true = float(self.cmd_simple_read(gcmd))
-
-        # --- coarse move: stop safely short of target ---
+        # ---------- Stage A: bold coarse hop (ratio) but leave a buffer ----------
+        cur_true = read_true_quiet(n_reads, r_settle)
         err = err_by_mode(cur_true, tgt, mode)
+
         if abs(err) > tol:
+            # propose to eat most of the error
+            proposed = err * coarse_ratio
+
+            # leave at least a safety buffer from the tolerance band
             buf = max(guard, overshoot)
-            sign = 1.0 if err >= 0.0 else -1.0
-            coarse = err - sign * buf
-            # enforce direction constraints
-            if mode in ('cw', 'clockwise') and coarse < 0:   coarse = 0.0
-            if mode in ('ccw', 'counterclockwise', 'cclockwise') and coarse > 0: coarse = 0.0
+            max_allow = max(0.0, abs(err) - buf)  # don't enter the band
+            step_mag = min(abs(proposed), max_allow)
+
+            # direction constraints
+            sgn = 1.0 if err >= 0.0 else -1.0
+            coarse = sgn * step_mag
+
+            if mode in ('cw', 'clockwise') and coarse < 0:
+                coarse = 0.0
+            if mode in ('ccw', 'counterclockwise', 'cclockwise') and coarse > 0:
+                coarse = 0.0
+
+            # clamp to something reasonable
             if abs(coarse) > 0.01:
-                force_move(stepper, coarse, speed)
+                coarse = max(-10 * max_step, min(10 * max_step, coarse))
+                force_mv(stepper, coarse, speed)
                 toolhead.wait_moves()
 
-        # --- fine loop: never overshoot into the tolerance band ---
+        # ---------- Stage B: fast proportional → tiny halving near target ----------
         stable = 0
         last_err = None
+        last_step_mag = max_step
+
         for i in range(max_iters):
-            cur_true = float(self.cmd_simple_read(gcmd))
+            cur_true = read_true_quiet(n_reads, r_settle)
             err = err_by_mode(cur_true, tgt, mode)
 
             # done? require two stable reads to debounce
@@ -279,105 +325,117 @@ class VortacGrabber:
                 if stable >= 2:
                     gcmd.respond_info(f"Reached {cur_true:.2f}° (target {tgt:.2f}°, tol {tol}) in {i + 1} iters")
                     return
-                toolhead.dwell(0.02)
+                toolhead.dwell(0.008)
                 continue
             stable = 0
 
-            # Maximum safe step that cannot cross into the tolerance band.
-            # Leaves a 0.5*TOL cushion so we don't flirt with the boundary.
+            # Max safe step that cannot enter the tolerance band
             max_safe = max(0.0, abs(err) - 0.5 * tol)
 
-            # Proportional proposal, capped by MAX_STEP
-            proposal = max(-max_step, min(max_step, kP * err))
+            # Far: aggressive proportional; Near: halving for buttery finish
+            if abs(err) > near_sw:
+                proposal = kP * err
+                proposal = max(-max_step, min(max_step, proposal))
+                # ensure a minimum useful move when far (if safe allows)
+                if abs(proposal) < min_step and max_safe >= min_step:
+                    proposal = math.copysign(min_step, err)
+            else:
+                # halving mode (monotone)
+                last_step_mag = max(min_step, 0.5 * last_step_mag)
+                proposal = math.copysign(last_step_mag, err)
 
-            # Enforce direction constraint
-            if mode in ('cw', 'clockwise') and proposal < 0:   proposal = abs(proposal)
-            if mode in ('ccw', 'counterclockwise', 'cclockwise') and proposal > 0: proposal = -abs(proposal)
+            # Direction constraint
+            if mode in ('cw', 'clockwise') and proposal < 0:
+                proposal = abs(proposal)
+            if mode in ('ccw', 'counterclockwise', 'cclockwise') and proposal > 0:
+                proposal = -abs(proposal)
 
-            # Clip to never exceed the safe step
+            # Clip to safe bound
             step = proposal
             if abs(step) > max_safe:
                 step = math.copysign(max_safe, step)
 
-            # Respect a minimum step when far away, but NEVER exceed max_safe
-            if abs(step) < min_step and max_safe >= min_step:
-                step = math.copysign(min_step, step)
-            # If max_safe < min_step, we keep step ≤ max_safe (might be tiny) to avoid overshoot.
-
-            if abs(step) < 0.01:  # too tiny to matter; wait for the next read
-                toolhead.dwell(0.02)
+            # If max_safe is tiny, avoid thrashing
+            if abs(step) < 1e-3:
+                toolhead.dwell(0.006)
                 continue
 
-            force_move(stepper, step, fine_speed)
+            # Nudge
+            force_mv(stepper, step, fine_speed)
             toolhead.wait_moves()
 
-            # If error grew, soften gain a bit to damp oscillation
-            if last_err is not None and abs(err) > abs(last_err) + 0.1:
-                kP *= 0.7
+            # Adaptive damping: if error grew, soften gain
+            if last_err is not None and abs(err) > abs(last_err) + 0.05:
+                kP *= 0.75
             last_err = err
 
         gcmd.respond_info(f"Stopped after {max_iters} iters at {cur_true:.2f}° (target {tgt:.2f}°, err {err:.2f}°)")
 
     def cmd_vortac_calibrate(self, gcmd):
         """
-        VORTAC_CALIBRATE [SAMPLES=<count>] [SPEED=<units/s>]
-        Assumes msg['data'] == [(time, angle_rad_x1e4), ...] (Klipper scale).
-        Saves one LUT: pairs_deg = [[true_deg, measured_deg], ...]
+        VORTAC_CALIBRATE [SAMPLES=<n>] [SPEED=<v>] [TURNS=<x>] [PHASE=<deg>]
+                         [SETTLE=<s>] [WINDOW=<s>]
+        Forward-only calibration. For best results set TURNS=2.0.
+        Per-window circular mean; final LUT uses the *last turn only*.
         """
         import math, json
         RAD2DEG = 180.0 / math.pi
 
-        def cmean(vals):
-            # circular mean in degrees (handles wrap at 360)
+        def circ_mean(vals):
             sx = sum(math.cos(math.radians(v)) for v in vals)
             sy = sum(math.sin(math.radians(v)) for v in vals)
-            if sx == 0 and sy == 0:
+            if sx == 0.0 and sy == 0.0:
                 return vals[-1]
-            return (math.degrees(math.atan2(sy, sx)) % 360.0 + 360.0) % 360.0
+            ang = math.degrees(math.atan2(sy, sx))
+            return (ang % 360.0 + 360.0) % 360.0
 
-        samples = gcmd.get_int('SAMPLES', default=90)
-        speed = gcmd.get_float('SPEED', default=50.0)
+        samples = gcmd.get_int('SAMPLES', default=180)
+        speed = gcmd.get_float('SPEED', default=40.0)
+        turns = gcmd.get_float('TURNS', default=2.0)  # integer turns kill the boundary kink
+        settle = gcmd.get_float('SETTLE', default=0.15)  # s: dwell after each step
+        window = gcmd.get_float('WINDOW', default=0.03)  # s: tail of dwell only
 
         toolhead = self.printer.lookup_object('toolhead')
-        force_mv = self.printer.lookup_object('force_move')
+        force_move = self.printer.lookup_object('force_move').manual_move
         stepper = self.angle_sensor.calibration.mcu_stepper
 
         step = 360.0 / float(samples)
+        phase = gcmd.get_float('PHASE', default=step / 2.0)  # shift seam between bins
 
-        # --- collect bulk angle messages ---
+        # Collect bulk messages (time, angle_rad_x1e4)
         msgs, done = [], False
 
         def cb(msg):
             if done: return False
-            if 'data' in msg: msgs.append(msg)
+            data = msg.get('data')
+            if data: msgs.append(msg)
             return True
 
         try:
             try:
                 cid = self.angle_sensor.add_client(cb)
             except TypeError:
-                cid = cb;
+                cid = cb
                 self.angle_sensor.add_client(cb)
 
-            # Build time windows + bin map (forward then reverse)
+            # Optional phase pre-roll to push seam between bins
+            if abs(phase) > 0:
+                force_move(stepper, phase, speed)
+                toolhead.wait_moves()
+                toolhead.dwell(settle)
+
+            # Build forward-only windows across multiple turns
             times, idx_map = [], []
+            total = int(round(samples * turns))
             toolhead.dwell(0.05)
-
-            # forward pass
-            for i in range(samples):
-                force_mv.manual_move(stepper, +step, speed)
-                toolhead.dwell(0.10)
+            for k in range(total):
+                force_move(stepper, +step, speed)
+                toolhead.dwell(settle)
                 end = toolhead.get_last_move_time()
-                times.append((end - 0.09, end));
-                idx_map.append(i)
-
-            # reverse pass (mapped onto the same angle bins)
-            for j in range(samples):
-                force_mv.manual_move(stepper, -step, speed)
-                toolhead.dwell(0.10)
-                end = toolhead.get_last_move_time()
-                times.append((end - 0.09, end));
-                idx_map.append(samples - 1 - j)
+                # Clamp window to settle (just in case)
+                wdur = min(window, max(0.0, settle - 0.005))
+                times.append((end - wdur, end))  # tail of dwell only
+                idx_map.append(k % samples)  # wrap windows onto bins
 
             toolhead.wait_moves()
         finally:
@@ -390,45 +448,56 @@ class VortacGrabber:
                         pass
                     break
 
-        # --- convert to degrees, flatten, sort by time ---
+        # Convert to degrees, flatten, sort by time
         pts = []
         for msg in msgs:
-            for t, raw in msg['data']:  # (time, angle_rad_x1e4)
-                ang_deg = (float(raw) / 10000.0) * RAD2DEG
-                pts.append((float(t), ang_deg % 360.0))
+            for t, raw in msg.get('data', []):
+                pts.append((float(t), ((float(raw) / 10000.0) * RAD2DEG) % 360.0))
         if not pts:
             raise self.printer.command_error("No valid samples from angle stream.")
         pts.sort(key=lambda x: x[0])
 
-        # --- bin samples into angle bins across both passes ---
-        bins = [[] for _ in range(samples)]
+        # Collect samples per *window* (not per bin yet)
+        W = len(times)
+        win_vals = [[] for _ in range(W)]
         w = 0
         for t, deg in pts:
-            while w < len(times) and t > times[w][1]:
+            while w < W and t > times[w][1]:
                 w += 1
-            if w >= len(times): break
+            if w >= W:
+                break
             a, b = times[w]
             if a <= t <= b:
-                bins[idx_map[w]].append(deg)
+                win_vals[w].append(deg)
 
-        missing = [i for i, b in enumerate(bins) if not b]
+        # Reduce each window to a single circular mean (may be None if no samples)
+        win_mean = [circ_mean(vs) if vs else None for vs in win_vals]
+
+        # For each bin, keep the value from the *last* window that targeted it
+        measured = [None] * samples
+        for w_idx, val in enumerate(win_mean):
+            if val is None:
+                continue
+            bin_idx = idx_map[w_idx]
+            measured[bin_idx] = val  # overwrites earlier turns, so last turn wins
+
+        # Validate: every bin must have a value (with TURNS>=1.0 this should hold)
+        missing = [i for i, v in enumerate(measured) if v is None]
         if missing:
             raise self.printer.command_error(f"Incomplete data, empty bins: {missing}")
 
-        measured = [cmean(b) for b in bins]  # averaged across fwd+rev
-
-        # Build single LUT (true = commanded sample angle; measured = sensor)
-        pairs_deg = [[round(i * step, 2), round(measured[i], 2)] for i in range(samples)]
-
-        # Save
+        # Build and save LUT as [(true_deg, raw_deg)]
+        pairs = [[round(i * step, 2), round(measured[i], 2)] for i in range(samples)]
         cfg = self.printer.lookup_object('configfile')
         try:
             cfg.remove_section(self.name)
         except Exception:
             pass
-        cfg.set(self.name, 'lookup_table', json.dumps(pairs_deg))
+        cfg.set(self.name, 'lookup_table', json.dumps(pairs))
+        self.table  = pairs[:]  # keep in memory immediately
 
-        gcmd.respond_info("Calibration OK. Saved single LUT 'pairs_deg' (true→measured).")
+        gcmd.respond_info(
+            f"Calibration OK. Saved lookup_table with {samples} bins over {turns:.1f} turns (last lap, circular mean).")
 
     def cmd_set_save_doc_pos(self, gcmd):
         # 1) Zugriff auf ToolHead
@@ -462,9 +531,14 @@ class VortacGrabber:
 
     def run_gcode(self, name, template, extra_context, gcmd):
         curtime = self.printer.get_reactor().monotonic()
+        # 1. Extract parameters passed to the command (e.g. Z_OFFSET=1.2)
+        command_params = gcmd.get_command_parameters()
+
         context = {
-            **template.create_template_context(), #generates default context
+            **template.create_template_context(),  # generates default printer context
             'vortac_grabber': self.get_status(curtime),
+            'params': command_params,  # <--- THIS FIXES THE ERROR
+            **extra_context
         }
         gcmd.respond_info(f"context: {context}")
         template.run_gcode_from_command(context)
