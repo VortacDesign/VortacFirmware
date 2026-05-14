@@ -2,15 +2,16 @@
 #
 # Phase 3: enables a single tool-board template (e.g. SB2209.cfg) to be
 # instantiated multiple times under different MCU UUIDs without "duplicate
-# section" collisions. Used by vortac_tool (Phase 4) to wire up per-tool
-# hardware from one shared template.
+# section" collisions. Tool configs use this to wire per-tool hardware from
+# one shared template after declaring their static [mcu toolN] section.
 #
 # Two entry points:
 #   1. [include_with <namespace> <filename>]  -- config-section wrapper
 #        tool_index: <int>          (default 0; >=1 triggers section renames)
 #        mcu_from:   <name>         (auto-detected from [mcu <name>] otherwise)
 #        overrides:  <json-dict>    (optional; {"orig section": {"key": "val"}})
-#   2. include_with_remap(...)      -- programmatic API for vortac_tool
+#        skip_sections: comma/newline list of original template sections to skip
+#   2. include_with_remap(...)      -- programmatic API / config generator helper
 #
 # Section-rename table (tool_index >= 1; tool_index 0 is namespace-swap only):
 #
@@ -85,6 +86,17 @@ def _resolve_filepath(printer, filepath):
     if not cfg_file:
         return filepath
     return os.path.join(os.path.dirname(cfg_file), filepath)
+
+
+def _parse_section_list(value):
+    if value is None:
+        return None
+    sections = []
+    for line in value.replace(',', '\n').splitlines():
+        item = line.strip()
+        if item:
+            sections.append(item)
+    return sections
 
 
 def _make_value_rewriter(mcu_from, mcu_to, rename_map):
@@ -207,6 +219,9 @@ class IncludeWith:
                     "include_with overrides must be a JSON object of the "
                     "form {\"section\": {\"key\": \"value\"}}")
 
+        skip_sections = _parse_section_list(
+            config.get('skip_sections', default=None))
+
         self.rename_map = include_with_remap(
             printer=printer,
             parent_config=config,
@@ -215,6 +230,7 @@ class IncludeWith:
             mcu_from=mcu_from,
             tool_index=tool_index,
             overrides=overrides,
+            skip_sections=skip_sections,
         )
 
 

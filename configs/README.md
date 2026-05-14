@@ -17,7 +17,7 @@ configs/
     │   ├── SB2209.cfg           toolboard PCB template — reused by every SB2209 tool
     │   └── kraken.cfg           placeholder for future mainboard
     ├── tools/
-    │   ├── tool0.cfg            [vortac_tool T0] — first tool's UUID, namespace, dock positions
+    │   ├── tool0.cfg            static [mcu tool0] + SB2209 include + [vortac_tool T0]
     │   └── miniStealth.cfg      placeholder
     └── tools.cfg                top-level: includes per-tool files + [vortac_manager]
 ```
@@ -34,15 +34,19 @@ configs/
 
 1. `cp tools/tool0.cfg tools/tool1.cfg`
 2. Replace every `T0`/`tool0`/`dock0` with `T1`/`tool1`/`dock1`
-3. Bump `tool_index: 0` → `1`, set the new `canbus_uuid`
+3. Bump `tool_index: 0` → `1`, set the new `[mcu tool1] canbus_uuid`
 4. Set placeholder `params_dock1_x/y/z` (calibrate later)
 5. Add `[include tools/tool1.cfg]` to `tools.cfg`
 
-`include_with` reads `mcu/SB2209.cfg` once per tool, swaps the MCU namespace,
-rewrites every `EBBCan:` pin reference, and renames sections per `tool_index`
-(`[extruder]` → `[extruder1]`, `[fan]` → `[fan_generic tool1_fan]`, etc.).
-Singletons (`resonance_tester`, `input_shaper`, `shaketune`) are auto-skipped
-for `tool_index ≥ 1`.
+Each tool config declares its `[mcu toolN]` statically first. That is required
+because Klipper registers MCU pin chips before extras like `include_with` or
+`vortac_tool` run.
+
+`include_with` then reads `vortac_configs/mcu/SB2209.cfg` once per tool, swaps
+the MCU namespace, rewrites every `EBBCan:` pin reference, and renames sections
+per `tool_index` (`[extruder]` → `[extruder1]`, `[fan]` →
+`[fan_generic tool1_fan]`, etc.). The template `[mcu EBBCan]` is skipped with
+`skip_sections:` because each tool file owns its real `[mcu toolN]`.
 
 ## Where the old `tool_doc_load`/`unload` jinja blocks went
 

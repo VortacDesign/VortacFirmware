@@ -48,15 +48,15 @@ Persisted state lives in the config section itself: `lookup_table`, `zero_pos_of
 
 ### `klippy/extras/include_with.py`
 
-Implements `[include_with <namespace> <filename>]`. It reads `<filename>` (currently with a **hardcoded path** `/home/pi/printer_data/config/`), iterates every section/option, and re-injects them into the calling config — but rewrites any option whose key contains `pin` so the value gets prefixed with `<namespace>:`. It then calls `printer.load_object` so Klipper instantiates each section under the new namespace.
+Implements `[include_with <namespace> <filename>]`. It reads `<filename>` relative to the active Klipper config directory, iterates every section/option, and re-injects them into the calling config with MCU name remapping, value rewrites, section renaming, optional overrides, and optional `skip_sections`.
 
-This is the mechanism by which one shared template can be loaded multiple times under different MCU names. The hardcoded path is a known issue.
+This is the mechanism by which one shared template can be loaded multiple times under different MCU names. Tool files must still declare `[mcu toolN]` statically before `[include_with ...]`, because Klipper registers MCU pin chips before extras run.
 
 ### Configs (`configs/vortac_configs/`)
 
 Live-mounted into Klipper at runtime. Layout:
 - `mcu/octopus.cfg` — mainboard (steppers, bed, fans, neopixel docks).
-- `mcu/vortac.cfg` — grabber MCU (CAN UUID `70d72bfb79f1`), `[manual_stepper grabber]` + AS5047D wiring + `[vortac_grabber]` settings including jinja gcode templates for `tool_doc_load`/`unload`/`test_code`.
+- `mcu/vortac.cfg` — grabber MCU (CAN UUID `70d72bfb79f1`), `[manual_stepper grabber]` + AS5047D wiring + `[vortac_grabber]` hardware settings and `[vortac_qgl_state]`.
 - `mcu/SB2209.cfg` — toolhead-board template (extruder, hotend fan, ADXL345, hotend ARGB). Generic MCU name `EBBCan`; intended to be loaded via `include_with` with per-tool namespacing.
 
 `configs/klipper_screen_configs/` — KlipperScreen UI overrides.
@@ -65,12 +65,12 @@ Live-mounted into Klipper at runtime. Layout:
 
 `.claude/refractorPlan.md` is the source of truth for the in-progress redesign. Headline plan:
 
-- **Split** `vortac_grabber.py` into `vortac_grabber.py` (hardware only — angle sensor, stepper, calibration, plus a Python API: `engage()`, `disengage()`, `read_angle()`) and two new modules: `vortac_tool.py` (per-tool `[vortac_tool Tn]` sections, CAN UUID auto-detection so unconnected tools are skipped instead of erroring) and `vortac_manager.py` (coordinator: `T0/T1/...`, dock state machine, `VORTAC_DETECT`).
-- **Enhance** `include_with.py` with MCU-name remapping in section headers *and* option values (not just `pin` keys), tool-index-based section auto-rename to dodge Klipper singleton collisions (`[extruder]` → `[extruder1]`, `[fan]` → `[fan_generic toolN_fan]`, etc.), config-value overrides, and a non-config-section programmatic API. The hardcoded config path also needs to become dynamic.
+- **Split** `vortac_grabber.py` into `vortac_grabber.py` (hardware only — angle sensor, stepper, calibration, plus a Python API: `engage()`, `disengage()`, `read_angle()`) and two new modules: `vortac_tool.py` (logical per-tool `[vortac_tool Tn]` sections) and `vortac_manager.py` (coordinator: `T0/T1/...`, dock state machine, `VORTAC_DETECT`).
+- **Enhance** `include_with.py` with MCU-name remapping in section headers *and* option values (not just `pin` keys), tool-index-based section auto-rename to dodge Klipper singleton collisions (`[extruder]` → `[extruder1]`, `[fan]` → `[fan_generic toolN_fan]`, etc.), config-value overrides, dynamic config-dir paths, and configurable section skipping.
 - **Tool detection** uses a **strobe-by-subtraction** scheme: every tool has two GPIO sense pins (`dock_sense_pin`, `grab_sense_pin`), default HIGH; dock ARGB channels pull `dock_sense` LOW and the grabber pulls `grab_sense` LOW. To map docks→tools, turn each dock's ARGB channel off in turn (~50 ms), poll all tools' `dock_sense` over CAN, and the one that flipped HIGH was in that dock.
 - **Section-renaming table** for the include_with rewriter is in the plan doc — consult it before adding new section types.
 
-The git status shows `tool1.cfg` deleted, `includewithExample.cfg` and `tools/` untracked — these are the refactor in progress.
+The refactor is in progress on the development branch; check current git status before assuming which config files are staged or deployed.
 
 ## Conventions worth knowing
 

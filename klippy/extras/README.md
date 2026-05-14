@@ -59,7 +59,10 @@ per `tool_index` so one PCB-level config can be instantiated N times.
   whole-string section refs (e.g. `heater: extruder` → `heater: extruder1`)
   are also fixed up.
 - **Skip-list** for `tool_index ≥ 1`: `resonance_tester`, `input_shaper`,
-  `shaketune` (Klipper singletons that can't be renamed).
+  `shaketune` (Klipper singletons that can't be renamed). Config sections can
+  also pass `skip_sections:` as a comma/newline list; tool configs use this to
+  skip the template `[mcu EBBCan]` because `[mcu toolN]` must be declared
+  statically.
 - **Overrides:** JSON `{"orig section": {"key": "value"}}` via `overrides:`
   config option, or programmatic `overrides=` arg.
 - **Programmatic API** (used by `vortac_tool`):
@@ -68,18 +71,15 @@ per `tool_index` so one PCB-level config can be instantiated N times.
 
 ### `vortac_tool.py` — `[vortac_tool Tn]`
 
-Per-tool definition. Scans CAN, loads the toolboard template, holds dock
-positions and activate/deactivate templates.
+Per-tool logical definition. The tool hardware must already be present in
+normal Klipper config (`[mcu toolN]` plus `[include_with toolN ...]`) before
+this extra loads; Klipper registers MCU pin chips before extras run.
 
-- **CAN auto-detect** at `__init__`: subprocesses
-  `klipper/scripts/canbus_query.py` (default `~/klipper`, configurable via
-  `klipper_root:`). Result cached across all `[vortac_tool]` instances.
-  **Fail-open:** if the scan fails, all tools are assumed present (warning
-  logged). Set `auto_detect: False` to skip the scan.
-- **Template injection:** if UUID is present, calls `include_with_remap` with
-  `canbus_uuid` overridden on the source `[mcu …]` section. If absent,
-  `available = False` and template is *not* injected — Klipper never tries
-  to connect to a missing MCU.
+- **Availability:** manual `available:` flag, default `True`. For now, comment
+  out absent tool includes in `tools.cfg` rather than relying on runtime CAN
+  auto-detection.
+- **Template loading:** lives in the tool config via `[include_with ...]`, not
+  in `vortac_tool.py`.
 - **Per-dock storage:** `params_<dock>_<x|y|z>`. Manager API:
   `get_dock_pos(dock, axis)`, `has_dock_pos(dock)`,
   `save_dock_pos(dock, x, y, z)`.
@@ -113,7 +113,9 @@ with `available=True`), the grabber (required), and `[vortac_qgl_state]`
 config parse:
   [vortac_grabber]    → register grabber gcode commands
   [vortac_qgl_state]  → register FLAT/TILT (hooks attach at klippy:ready)
-  [vortac_tool Tn]    → CAN scan; if present, inject [mcu toolN] + extruder etc.
+  [mcu toolN]         → register tool MCU pin chip early
+  [include_with ...]  → inject remapped toolboard sections that use toolN pins
+  [vortac_tool Tn]    → load logical dock/offset/tool metadata
   [vortac_manager]    → register VORTAC_LOAD/UNLOAD/STATUS/DOCK_SAVE_POS;
                         defer rest to klippy:connect
 
@@ -123,8 +125,7 @@ klippy:connect  → vortac_manager finds tools/grabber/qgl, registers Tn command
 
 Hard dependencies:
 - `vortac_manager` requires `[vortac_grabber]`.
-- `vortac_tool` (with `auto_detect: True`, the default) needs
-  `klipper/scripts/canbus_query.py` to be reachable.
+- Each active tool requires a static `[mcu toolN]` section before `[include_with]`.
 - `vortac_qgl_state` requires `[quad_gantry_level]` to be defined.
 
 For config layout and the user-side workflow, see
