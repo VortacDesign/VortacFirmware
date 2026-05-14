@@ -41,6 +41,9 @@ class VortacQglState:
         self.gcode.register_command(
             'VORTAC_GANTRY_TILT', self.cmd_VORTAC_GANTRY_TILT,
             desc=self.cmd_VORTAC_GANTRY_TILT_help)
+        self.gcode.register_command(
+            'VORTAC_QGL_STATUS', self.cmd_VORTAC_QGL_STATUS,
+            desc=self.cmd_VORTAC_QGL_STATUS_help)
 
         self.printer.register_event_handler(
             'klippy:ready', self._handle_ready)
@@ -177,11 +180,31 @@ class VortacQglState:
             "vortac_qgl_state: tilted (applied %s mm at %.2f mm/s)"
             % (["%.4f" % v for v in forward], speed))
 
+    cmd_VORTAC_QGL_STATUS_help = (
+        "Report current vortac_qgl_state: hooked? state, stored_deltas, speed")
+
+    def cmd_VORTAC_QGL_STATUS(self, gcmd):
+        hooked = self._original_adjust is not None
+        deltas_str = ", ".join("%+.4f" % d for d in self.stored_deltas) \
+            if self.stored_deltas else "(empty)"
+        all_zero = (not self.stored_deltas) or \
+            (not any(d != 0.0 for d in self.stored_deltas))
+        gcmd.respond_info(
+            "vortac_qgl_state:\n"
+            "  hooked into QGL: %s\n"
+            "  state:           %s\n"
+            "  stored_deltas:   [%s] mm  %s\n"
+            "  flatten_speed:   %.2f mm/s"
+            % (hooked, self.state, deltas_str,
+               "(all zero)" if all_zero else "",
+               self.flatten_speed))
+
     def get_status(self, eventtime):
         return {
             'state': self.state,
             'stored_deltas': list(self.stored_deltas),
             'flatten_speed': self.flatten_speed,
+            'hooked': self._original_adjust is not None,
         }
 
 
