@@ -71,6 +71,12 @@ class VortacManager:
             'VORTAC_DETECT', self.cmd_VORTAC_DETECT,
             desc="Detect grabbed tool and dock occupancy")
         gcode.register_command(
+            'VORTAC_SENSE_STATUS', self.cmd_VORTAC_SENSE_STATUS,
+            desc="Report raw cached tool sense pin states")
+        gcode.register_command(
+            'VORTAC_DOCK_STROBE', self.cmd_VORTAC_DOCK_STROBE,
+            desc="Manually set one dock strobe channel for debugging")
+        gcode.register_command(
             'VORTAC_SELECT_DOCK', self.cmd_VORTAC_SELECT_DOCK,
             desc="Detect/select a dock for calibration")
         gcode.register_command(
@@ -179,6 +185,11 @@ class VortacManager:
         color[self._channel_index()] = float(value)
         return tuple(color)
 
+    def _sense_label(self, state):
+        if state is None:
+            return 'UNKNOWN'
+        return 'HIGH' if state else 'LOW'
+
     def _dwell_for_sense(self):
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.dwell(self.dock_strobe_time)
@@ -266,6 +277,12 @@ class VortacManager:
                 f"{dock}={','.join(tools)}"
                 for dock, tools in sorted(ambiguous.items()))
             msg += f"\n  Ambiguous: {amb}"
+        unknown = [
+            tid for tid, tool in sorted(self.tools.items())
+            if not tool.sense_ready()
+        ]
+        if unknown:
+            msg += f"\n  Unknown sense: {', '.join(unknown)}"
         gcmd.respond_info(msg)
 
     # --------------------------------------------------------------------
@@ -463,6 +480,29 @@ class VortacManager:
 
     def cmd_VORTAC_DETECT(self, gcmd):
         self._detect_tools(gcmd)
+
+    def cmd_VORTAC_SENSE_STATUS(self, gcmd):
+        if not self.tools:
+            gcmd.respond_info("No Vortac tools registered")
+            return
+        lines = ["Vortac sense states:"]
+        for tid, tool in sorted(self.tools.items()):
+            lines.append(
+                f"  {tid}: dock={self._sense_label(tool.dock_sense_state)} "
+                f"grab={self._sense_label(tool.grab_sense_state)} "
+                f"dock_pin={tool.dock_sense_pin or 'n/a'} "
+                f"grab_pin={tool.grab_sense_pin or 'n/a'}")
+        gcmd.respond_info('\n'.join(lines))
+
+    def cmd_VORTAC_DOCK_STROBE(self, gcmd):
+        dock = gcmd.get('DOCK').strip().lower()
+        dock_index = self._parse_dock_index(dock, gcmd)
+        value = gcmd.get_float('VALUE', minval=0.0, maxval=1.0)
+        color = self._get_led_color_data()[dock_index]
+        self._set_dock_led_color(
+            dock_index, self._with_strobe_channel(color, value))
+        gcmd.respond_info(
+            f"Set {dock} {self.argb_channel} strobe channel to {value:.3f}")
 
     def cmd_VORTAC_SELECT_DOCK(self, gcmd):
         dock = gcmd.get('DOCK').strip().lower()
