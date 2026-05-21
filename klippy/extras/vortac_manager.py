@@ -213,6 +213,16 @@ class VortacManager:
                 tid: tool.dock_sense_state
                 for tid, tool in self.tools.items()
             }
+            stuck_low = [
+                tid for tid, state in baseline_dock.items()
+                if state is False
+            ]
+            if stuck_low:
+                raise self.printer.command_error(
+                    "VORTAC_DETECT baseline failed: dock_sense is LOW with "
+                    "all dock Tool_id channels off for "
+                    f"{', '.join(sorted(stuck_low))}. Check pin polarity, "
+                    "pullups, dock wiring, or strobe channel mapping.")
             baseline_grab = {
                 tid: tool.grab_sense_state
                 for tid, tool in self.tools.items()
@@ -231,8 +241,7 @@ class VortacManager:
 
                 candidates = [
                     tid for tid, tool in self.tools.items()
-                    if baseline_dock.get(tid) is False
-                    and tool.dock_sense_state is True
+                    if tool.dock_sense_state is False
                 ]
                 dock_name = self._dock_name(dock_index)
                 if len(candidates) == 1:
@@ -250,10 +259,12 @@ class VortacManager:
             elif len(grabbed_ids) == 0:
                 self.current_tool = None
 
+            found_ids = set(
+                tid for tid in detected.values() if tid is not None)
+            found_ids.update(grabbed_ids)
             missing = [
                 tid for tid in sorted(self.tools.keys())
-                if baseline_dock.get(tid) is True
-                and baseline_grab.get(tid) is True
+                if tid not in found_ids and self.tools[tid].sense_ready()
             ]
             if gcmd is not None:
                 self._respond_detection(gcmd, detected, grabbed_ids,
