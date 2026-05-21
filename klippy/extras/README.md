@@ -106,8 +106,8 @@ with `available=True`), the grabber (required), and `[vortac_qgl_state]`
   `DOCK_Y_SAFE = 50.0`, `DOCK_Z_CLEARANCE = 4.4`, `DOCK_APPROACH_F = 2000`,
   `DOCK_SLIDE_F = 500`. Edit there for global geometry tweaks; per-tool
   tweaks belong in `tool_activate_gcode` / `tool_deactivate_gcode`.
-- **Detection:** `VORTAC_DETECT` turns all dock Tool_id channels on, strobes
-  one dock's configured LED channel off at a time, reads each tool's cached
+- **Detection:** `VORTAC_DETECT` turns all dock Tool_id channels off, strobes
+  one dock's configured LED channel on at a time, reads each tool's cached
   `dock_sense_pin`, and restores every LED's original RGBW value afterward.
   The grabbed tool is detected from `grab_sense_pin`.
 - **Dock calibration context:** `VORTAC_SELECT_DOCK DOCK=dockN` runs detection

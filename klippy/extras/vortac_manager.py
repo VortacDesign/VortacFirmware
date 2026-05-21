@@ -196,14 +196,16 @@ class VortacManager:
 
     def _detect_tools(self, gcmd=None):
         original_colors = self._get_led_color_data()
-        normal_colors = [
-            self._with_strobe_channel(original_colors[i], 1.0)
+        # Detection baseline: all Tool_id channels off. Then each dock is
+        # strobed on in turn; the docked tool flips its dock_sense state.
+        baseline_colors = [
+            self._with_strobe_channel(original_colors[i], 0.0)
             for i in range(self.dock_count)
         ]
         detected = {self._dock_name(i): None for i in range(self.dock_count)}
         ambiguous = {}
         try:
-            for i, color in enumerate(normal_colors):
+            for i, color in enumerate(baseline_colors):
                 self._set_dock_led_color(i, color)
             self._dwell_for_sense()
 
@@ -223,7 +225,7 @@ class VortacManager:
 
             for dock_index in range(self.dock_count):
                 strobe_color = self._with_strobe_channel(
-                    normal_colors[dock_index], 0.0)
+                    baseline_colors[dock_index], 1.0)
                 self._set_dock_led_color(dock_index, strobe_color)
                 self._dwell_for_sense()
 
@@ -238,7 +240,7 @@ class VortacManager:
                 elif len(candidates) > 1:
                     ambiguous[dock_name] = candidates
 
-                self._set_dock_led_color(dock_index, normal_colors[dock_index])
+                self._set_dock_led_color(dock_index, baseline_colors[dock_index])
                 self._dwell_for_sense()
 
             self.dock_occupancy = detected
