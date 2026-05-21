@@ -2,8 +2,8 @@
 #
 # At klippy:connect this module discovers all [vortac_tool Tn] sections,
 # the [vortac_grabber] hardware controller, and the optional
-# [vortac_qgl_state] toggle, then registers Tn commands for the tools
-# whose CAN UUIDs were detected as present.
+# [vortac_qgl_state] toggle, then registers Tn commands for the configured
+# tools marked available.
 #
 # Tool change sequence:
 #   1. tool_deactivate_gcode (current tool, if any)
@@ -14,9 +14,8 @@
 #   6. SET_GCODE_OFFSET to target's offsets
 #   7. tool_activate_gcode (target tool, if any)
 #
-# Phase 6 will add VORTAC_DETECT (ARGB strobe-by-subtraction) to populate
-# the dock occupancy map at runtime instead of relying on the home_dock
-# bootstrap.
+# VORTAC_DETECT uses ARGB strobe-by-subtraction to populate the dock
+# occupancy map at runtime instead of relying only on the home_dock bootstrap.
 
 import logging
 
@@ -37,7 +36,9 @@ class VortacManager:
 
         self.dock_count = config.getint('dock_count', minval=1)
         self.argb_led = config.get('argb_led', default=None)
-        self.argb_channel = config.get('argb_channel', default='green')
+        self.argb_channel = config.get('argb_channel', default='red').lower()
+        self.dock_strobe_time = config.getfloat(
+            'dock_strobe_time', default=0.10, above=0.0)
 
         # gcode_macro is needed by [vortac_tool Tn]'s activate/deactivate
         # templates; load it eagerly so the order doesn't matter.
@@ -47,6 +48,9 @@ class VortacManager:
         self.tools = {}             # tool_id -> VortacTool
         self.current_tool = None    # VortacTool or None
         self.dock_occupancy = {}    # dock_name -> tool_id or None
+        self.dock_detection_valid = False
+        self.calibration_dock = None
+        self.calibration_tool = None
         self.grabber = None
         self.qgl_state = None
 
@@ -61,8 +65,23 @@ class VortacManager:
             'VORTAC_UNLOAD', self.cmd_VORTAC_UNLOAD,
             desc="Manually park the held tool back at its dock")
         gcode.register_command(
+            'VORTAC_SET_CURRENT_TOOL', self.cmd_VORTAC_SET_CURRENT_TOOL,
+            desc="Set/clear manager's current tool without moving")
+        gcode.register_command(
+            'VORTAC_DETECT', self.cmd_VORTAC_DETECT,
+            desc="Detect grabbed tool and dock occupancy")
+        gcode.register_command(
+            'VORTAC_SELECT_DOCK', self.cmd_VORTAC_SELECT_DOCK,
+            desc="Detect/select a dock for calibration")
+        gcode.register_command(
+            'VORTAC_DOCK_CAL_STATUS', self.cmd_VORTAC_DOCK_CAL_STATUS,
+            desc="Report selected calibration dock/tool")
+        gcode.register_command(
+            'VORTAC_DOCK_CAL_SAVE', self.cmd_VORTAC_DOCK_CAL_SAVE,
+            desc="Save current XYZ for selected calibration dock/tool")
+        gcode.register_command(
             'VORTAC_DOCK_SAVE_POS', self.cmd_VORTAC_DOCK_SAVE_POS,
-            desc="Save current XYZ as held tool's position for DOCK=name")
+            desc="Save current XYZ as TOOL's position for DOCK=name")
 
         self.printer.register_event_handler(
             'klippy:connect', self._handle_connect)
@@ -102,6 +121,152 @@ class VortacManager:
         logging.info(
             "vortac_manager: registered tools=%s, grabber=%s, qgl_state=%s",
             sorted(self.tools.keys()), bool(self.grabber), bool(self.qgl_state))
+
+    # --------------------------------------------------------------------
+    # Dock / tool detection
+    # --------------------------------------------------------------------
+
+    def _dock_name(self, dock_index):
+        return f"dock{dock_index}"
+
+    def _parse_dock_index(self, dock_name, gcmd):
+        dock_name = dock_name.strip().lower()
+        if not dock_name.startswith('dock'):
+            raise gcmd.error(f"Invalid dock '{dock_name}'")
+        try:
+            dock_index = int(dock_name[4:])
+        except ValueError:
+            raise gcmd.error(f"Invalid dock '{dock_name}'")
+        if dock_index < 0 or dock_index >= self.dock_count:
+            raise gcmd.error(
+                f"Dock {dock_name} out of range (dock0..dock{self.dock_count - 1})")
+        return dock_index
+
+    def _channel_index(self):
+        channels = {'red': 0, 'green': 1, 'blue': 2, 'white': 3}
+        if self.argb_channel not in channels:
+            raise self.printer.command_error(
+                f"Unsupported argb_channel '{self.argb_channel}'")
+        return channels[self.argb_channel]
+
+    def _get_led_color_data(self):
+        if not self.argb_led:
+            raise self.printer.command_error(
+                "vortac_manager: argb_led is required for VORTAC_DETECT")
+        led = self.printer.lookup_object(f'neopixel {self.argb_led}', None)
+        if led is None:
+            led = self.printer.lookup_object(self.argb_led, None)
+        if led is None:
+            raise self.printer.command_error(
+                f"vortac_manager: LED object '{self.argb_led}' not found")
+        color_data = list(led.get_status(None)['color_data'])
+        if len(color_data) < self.dock_count:
+            raise self.printer.command_error(
+                f"vortac_manager: LED '{self.argb_led}' has {len(color_data)} "
+                f"entries, need {self.dock_count}")
+        return color_data
+
+    def _set_dock_led_color(self, dock_index, color):
+        red, green, blue, white = color
+        gcode = self.printer.lookup_object('gcode')
+        gcode.run_script_from_command(
+            f"SET_LED LED={self.argb_led} INDEX={dock_index + 1} "
+            f"RED={red:.6f} GREEN={green:.6f} BLUE={blue:.6f} "
+            f"WHITE={white:.6f} SYNC=0 TRANSMIT=1")
+
+    def _with_strobe_channel(self, color, value):
+        color = list(color)
+        color[self._channel_index()] = float(value)
+        return tuple(color)
+
+    def _dwell_for_sense(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.dwell(self.dock_strobe_time)
+
+    def _detect_tools(self, gcmd=None):
+        original_colors = self._get_led_color_data()
+        normal_colors = [
+            self._with_strobe_channel(original_colors[i], 1.0)
+            for i in range(self.dock_count)
+        ]
+        detected = {self._dock_name(i): None for i in range(self.dock_count)}
+        ambiguous = {}
+        try:
+            for i, color in enumerate(normal_colors):
+                self._set_dock_led_color(i, color)
+            self._dwell_for_sense()
+
+            baseline_dock = {
+                tid: tool.dock_sense_state
+                for tid, tool in self.tools.items()
+            }
+            baseline_grab = {
+                tid: tool.grab_sense_state
+                for tid, tool in self.tools.items()
+            }
+
+            grabbed_ids = [
+                tid for tid, state in baseline_grab.items()
+                if state is False
+            ]
+
+            for dock_index in range(self.dock_count):
+                strobe_color = self._with_strobe_channel(
+                    normal_colors[dock_index], 0.0)
+                self._set_dock_led_color(dock_index, strobe_color)
+                self._dwell_for_sense()
+
+                candidates = [
+                    tid for tid, tool in self.tools.items()
+                    if baseline_dock.get(tid) is False
+                    and tool.dock_sense_state is True
+                ]
+                dock_name = self._dock_name(dock_index)
+                if len(candidates) == 1:
+                    detected[dock_name] = candidates[0]
+                elif len(candidates) > 1:
+                    ambiguous[dock_name] = candidates
+
+                self._set_dock_led_color(dock_index, normal_colors[dock_index])
+                self._dwell_for_sense()
+
+            self.dock_occupancy = detected
+            self.dock_detection_valid = True
+            if len(grabbed_ids) == 1:
+                self.current_tool = self.tools[grabbed_ids[0]]
+            elif len(grabbed_ids) == 0:
+                self.current_tool = None
+
+            missing = [
+                tid for tid in sorted(self.tools.keys())
+                if baseline_dock.get(tid) is True
+                and baseline_grab.get(tid) is True
+            ]
+            if gcmd is not None:
+                self._respond_detection(gcmd, detected, grabbed_ids,
+                                        missing, ambiguous)
+            return detected
+        finally:
+            for i in range(self.dock_count):
+                self._set_dock_led_color(i, original_colors[i])
+
+    def _respond_detection(self, gcmd, detected, grabbed_ids, missing, ambiguous):
+        dock_line = ', '.join(
+            f"{dock}={tool_id or 'empty'}"
+            for dock, tool_id in sorted(detected.items()))
+        grabbed = ', '.join(grabbed_ids) if grabbed_ids else 'None'
+        missing_line = ', '.join(missing) if missing else 'None'
+        msg = (
+            f"Vortac detection:\n"
+            f"  Docks   : {dock_line}\n"
+            f"  Grabbed : {grabbed}\n"
+            f"  Missing : {missing_line}")
+        if ambiguous:
+            amb = ', '.join(
+                f"{dock}={','.join(tools)}"
+                for dock, tools in sorted(ambiguous.items()))
+            msg += f"\n  Ambiguous: {amb}"
+        gcmd.respond_info(msg)
 
     # --------------------------------------------------------------------
     # Tool change state machine
@@ -204,6 +369,36 @@ class VortacManager:
                 return dock
         return None
 
+    def _normalize_tool_id(self, tool_id):
+        tool_id = tool_id.strip()
+        if not tool_id.upper().startswith('T'):
+            tool_id = 'T' + tool_id
+        return tool_id.upper()
+
+    def _get_tool(self, tool_id, gcmd):
+        tool_id = self._normalize_tool_id(tool_id)
+        if tool_id not in self.tools:
+            raise gcmd.error(
+                f"Tool {tool_id} not registered or unavailable")
+        return self.tools[tool_id]
+
+    def _ensure_gantry_flat(self, gcmd):
+        if self.qgl_state is not None and self.qgl_state.state != 'flat':
+            raise gcmd.error(
+                f"Refuse to save dock position: gantry is "
+                f"{self.qgl_state.state!r}; run VORTAC_GANTRY_FLAT first "
+                f"(dock geometry is only valid frame-flat)")
+
+    def _save_dock_pos(self, tool, dock, gcmd):
+        self._ensure_gantry_flat(gcmd)
+        self._parse_dock_index(dock, gcmd)
+        toolhead = self.printer.lookup_object('toolhead')
+        x, y, z = toolhead.get_position()[:3]
+        tool.save_dock_pos(dock, x, y, z)
+        gcmd.respond_info(
+            f"Saved {tool.tool_id} @ {dock}: "
+            f"X={x:.4f} Y={y:.4f} Z={z:.4f}.  Run SAVE_CONFIG to persist.")
+
     def _render(self, template, tool, dock, gcmd):
         if template is None:
             return
@@ -227,47 +422,96 @@ class VortacManager:
         occ = ', '.join(
             f"{d}={tid or 'empty'}"
             for d, tid in sorted(self.dock_occupancy.items()))
+        cal_tool = self.calibration_tool.tool_id if self.calibration_tool else 'None'
+        cal_dock = self.calibration_dock or 'None'
         gcmd.respond_info(
             f"Vortac status:\n"
             f"  Current tool : {cur}\n"
             f"  Tools loaded : {tools_line}\n"
             f"  Dock map     : {occ or '(unknown)'}\n"
+            f"  Detection    : {'valid' if self.dock_detection_valid else 'bootstrap'}\n"
+            f"  Cal selected : {cal_dock} / {cal_tool}\n"
             f"  QGL state    : {qgl}")
 
     def cmd_VORTAC_LOAD(self, gcmd):
-        target_id = gcmd.get('TOOL').strip()
-        if not target_id.upper().startswith('T'):
-            target_id = 'T' + target_id
-        if target_id not in self.tools:
-            raise gcmd.error(
-                f"Tool {target_id} not registered or unavailable")
+        target = self._get_tool(gcmd.get('TOOL'), gcmd)
         if self.current_tool is not None:
             raise gcmd.error(
                 f"Already holding {self.current_tool.tool_id}; "
-                f"unload first or use {target_id} to swap directly")
-        self._change_to(self.tools[target_id], gcmd)
+                f"unload first or use {target.tool_id} to swap directly")
+        self._change_to(target, gcmd)
 
     def cmd_VORTAC_UNLOAD(self, gcmd):
         if self.current_tool is None:
             raise gcmd.error("No tool currently held")
         self._change_to(None, gcmd)
 
+    def cmd_VORTAC_SET_CURRENT_TOOL(self, gcmd):
+        """Set logical manager state only; does not move or touch the grabber."""
+        tool_arg = gcmd.get('TOOL', None)
+        clear = gcmd.get('CLEAR', None)
+        if clear is not None:
+            self.current_tool = None
+            gcmd.respond_info("Cleared current Vortac tool")
+            return
+        if tool_arg is None:
+            raise gcmd.error("Missing TOOL=Tn or CLEAR=1")
+        self.current_tool = self._get_tool(tool_arg, gcmd)
+        gcmd.respond_info(
+            f"Set current Vortac tool to {self.current_tool.tool_id} "
+            f"(no motion performed)")
+
+    def cmd_VORTAC_DETECT(self, gcmd):
+        self._detect_tools(gcmd)
+
+    def cmd_VORTAC_SELECT_DOCK(self, gcmd):
+        dock = gcmd.get('DOCK').strip().lower()
+        self._parse_dock_index(dock, gcmd)
+        if gcmd.get_int('DETECT', 1, minval=0, maxval=1):
+            self._detect_tools(gcmd)
+        elif not self.dock_detection_valid:
+            raise gcmd.error("No dock detection map; run VORTAC_DETECT first")
+
+        tool_id = self.dock_occupancy.get(dock)
+        if tool_id is None:
+            self.calibration_dock = None
+            self.calibration_tool = None
+            raise gcmd.error(f"{dock} has no detected tool")
+        self.calibration_dock = dock
+        self.calibration_tool = self._get_tool(tool_id, gcmd)
+        gcmd.respond_info(
+            f"Selected {dock} with {self.calibration_tool.tool_id} "
+            f"for Vortac dock calibration")
+
+    def cmd_VORTAC_DOCK_CAL_STATUS(self, gcmd):
+        selected_tool = (self.calibration_tool.tool_id
+                         if self.calibration_tool else 'None')
+        selected_dock = self.calibration_dock or 'None'
+        dock_line = ', '.join(
+            f"{dock}={tool_id or 'empty'}"
+            for dock, tool_id in sorted(self.dock_occupancy.items()))
+        gcmd.respond_info(
+            f"Vortac dock calibration:\n"
+            f"  Selected dock : {selected_dock}\n"
+            f"  Selected tool : {selected_tool}\n"
+            f"  Detection map : {dock_line or '(unknown)'}")
+
+    def cmd_VORTAC_DOCK_CAL_SAVE(self, gcmd):
+        if self.calibration_dock is None or self.calibration_tool is None:
+            raise gcmd.error(
+                "No calibration dock selected; run VORTAC_SELECT_DOCK first")
+        self._save_dock_pos(
+            self.calibration_tool, self.calibration_dock, gcmd)
+
     def cmd_VORTAC_DOCK_SAVE_POS(self, gcmd):
         dock = gcmd.get('DOCK').strip()
-        if self.qgl_state is not None and self.qgl_state.state != 'flat':
+        tool_arg = gcmd.get('TOOL', None)
+        tool = self._get_tool(tool_arg, gcmd) if tool_arg is not None \
+               else self.current_tool
+        if tool is None:
             raise gcmd.error(
-                f"Refuse to save dock position: gantry is "
-                f"{self.qgl_state.state!r}; run VORTAC_GANTRY_FLAT first "
-                f"(dock geometry is only valid frame-flat)")
-        if self.current_tool is None:
-            raise gcmd.error(
-                "No tool currently grabbed; cannot save dock position")
-        toolhead = self.printer.lookup_object('toolhead')
-        x, y, z = toolhead.get_position()[:3]
-        self.current_tool.save_dock_pos(dock, x, y, z)
-        gcmd.respond_info(
-            f"Saved {self.current_tool.tool_id} @ {dock}: "
-            f"X={x:.4f} Y={y:.4f} Z={z:.4f}.  Run SAVE_CONFIG to persist.")
+                "No tool selected; use TOOL=Tn or VORTAC_SET_CURRENT_TOOL")
+        self._save_dock_pos(tool, dock, gcmd)
 
     # --------------------------------------------------------------------
     # Status (for templates / dashboards)
@@ -279,6 +523,10 @@ class VortacManager:
                              if self.current_tool else None),
             'tools': sorted(self.tools.keys()),
             'dock_occupancy': dict(self.dock_occupancy),
+            'dock_detection_valid': self.dock_detection_valid,
+            'calibration_dock': self.calibration_dock,
+            'calibration_tool': (self.calibration_tool.tool_id
+                                 if self.calibration_tool else None),
             'qgl_state': self.qgl_state.state if self.qgl_state else None,
         }
 

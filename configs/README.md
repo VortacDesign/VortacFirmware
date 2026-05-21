@@ -61,16 +61,25 @@ per `tool_index` (`[extruder]` → `[extruder1]`, `[fan]` →
 ## Calibrating a dock position
 
 ```
-VORTAC_LOAD TOOL=T0           # mark T0 as held (tool must already be on the grabber)
 VORTAC_GANTRY_FLAT
 G28                           # if not homed
+VORTAC_SELECT_DOCK DOCK=dock0 # detects the tool in dock0 and selects it
 # jog toolhead to the exact dock seat
-VORTAC_DOCK_SAVE_POS DOCK=dock0
+VORTAC_DOCK_CAL_SAVE
 SAVE_CONFIG
 ```
 
-`VORTAC_DOCK_SAVE_POS` refuses if the gantry is `tilted` (dock geometry only
-valid frame-flat) or no tool is currently held.
+`VORTAC_SELECT_DOCK` runs `VORTAC_DETECT`, stores the detected dock/tool pair,
+and fails if the selected dock has no detected tool. `VORTAC_DOCK_CAL_SAVE`
+refuses if the gantry is `tilted` (dock geometry only valid frame-flat) or no
+dock/tool was selected.
+
+Manual fallback:
+
+```
+VORTAC_DOCK_SAVE_POS TOOL=T0 DOCK=dock0
+SAVE_CONFIG
+```
 
 ## Gcode quick reference
 
@@ -78,9 +87,15 @@ valid frame-flat) or no tool is currently held.
 |---|---|---|
 | `T0`, `T1`, ... | manager | tool change |
 | `VORTAC_STATUS` | manager | report current tool, dock map, QGL state |
-| `VORTAC_LOAD TOOL=Tn` | manager | mark Tn as held (no movement) |
+| `VORTAC_DETECT` | manager | strobe dock Tool_id channels and update dock map |
+| `VORTAC_SELECT_DOCK DOCK=dockN` | manager | detect/select dock and its tool for calibration |
+| `VORTAC_DOCK_CAL_STATUS` | manager | report selected calibration dock/tool |
+| `VORTAC_DOCK_CAL_SAVE` | manager | save current XYZ for selected calibration dock/tool |
+| `VORTAC_LOAD TOOL=Tn` | manager | fetch Tn from its dock |
 | `VORTAC_UNLOAD` | manager | park the held tool at its dock |
-| `VORTAC_DOCK_SAVE_POS DOCK=name` | manager | save current XYZ as held tool's pos for `name` |
+| `VORTAC_SET_CURRENT_TOOL TOOL=Tn` | manager | set logical current tool without movement |
+| `VORTAC_SET_CURRENT_TOOL CLEAR=1` | manager | clear logical current tool |
+| `VORTAC_DOCK_SAVE_POS TOOL=Tn DOCK=name` | manager | save current XYZ as tool's pos for `name` |
 | `VORTAC_GANTRY_FLAT/TILT/STATUS` | qgl_state | toggle gantry between frame- and bed-flat |
 | `VORTAC_CALIBRATE` | grabber | populate AS5047D LUT |
 | `VORTAC_SET_ZERO` | grabber | set zero offset to current angle |

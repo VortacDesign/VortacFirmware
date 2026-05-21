@@ -94,7 +94,10 @@ with `available=True`), the grabber (required), and `[vortac_qgl_state]`
 (optional). Registers `Tn` commands for every available tool.
 
 - **Gcode:** `T0/T1/…` (registered dynamically), `VORTAC_STATUS`,
-  `VORTAC_LOAD TOOL=Tn`, `VORTAC_UNLOAD`, `VORTAC_DOCK_SAVE_POS DOCK=name`.
+  `VORTAC_LOAD TOOL=Tn`, `VORTAC_UNLOAD`, `VORTAC_SET_CURRENT_TOOL`,
+  `VORTAC_DETECT`, `VORTAC_SELECT_DOCK DOCK=dockN`,
+  `VORTAC_DOCK_CAL_STATUS`, `VORTAC_DOCK_CAL_SAVE`,
+  `VORTAC_DOCK_SAVE_POS TOOL=Tn DOCK=name`.
 - **Tool change sequence** in `_change_to`:
   `tool_deactivate_gcode` → `VORTAC_GANTRY_FLAT` → `_park_at_dock(current)`
   → `_fetch_from_dock(target)` → `VORTAC_GANTRY_TILT` → `SET_GCODE_OFFSET`
@@ -103,9 +106,13 @@ with `available=True`), the grabber (required), and `[vortac_qgl_state]`
   `DOCK_Y_SAFE = 50.0`, `DOCK_Z_CLEARANCE = 4.4`, `DOCK_APPROACH_F = 2000`,
   `DOCK_SLIDE_F = 500`. Edit there for global geometry tweaks; per-tool
   tweaks belong in `tool_activate_gcode` / `tool_deactivate_gcode`.
-- **Dock occupancy** initialized at `klippy:connect` from each tool's
-  `home_dock`. Phase 6 `VORTAC_DETECT` will populate from runtime
-  ARGB strobe.
+- **Detection:** `VORTAC_DETECT` turns all dock Tool_id channels on, strobes
+  one dock's configured LED channel off at a time, reads each tool's cached
+  `dock_sense_pin`, and restores every LED's original RGBW value afterward.
+  The grabbed tool is detected from `grab_sense_pin`.
+- **Dock calibration context:** `VORTAC_SELECT_DOCK DOCK=dockN` runs detection
+  and stores the detected dock/tool pair. `VORTAC_DOCK_CAL_SAVE` saves the
+  current XYZ to that selected tool/dock and fails if no tool was detected.
 
 ## Lifecycle & dependencies
 

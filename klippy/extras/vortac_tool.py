@@ -52,6 +52,9 @@ class VortacTool:
         self.home_dock = config.get('home_dock', default=None)
         self.dock_sense_pin = config.get('dock_sense_pin', default=None)
         self.grab_sense_pin = config.get('grab_sense_pin', default=None)
+        self.dock_sense_state = None
+        self.grab_sense_state = None
+        self.sense_state_time = None
 
         # GCode offsets (applied by manager when this tool is loaded)
         self.gcode_offset_x = config.getfloat('gcode_offset_x', 0.0)
@@ -68,9 +71,32 @@ class VortacTool:
         self.tool_deactivate_gcode = gcode_macro.load_template(
             config, 'tool_deactivate_gcode', '')
 
+        if self.available and self.dock_sense_pin and self.grab_sense_pin:
+            buttons = self.printer.load_object(config, 'buttons')
+            buttons.register_buttons(
+                [self.dock_sense_pin, self.grab_sense_pin],
+                self._handle_sense_state)
+
     # --------------------------------------------------------------------
     # Python API for vortac_manager
     # --------------------------------------------------------------------
+
+    def _handle_sense_state(self, eventtime, state):
+        # buttons.register_buttons returns a bit mask in pin-list order.
+        self.dock_sense_state = bool(state & 0x01)
+        self.grab_sense_state = bool(state & 0x02)
+        self.sense_state_time = eventtime
+
+    def is_docked(self):
+        # Sense lines are default HIGH and actively pulled LOW.
+        return self.dock_sense_state is False
+
+    def is_grabbed(self):
+        return self.grab_sense_state is False
+
+    def sense_ready(self):
+        return (self.dock_sense_state is not None
+                and self.grab_sense_state is not None)
 
     def get_dock_pos(self, dock_name, axis):
         """Return calibrated coordinate for this tool at `dock_name`.
@@ -110,6 +136,8 @@ class VortacTool:
             'gcode_offset_y': self.gcode_offset_y,
             'gcode_offset_z': self.gcode_offset_z,
             'dock_positions': self.dock_positions,
+            'dock_sense_state': self.dock_sense_state,
+            'grab_sense_state': self.grab_sense_state,
         }
 
 
