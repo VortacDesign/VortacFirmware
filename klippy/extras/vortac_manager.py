@@ -197,8 +197,10 @@ class VortacManager:
             for tid, tool in sorted(self.tools.items()))
 
     def _dwell_for_sense(self):
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.dwell(self.dock_strobe_time)
+        # Use reactor time so LED updates and button callbacks can be processed
+        # inside this gcode command before we read cached sense states.
+        reactor = self.printer.get_reactor()
+        reactor.pause(reactor.monotonic() + self.dock_strobe_time)
 
     def _detect_tools(self, gcmd=None):
         debug = bool(gcmd and gcmd.get_int('DEBUG', 0, minval=0, maxval=1))
