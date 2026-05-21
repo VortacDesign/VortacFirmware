@@ -190,11 +190,19 @@ class VortacManager:
             return 'UNKNOWN'
         return 'HIGH' if state else 'LOW'
 
+    def _format_tool_sense_states(self):
+        return ', '.join(
+            f"{tid}:dock={self._sense_label(tool.dock_sense_state)}"
+            f"/grab={self._sense_label(tool.grab_sense_state)}"
+            for tid, tool in sorted(self.tools.items()))
+
     def _dwell_for_sense(self):
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.dwell(self.dock_strobe_time)
 
     def _detect_tools(self, gcmd=None):
+        debug = bool(gcmd and gcmd.get_int('DEBUG', 0, minval=0, maxval=1))
+        debug_lines = []
         original_colors = self._get_led_color_data()
         # Detection baseline: all Tool_id channels off. Then each dock is
         # strobed on in turn; the docked tool flips its dock_sense state.
@@ -208,6 +216,9 @@ class VortacManager:
             for i, color in enumerate(baseline_colors):
                 self._set_dock_led_color(i, color)
             self._dwell_for_sense()
+            if debug:
+                debug_lines.append(
+                    f"baseline all-off: {self._format_tool_sense_states()}")
 
             baseline_dock = {
                 tid: tool.dock_sense_state
@@ -238,12 +249,15 @@ class VortacManager:
                     baseline_colors[dock_index], 1.0)
                 self._set_dock_led_color(dock_index, strobe_color)
                 self._dwell_for_sense()
+                dock_name = self._dock_name(dock_index)
+                if debug:
+                    debug_lines.append(
+                        f"{dock_name} on: {self._format_tool_sense_states()}")
 
                 candidates = [
                     tid for tid, tool in self.tools.items()
                     if tool.dock_sense_state is False
                 ]
-                dock_name = self._dock_name(dock_index)
                 if len(candidates) == 1:
                     detected[dock_name] = candidates[0]
                 elif len(candidates) > 1:
@@ -268,13 +282,14 @@ class VortacManager:
             ]
             if gcmd is not None:
                 self._respond_detection(gcmd, detected, grabbed_ids,
-                                        missing, ambiguous)
+                                        missing, ambiguous, debug_lines)
             return detected
         finally:
             for i in range(self.dock_count):
                 self._set_dock_led_color(i, original_colors[i])
 
-    def _respond_detection(self, gcmd, detected, grabbed_ids, missing, ambiguous):
+    def _respond_detection(self, gcmd, detected, grabbed_ids, missing,
+                           ambiguous, debug_lines=None):
         dock_line = ', '.join(
             f"{dock}={tool_id or 'empty'}"
             for dock, tool_id in sorted(detected.items()))
@@ -296,6 +311,8 @@ class VortacManager:
         ]
         if unknown:
             msg += f"\n  Unknown sense: {', '.join(unknown)}"
+        if debug_lines:
+            msg += "\n  Debug:\n    " + "\n    ".join(debug_lines)
         gcmd.respond_info(msg)
 
     # --------------------------------------------------------------------
