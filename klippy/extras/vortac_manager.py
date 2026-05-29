@@ -25,7 +25,7 @@ import logging
 # Z + DOCK_Z_CLEARANCE, used to lift a grabbed tool off the dock screws or
 # approach with a held tool before dropping it into the dock.
 DOCK_Y_SAFE      = 50.0    # mm, Y clearance for approach/depart
-DOCK_Z_CLEARANCE = 4.5     # mm, lift from saved hooked Z to clearance Z
+DOCK_Z_CLEARANCE = 5.5     # mm, lift from saved hooked Z to clearance Z
 DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
 DOCK_SLIDE_F     = 500     # mm/min, slow slide-in/out and Z hop
 
