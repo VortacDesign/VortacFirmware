@@ -20,12 +20,12 @@
 import logging
 
 
-# Hook-on-screws dock geometry. Approach happens at the saved (x, y, z) seat
-# position, offset by Y_SAFE in Y for clearance and Z_CLEARANCE in Z for the
-# engage/disengage drop. These match the original tool_doc_load / unload
-# sequences; tweak here if the dock geometry changes.
+# Hook-on-screws dock geometry. Saved dock positions are the hooked/engage
+# position (grabber inside the tool at dock height). The clearance position is
+# Z + DOCK_Z_CLEARANCE, used to lift a grabbed tool off the dock screws or
+# approach with a held tool before dropping it into the dock.
 DOCK_Y_SAFE      = 50.0    # mm, Y clearance for approach/depart
-DOCK_Z_CLEARANCE = 4.4     # mm, Z drop during engage/disengage
+DOCK_Z_CLEARANCE = 4.4     # mm, lift from saved hooked Z to clearance Z
 DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
 DOCK_SLIDE_F     = 500     # mm/min, slow slide-in/out and Z hop
 
@@ -84,10 +84,10 @@ class VortacManager:
             desc="Report selected calibration dock/tool")
         gcode.register_command(
             'VORTAC_DOCK_CAL_SAVE', self.cmd_VORTAC_DOCK_CAL_SAVE,
-            desc="Save current XYZ for selected calibration dock/tool")
+            desc="Save current hooked/engage XYZ for selected dock/tool")
         gcode.register_command(
             'VORTAC_DOCK_SAVE_POS', self.cmd_VORTAC_DOCK_SAVE_POS,
-            desc="Save current XYZ as TOOL's position for DOCK=name")
+            desc="Save current hooked/engage XYZ as TOOL's DOCK position")
 
         self.printer.register_event_handler(
             'klippy:connect', self._handle_connect)
@@ -196,6 +196,15 @@ class VortacManager:
             f"/grab={self._sense_label(tool.grab_sense_state)}"
             for tid, tool in sorted(self.tools.items()))
 
+    def _format_detection_debug_states(self):
+        dock = ', '.join(
+            f"{tid}={self._sense_label(tool.dock_sense_state)}"
+            for tid, tool in sorted(self.tools.items()))
+        grab = ', '.join(
+            f"{tid}={self._sense_label(tool.grab_sense_state)}"
+            for tid, tool in sorted(self.tools.items()))
+        return f"dock[{dock}] grab[{grab}]"
+
     def _dwell_for_sense(self):
         # Use reactor time so LED updates and button callbacks can be processed
         # inside this gcode command before we read cached sense states.
@@ -220,7 +229,7 @@ class VortacManager:
             self._dwell_for_sense()
             if debug:
                 debug_lines.append(
-                    f"baseline all-off: {self._format_tool_sense_states()}")
+                    f"baseline all-off: {self._format_detection_debug_states()}")
 
             baseline_dock = {
                 tid: tool.dock_sense_state
@@ -254,7 +263,7 @@ class VortacManager:
                 dock_name = self._dock_name(dock_index)
                 if debug:
                     debug_lines.append(
-                        f"{dock_name} on: {self._format_tool_sense_states()}")
+                        f"{dock_name} on: {self._format_detection_debug_states()}")
 
                 candidates = [
                     tid for tid, tool in self.tools.items()
@@ -379,8 +388,25 @@ class VortacManager:
     # --------------------------------------------------------------------
 
     def _park_at_dock(self, tool, dock_name, gcmd):
-        """Park a held tool: approach at seat Z, slide in, drop onto dock
-        screws, disengage the grabber, slide back out."""
+        """Park a held tool: approach lifted, slide in, drop to saved hooked
+        Z, disengage the grabber, slide back out."""
+        x = tool.get_dock_pos(dock_name, 'x')
+        y = tool.get_dock_pos(dock_name, 'y')
+        z = tool.get_dock_pos(dock_name, 'z')
+        gcode = self.printer.lookup_object('gcode')
+        gcode.run_script_from_command(
+            f'G90\n'
+            f'G1 X{x} Y{y + DOCK_Y_SAFE} Z{z + DOCK_Z_CLEARANCE} '
+            f'F{DOCK_APPROACH_F}\n'
+            f'G1 Y{y} F{DOCK_SLIDE_F}\n'
+            f'G1 Z{z} F{DOCK_SLIDE_F}')
+        self.grabber.disengage(gcmd=gcmd)
+        gcode.run_script_from_command(
+            f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+
+    def _fetch_from_dock(self, tool, dock_name, gcmd):
+        """Fetch a docked tool: approach at saved hooked Z, slide in, engage
+        the grabber, lift off the dock screws, slide back out."""
         x = tool.get_dock_pos(dock_name, 'x')
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
@@ -388,28 +414,10 @@ class VortacManager:
         gcode.run_script_from_command(
             f'G90\n'
             f'G1 X{x} Y{y + DOCK_Y_SAFE} Z{z} F{DOCK_APPROACH_F}\n'
-            f'G1 Y{y} F{DOCK_SLIDE_F}\n'
-            f'G1 Z{z - DOCK_Z_CLEARANCE} F{DOCK_SLIDE_F}')
-        self.grabber.disengage(gcmd=gcmd)
-        gcode.run_script_from_command(
-            f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
-
-    def _fetch_from_dock(self, tool, dock_name, gcmd):
-        """Fetch a docked tool: approach below seat so the grabber slides
-        under the tool, slide in, engage the grabber, lift off the dock
-        screws, slide back out."""
-        x = tool.get_dock_pos(dock_name, 'x')
-        y = tool.get_dock_pos(dock_name, 'y')
-        z = tool.get_dock_pos(dock_name, 'z')
-        gcode = self.printer.lookup_object('gcode')
-        gcode.run_script_from_command(
-            f'G90\n'
-            f'G1 X{x} Y{y + DOCK_Y_SAFE} Z{z - DOCK_Z_CLEARANCE} '
-            f'F{DOCK_APPROACH_F}\n'
             f'G1 Y{y} F{DOCK_SLIDE_F}')
         self.grabber.engage(gcmd=gcmd)
         gcode.run_script_from_command(
-            f'G1 Z{z} F{DOCK_SLIDE_F}\n'
+            f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_SLIDE_F}\n'
             f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
 
     def _dock_holding(self, tool_id):
@@ -439,6 +447,7 @@ class VortacManager:
                 f"(dock geometry is only valid frame-flat)")
 
     def _save_dock_pos(self, tool, dock, gcmd):
+        """Save current toolhead position as the dock's hooked/engage XYZ."""
         self._ensure_gantry_flat(gcmd)
         self._parse_dock_index(dock, gcmd)
         toolhead = self.printer.lookup_object('toolhead')

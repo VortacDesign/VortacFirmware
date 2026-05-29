@@ -105,7 +105,10 @@ with `available=True`), the grabber (required), and `[vortac_qgl_state]`
 - **Dock motion** is hardcoded (constants at top of file):
   `DOCK_Y_SAFE = 50.0`, `DOCK_Z_CLEARANCE = 4.4`, `DOCK_APPROACH_F = 2000`,
   `DOCK_SLIDE_F = 500`. Edit there for global geometry tweaks; per-tool
-  tweaks belong in `tool_activate_gcode` / `tool_deactivate_gcode`.
+  tweaks belong in `tool_activate_gcode` / `tool_deactivate_gcode`. Saved dock
+  positions are the hooked/engage position; load uses saved Z then lifts to
+  `Z + DOCK_Z_CLEARANCE`, and unload approaches at `Z + DOCK_Z_CLEARANCE`
+  before dropping to saved Z.
 - **Detection:** `VORTAC_DETECT` turns all dock Tool_id channels off, strobes
   one dock's configured LED channel on at a time, and assigns the dock to any
   tool whose cached `dock_sense_pin` reads LOW. Every LED's original RGBW value
@@ -114,7 +117,8 @@ with `available=True`), the grabber (required), and `[vortac_qgl_state]`
   channels are off.
 - **Dock calibration context:** `VORTAC_SELECT_DOCK DOCK=dockN` runs detection
   and stores the detected dock/tool pair. `VORTAC_DOCK_CAL_SAVE` saves the
-  current XYZ to that selected tool/dock and fails if no tool was detected.
+  current hooked/engage XYZ to that selected tool/dock and fails if no tool was
+  detected.
 
 ## Lifecycle & dependencies
 

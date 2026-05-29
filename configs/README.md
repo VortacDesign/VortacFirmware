@@ -64,7 +64,7 @@ per `tool_index` (`[extruder]` → `[extruder1]`, `[fan]` →
 VORTAC_GANTRY_FLAT
 G28                           # if not homed
 VORTAC_SELECT_DOCK DOCK=dock0 # detects the tool in dock0 and selects it
-# jog toolhead to the exact dock seat
+# jog toolhead to the exact hooked/engage position in the dock
 VORTAC_DOCK_CAL_SAVE
 SAVE_CONFIG
 ```
@@ -72,7 +72,9 @@ SAVE_CONFIG
 `VORTAC_SELECT_DOCK` runs `VORTAC_DETECT`, stores the detected dock/tool pair,
 and fails if the selected dock has no detected tool. `VORTAC_DOCK_CAL_SAVE`
 refuses if the gantry is `tilted` (dock geometry only valid frame-flat) or no
-dock/tool was selected.
+dock/tool was selected. The saved Z is the hooked/engage height. Tool loading
+uses that saved Z directly, then lifts by `DOCK_Z_CLEARANCE`; unloading
+approaches at saved Z + `DOCK_Z_CLEARANCE`, drops to saved Z, then disengages.
 
 Manual fallback:
 
@@ -90,12 +92,12 @@ SAVE_CONFIG
 | `VORTAC_DETECT` | manager | strobe dock Tool_id channels and update dock map |
 | `VORTAC_SELECT_DOCK DOCK=dockN` | manager | detect/select dock and its tool for calibration |
 | `VORTAC_DOCK_CAL_STATUS` | manager | report selected calibration dock/tool |
-| `VORTAC_DOCK_CAL_SAVE` | manager | save current XYZ for selected calibration dock/tool |
+| `VORTAC_DOCK_CAL_SAVE` | manager | save current hooked/engage XYZ for selected calibration dock/tool |
 | `VORTAC_LOAD TOOL=Tn` | manager | fetch Tn from its dock |
 | `VORTAC_UNLOAD` | manager | park the held tool at its dock |
 | `VORTAC_SET_CURRENT_TOOL TOOL=Tn` | manager | set logical current tool without movement |
 | `VORTAC_SET_CURRENT_TOOL CLEAR=1` | manager | clear logical current tool |
-| `VORTAC_DOCK_SAVE_POS TOOL=Tn DOCK=name` | manager | save current XYZ as tool's pos for `name` |
+| `VORTAC_DOCK_SAVE_POS TOOL=Tn DOCK=name` | manager | save current hooked/engage XYZ as tool's pos for `name` |
 | `VORTAC_GANTRY_FLAT/TILT/STATUS` | qgl_state | toggle gantry between frame- and bed-flat |
 | `VORTAC_CALIBRATE` | grabber | populate AS5047D LUT |
 | `VORTAC_SET_ZERO` | grabber | set zero offset to current angle |

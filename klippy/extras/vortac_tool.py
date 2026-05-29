@@ -1,7 +1,7 @@
 # vortac_tool.py — per-tool config sections for the Vortac toolchanger
 #
 # Each [vortac_tool Tn] block describes ONE logical tool: its target MCU
-# namespace, gcode offsets, sense pins, and per-dock positions.
+# namespace, gcode offsets, sense pins, and per-dock hooked/engage positions.
 #
 # Hardware sections ([mcu toolN], extruder, fans, LEDs, etc.) must be present
 # in normal Klipper config before this extra loads. Klipper registers MCU pin
@@ -61,7 +61,7 @@ class VortacTool:
         self.gcode_offset_y = config.getfloat('gcode_offset_y', 0.0)
         self.gcode_offset_z = config.getfloat('gcode_offset_z', 0.0)
 
-        # Per-dock positions: params_<dock>_x|y|z
+        # Per-dock hooked/engage positions: params_<dock>_x|y|z
         self.dock_positions = _parse_dock_positions(config)
 
         # Activate/deactivate gcode templates
@@ -113,7 +113,7 @@ class VortacTool:
         return d is not None and all(a in d for a in ('x', 'y', 'z'))
 
     def save_dock_pos(self, dock_name, x, y, z):
-        """Persist (x, y, z) for `dock_name` into config (user runs SAVE_CONFIG)."""
+        """Persist hooked/engage XYZ for `dock_name` (user runs SAVE_CONFIG)."""
         cfg = self.printer.lookup_object('configfile')
         for axis, val in (('x', x), ('y', y), ('z', z)):
             cfg.set(self.name, f'params_{dock_name}_{axis}', f'{val:.4f}')

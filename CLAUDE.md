@@ -44,7 +44,7 @@ Notable internals:
 - **`cmd_vortac_calibrate`** drives the stepper through `TURNS` revolutions, subscribes to the angle sensor's bulk stream via `add_client(cb)`, and fits a per-bin circular mean over the dwell window. **Bulk angle data from Klipper is in radians×10000** (note in `dev_scripts/README.md`) — the conversion `(raw / 10000.0) * RAD2DEG` matters and is easy to miss.
 - **`cmd_simple_move`** is a closed-loop seek: bold coarse hop with a safety buffer, then proportional/halving fine convergence using `force_move.manual_move` + repeated quiet reads. Direction-constrained by `MODE=shortest|cw|ccw`.
 
-Persisted state lives in the config section itself: `lookup_table`, `zero_pos_offset`, `params_*_doc_pos` are written via `configfile.set` and survive `SAVE_CONFIG`.
+Persisted state lives in the config section itself: `lookup_table`, `zero_pos_offset`, and per-tool `params_dockN_x/y/z` hooked/engage positions are written via `configfile.set` and survive `SAVE_CONFIG`.
 
 ### `klippy/extras/include_with.py`
 
