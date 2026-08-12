@@ -25,9 +25,19 @@ import logging
 # Z + DOCK_Z_CLEARANCE, used to lift a grabbed tool off the dock screws or
 # approach with a held tool before dropping it into the dock.
 DOCK_Y_SAFE      = 50.0    # mm, Y clearance for approach/depart
-DOCK_Z_CLEARANCE = 5.5     # mm, lift from saved hooked Z to clearance Z
+DOCK_Z_CLEARANCE = 4.5     # mm, lift from saved hooked Z to clearance Z
 DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
 DOCK_SLIDE_F     = 500     # mm/min, slow slide-in/out and Z hop
+
+# Unhook verification (fetch only). The tool's dock_sense stays LOW while it
+# is optically coupled to its (lit) dock. After engaging we lift slowly and
+# back out in small checked steps; if dock_sense is still LOW the hooks have
+# not released and we stop, re-seat, and retry before dragging the tool.
+DOCK_UNHOOK_LIFT_F      = 20    # mm/min, slow Z lift off the dock screws
+DOCK_UNHOOK_BACK_F      = 20    # mm/min, checked backward steps
+DOCK_UNHOOK_STEP        = 1.0   # mm per checked backward step
+DOCK_UNHOOK_CHECK_STEPS = 1     # checked backward steps before giving up
+DOCK_UNHOOK_RETRIES     = 3     # re-seat + lift attempts before reversing
 
 
 class VortacManager:
@@ -36,7 +46,7 @@ class VortacManager:
 
         self.dock_count = config.getint('dock_count', minval=1)
         self.argb_led = config.get('argb_led', default=None)
-        self.argb_channel = config.get('argb_channel', default='red').lower()
+        self.argb_channel = config.get('argb_channel', default='green').lower()
         self.dock_strobe_time = config.getfloat(
             'dock_strobe_time', default=0.10, above=0.0)
 
@@ -359,6 +369,8 @@ class VortacManager:
                    or self.current_tool.home_dock
             self._park_at_dock(self.current_tool, dock, gcmd)
             self.dock_occupancy[dock] = self.current_tool.tool_id
+            # Parked: if the fetch below fails, we are holding nothing.
+            self.current_tool = None
 
         # 4. Pick up the target tool from its current dock
         if target is not None:
@@ -406,7 +418,9 @@ class VortacManager:
 
     def _fetch_from_dock(self, tool, dock_name, gcmd):
         """Fetch a docked tool: approach at saved hooked Z, slide in, engage
-        the grabber, lift off the dock screws, slide back out."""
+        the grabber, then unhook slowly with dock_sense verification and
+        checked backward steps. On repeated unhook failure, reverse all
+        steps (re-seat, disengage, back out empty) and raise."""
         x = tool.get_dock_pos(dock_name, 'x')
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
@@ -416,9 +430,74 @@ class VortacManager:
             f'G1 X{x} Y{y + DOCK_Y_SAFE} Z{z} F{DOCK_APPROACH_F}\n'
             f'G1 Y{y} F{DOCK_SLIDE_F}')
         self.grabber.engage(gcmd=gcmd)
+
+        if not tool.sense_ready():
+            # No sense feedback available — blind unhook, but slow.
+            if gcmd is not None:
+                gcmd.respond_info(
+                    f"Vortac: {tool.tool_id} sense pins not ready, "
+                    f"unhooking blind")
+            gcode.run_script_from_command(
+                f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_UNHOOK_LIFT_F}\n'
+                f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+            return
+
+        if not tool.is_grabbed() and gcmd is not None:
+            gcmd.respond_info(
+                f"Vortac warning: {tool.tool_id} grab_sense does not report "
+                f"grabbed after engage")
+
+        for attempt in range(1, DOCK_UNHOOK_RETRIES + 1):
+            if self._try_unhook(tool, y, z, gcmd):
+                gcode.run_script_from_command(
+                    f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+                return
+            if gcmd is not None:
+                gcmd.respond_info(
+                    f"Vortac: {tool.tool_id} still hooked at {dock_name} "
+                    f"(attempt {attempt}/{DOCK_UNHOOK_RETRIES}), re-seating")
+            # Re-seat: forward to dock Y, back down to hooked Z, try again.
+            gcode.run_script_from_command(
+                f'G1 Y{y} F{DOCK_UNHOOK_BACK_F}\n'
+                f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
+
+        # All retries failed — reverse everything: tool stays in its dock,
+        # release the grabber and back out empty.
+        self.grabber.disengage(gcmd=gcmd)
         gcode.run_script_from_command(
-            f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_SLIDE_F}\n'
             f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+        raise self.printer.command_error(
+            f"Vortac: failed to unhook {tool.tool_id} from {dock_name} "
+            f"after {DOCK_UNHOOK_RETRIES} attempts; tool left in dock, "
+            f"grabber disengaged")
+
+    def _try_unhook(self, tool, y, z, gcmd):
+        """One unhook attempt from the hooked position: slow lift, then
+        checked 1mm backward steps. Returns True once dock_sense reports
+        the tool released; False if it stays coupled (hooks not free).
+        Leaves the toolhead wherever the last checked step ended."""
+        gcode = self.printer.lookup_object('gcode')
+        gcode.run_script_from_command(
+            f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_UNHOOK_LIFT_F}')
+        if self._dock_released(tool):
+            return True
+        cur_y = y
+        for _ in range(DOCK_UNHOOK_CHECK_STEPS):
+            cur_y += DOCK_UNHOOK_STEP
+            gcode.run_script_from_command(
+                f'G1 Y{cur_y:.3f} F{DOCK_UNHOOK_BACK_F}')
+            if self._dock_released(tool):
+                return True
+        # Still coupled to the dock -> stop the backward movement here.
+        return False
+
+    def _dock_released(self, tool):
+        """Wait for motion to finish, let sense callbacks run, then report
+        whether the tool has optically decoupled from its dock."""
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.wait_moves()
+        self._dwell_for_sense()
+        return not tool.is_docked()
 
     def _dock_holding(self, tool_id):
         for dock, tid in self.dock_occupancy.items():
