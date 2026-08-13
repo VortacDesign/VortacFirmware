@@ -29,14 +29,24 @@ DOCK_Z_CLEARANCE = 4.5     # mm, lift from saved hooked Z to clearance Z
 DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
 DOCK_SLIDE_F     = 500     # mm/min, slow slide-in/out and Z hop
 
-# Unhook verification (fetch only). The tool's dock_sense stays LOW while it
-# is optically coupled to its (lit) dock. After engaging we lift slowly and
-# back out in small checked steps; if dock_sense is still LOW the hooks have
-# not released and we stop, re-seat, and retry before dragging the tool.
+# Unhook verification (fetch only). dock_sense is a pogo pin on a landing
+# pad; the dock board rides along on its spring travel during the Z lift, so:
+#   dock_sense LOW  = pogo contact to the dock pad (tool board is powered
+#                     through these pogos while parked!)
+#   grab_sense LOW  = grabber physically holding the tool
+# Expected good sequence: dock_sense STAYS LOW through the whole lift (board
+# follows) and only goes HIGH on the Y backout when the pin slides off the
+# pad. Therefore:
+#   - dock HIGH *during the lift*  -> tool is tilting/binding, contact lost
+#     -> stop within one 0.5mm step, before the pogos tear off.
+#   - dock LOW *after a backward step* -> hooks did not release -> stop,
+#     re-seat, retry.
+#   - grab HIGH at any checkpoint -> grabber lost the tool -> freeze, error.
 DOCK_UNHOOK_LIFT_F      = 20    # mm/min, slow Z lift off the dock screws
 DOCK_UNHOOK_BACK_F      = 20    # mm/min, checked backward steps
+DOCK_UNHOOK_ZSTEP       = 0.5   # mm per checked lift step
 DOCK_UNHOOK_STEP        = 1.0   # mm per checked backward step
-DOCK_UNHOOK_CHECK_STEPS = 1     # checked backward steps before giving up
+DOCK_UNHOOK_CHECK_STEPS = 1     # backward steps for dock decoupling check
 DOCK_UNHOOK_RETRIES     = 3     # re-seat + lift attempts before reversing
 
 
@@ -83,6 +93,10 @@ class VortacManager:
         gcode.register_command(
             'VORTAC_SENSE_STATUS', self.cmd_VORTAC_SENSE_STATUS,
             desc="Report raw cached tool sense pin states")
+        gcode.register_command(
+            'VORTAC_SENSE_MONITOR', self.cmd_VORTAC_SENSE_MONITOR,
+            desc="Poll cached sense states for DURATION seconds and "
+                 "report every transition (verifies mid-command updates)")
         gcode.register_command(
             'VORTAC_DOCK_STROBE', self.cmd_VORTAC_DOCK_STROBE,
             desc="Manually set one dock strobe channel for debugging")
@@ -448,15 +462,50 @@ class VortacManager:
                 f"grabbed after engage")
 
         for attempt in range(1, DOCK_UNHOOK_RETRIES + 1):
-            if self._try_unhook(tool, y, z, gcmd):
+            result = self._try_unhook(tool, y, z, gcmd)
+            if result == 'released':
                 gcode.run_script_from_command(
                     f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+                self._wait_sense()
+                if not tool.is_grabbed():
+                    raise self.printer.command_error(
+                        f"Vortac: {tool.tool_id} grab_sense went HIGH after "
+                        f"leaving {dock_name} — tool may have been lost. "
+                        f"Stopped; check the tool before continuing.")
                 return
+            if result == 'lost_grab':
+                # Grabber lost the tool mid-unhook. Do NOT move blindly —
+                # the tool's position is unknown. Freeze and demand help.
+                raise self.printer.command_error(
+                    f"Vortac: grab_sense went HIGH while unhooking "
+                    f"{tool.tool_id} from {dock_name} — grabber lost the "
+                    f"tool. Motion stopped; intervene manually.")
+            if result == 'tilt':
+                # Dock pogo contact lost during the lift: tool is binding/
+                # tilting on the hooks. Lower straight back down (no Y move
+                # has happened yet) to re-seat and restore contact.
+                if gcmd is not None:
+                    gcmd.respond_info(
+                        f"Vortac: {tool.tool_id} dock contact lost during "
+                        f"lift at {dock_name} (tilt/bind suspected), "
+                        f"lowering to re-seat "
+                        f"(attempt {attempt}/{DOCK_UNHOOK_RETRIES})")
+                gcode.run_script_from_command(
+                    f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
+                self._wait_sense()
+                if not tool.is_docked():
+                    raise self.printer.command_error(
+                        f"Vortac: dock contact for {tool.tool_id} at "
+                        f"{dock_name} did not return after lowering back "
+                        f"to the hooked position. Stopped; check the tool "
+                        f"and pogo pins manually.")
+                continue
+            # result == 'hooked': backward step still shows dock contact,
+            # hooks did not release. Re-seat: forward to dock Y, back down.
             if gcmd is not None:
                 gcmd.respond_info(
                     f"Vortac: {tool.tool_id} still hooked at {dock_name} "
                     f"(attempt {attempt}/{DOCK_UNHOOK_RETRIES}), re-seating")
-            # Re-seat: forward to dock Y, back down to hooked Z, try again.
             gcode.run_script_from_command(
                 f'G1 Y{y} F{DOCK_UNHOOK_BACK_F}\n'
                 f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
@@ -472,32 +521,57 @@ class VortacManager:
             f"grabber disengaged")
 
     def _try_unhook(self, tool, y, z, gcmd):
-        """One unhook attempt from the hooked position: slow lift, then
-        checked 1mm backward steps. Returns True once dock_sense reports
-        the tool released; False if it stays coupled (hooks not free).
+        """One unhook attempt from the hooked position.
+
+        Stepwise slow lift, during which dock_sense must STAY LOW (the
+        spring-loaded dock board rides along; losing pogo contact here
+        means the tool is tilting on stuck hooks). Then checked backward
+        steps, where dock_sense going HIGH is the clean release.
+
+        Returns 'released', 'hooked' (dock still LOW after the checked
+        backward steps), 'tilt' (dock contact lost during the lift; no Y
+        motion has happened yet), or 'lost_grab' (grab_sense went HIGH).
         Leaves the toolhead wherever the last checked step ended."""
         gcode = self.printer.lookup_object('gcode')
-        gcode.run_script_from_command(
-            f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_UNHOOK_LIFT_F}')
-        if self._dock_released(tool):
-            return True
+        cur_z = z
+        while cur_z < z + DOCK_Z_CLEARANCE - 1e-6:
+            cur_z = min(cur_z + DOCK_UNHOOK_ZSTEP, z + DOCK_Z_CLEARANCE)
+            gcode.run_script_from_command(
+                f'G1 Z{cur_z:.3f} F{DOCK_UNHOOK_LIFT_F}')
+            self._wait_sense()
+            self._log_unhook_checkpoint(tool, 'lift', cur_z - z)
+            if not tool.is_grabbed():
+                return 'lost_grab'
+            if not tool.is_docked():
+                return 'tilt'
         cur_y = y
         for _ in range(DOCK_UNHOOK_CHECK_STEPS):
             cur_y += DOCK_UNHOOK_STEP
             gcode.run_script_from_command(
                 f'G1 Y{cur_y:.3f} F{DOCK_UNHOOK_BACK_F}')
-            if self._dock_released(tool):
-                return True
-        # Still coupled to the dock -> stop the backward movement here.
-        return False
+            self._wait_sense()
+            self._log_unhook_checkpoint(tool, 'backout', cur_y - y)
+            if not tool.is_grabbed():
+                return 'lost_grab'
+            if not tool.is_docked():
+                return 'released'
+        return 'hooked'
 
-    def _dock_released(self, tool):
-        """Wait for motion to finish, let sense callbacks run, then report
-        whether the tool has optically decoupled from its dock."""
+    def _log_unhook_checkpoint(self, tool, phase, offset):
+        """Trace every unhook checkpoint to klippy.log for post-mortem
+        analysis of the sense signals during a real load."""
+        logging.info(
+            "vortac unhook %s: %s +%.3fmm dock=%s grab=%s",
+            tool.tool_id, phase, offset,
+            self._sense_label(tool.dock_sense_state),
+            self._sense_label(tool.grab_sense_state))
+
+    def _wait_sense(self):
+        """Wait for motion to finish, then let sense callbacks run so the
+        cached dock/grab states reflect the new position."""
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.wait_moves()
         self._dwell_for_sense()
-        return not tool.is_docked()
 
     def _dock_holding(self, tool_id):
         for dock, tid in self.dock_occupancy.items():
@@ -613,6 +687,46 @@ class VortacManager:
                 f"dock_pin={tool.dock_sense_pin or 'n/a'} "
                 f"grab_pin={tool.grab_sense_pin or 'n/a'}")
         gcmd.respond_info('\n'.join(lines))
+
+    def cmd_VORTAC_SENSE_MONITOR(self, gcmd):
+        """Live-verify that sense callbacks are processed during
+        reactor.pause inside a running gcode command — the exact mechanism
+        the unhook checkpoints rely on. While this runs, other gcode is
+        queued, so change states physically (lift/wiggle the tool)."""
+        duration = gcmd.get_float('DURATION', 10.0, above=0.0)
+        interval = gcmd.get_float(
+            'INTERVAL', self.dock_strobe_time, above=0.0)
+        if not self.tools:
+            raise gcmd.error("No Vortac tools registered")
+        reactor = self.printer.get_reactor()
+        start = reactor.monotonic()
+        last = {
+            tid: (tool.dock_sense_state, tool.grab_sense_state)
+            for tid, tool in self.tools.items()
+        }
+        gcmd.respond_info(
+            f"Monitoring sense states for {duration:.1f}s "
+            f"(poll every {interval * 1000:.0f}ms). "
+            f"Start: {self._format_tool_sense_states()}")
+        transitions = 0
+        while reactor.monotonic() - start < duration:
+            reactor.pause(reactor.monotonic() + interval)
+            for tid, tool in sorted(self.tools.items()):
+                cur = (tool.dock_sense_state, tool.grab_sense_state)
+                if cur == last[tid]:
+                    continue
+                elapsed = reactor.monotonic() - start
+                gcmd.respond_info(
+                    f"[{elapsed:6.2f}s] {tid}: "
+                    f"dock {self._sense_label(last[tid][0])}"
+                    f"->{self._sense_label(cur[0])}, "
+                    f"grab {self._sense_label(last[tid][1])}"
+                    f"->{self._sense_label(cur[1])}")
+                last[tid] = cur
+                transitions += 1
+        gcmd.respond_info(
+            f"Monitor done: {transitions} transition(s) in {duration:.1f}s. "
+            f"End: {self._format_tool_sense_states()}")
 
     def cmd_VORTAC_DOCK_STROBE(self, gcmd):
         dock = gcmd.get('DOCK').strip().lower()
