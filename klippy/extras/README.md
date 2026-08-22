@@ -12,7 +12,8 @@ Hardware-only: AS5047D angle sensor (SPI), `manual_stepper grabber` closed-loop
 control, LUT-based raw→true angle interpolation.
 
 - **Gcode:** `VORTAC_CALIBRATE`, `VORTAC_SET_ZERO`, `VORTAC_MOVE`,
-  `VORTAC_SIMPLE_READ`, `VORTAC_MESURE`.
+  `VORTAC_SIMPLE_READ`, `VORTAC_MESURE`, `VORTAC_ENGAGE [ANGLE=<deg>]`,
+  `VORTAC_DISENGAGE`.
 - **Python API** (called by manager): `engage(angle=None, gcmd=None)`,
   `disengage(gcmd=None)`, `read_angle(gcmd=None)`.
 - **Calibration:** synchronous direct-read (forward-only, multi-turn,

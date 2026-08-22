@@ -54,6 +54,11 @@ class VortacGrabber:
         gcode.register_command("VORTAC_MOVE", self.cmd_simple_move)
         gcode.register_command("VORTAC_SIMPLE_READ", self.cmd_simple_read)
         gcode.register_command("VORTAC_MESURE", self.cmd_tool_messure)
+        gcode.register_command("VORTAC_ENGAGE", self.cmd_engage,
+                               desc="Move grabber to engage_pos "
+                                    "(override with ANGLE=)")
+        gcode.register_command("VORTAC_DISENGAGE", self.cmd_disengage,
+                               desc="Move grabber to disengage_pos")
 
     # --------------------------------------------------------------------
     # Python API (called by vortac_manager and other Klipper extras).
@@ -77,6 +82,13 @@ class VortacGrabber:
     # --------------------------------------------------------------------
     # gcode handlers
     # --------------------------------------------------------------------
+
+    def cmd_engage(self, gcmd):
+        angle = gcmd.get_float('ANGLE', default=None)
+        return self.engage(angle=angle, gcmd=gcmd)
+
+    def cmd_disengage(self, gcmd):
+        return self.disengage(gcmd=gcmd)
 
     def cmd_vortac_set_zero(self, gcmd):
         raw = self.read_raw()
