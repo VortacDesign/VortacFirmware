@@ -30,6 +30,14 @@ class VortacGrabber:
         self.engage_pos = config.getint('engage_pos', default=130)
         self.zero_pos_offset = config.getfloat('zero_pos_offset', default=0.0)
 
+        # Direction constraint for engage/disengage moves. 'cw' means
+        # increasing true angle (same convention as VORTAC_MOVE MODE=cw).
+        _modes = {'shortest': 'shortest', 'cw': 'cw', 'ccw': 'ccw'}
+        self.engage_mode = config.getchoice(
+            'engage_mode', _modes, default='shortest')
+        self.disengage_mode = config.getchoice(
+            'disengage_mode', _modes, default='shortest')
+
         # Absorb any stale params_* options left in saved-config blocks from
         # the pre-Phase-2 era (dock geometry now lives on [vortac_tool Tn]).
         # Marking them accessed prevents Klipper "unknown option" errors.
@@ -68,11 +76,12 @@ class VortacGrabber:
     def engage(self, angle=None, gcmd=None):
         """Move grabber to engage_pos (or override `angle`). Returns final true angle."""
         target = float(angle) if angle is not None else float(self.engage_pos)
-        return self._move_to(target, gcmd=gcmd)
+        return self._move_to(target, mode=self.engage_mode, gcmd=gcmd)
 
     def disengage(self, gcmd=None):
         """Move grabber to disengage_pos. Returns final true angle."""
-        return self._move_to(float(self.disengage_pos), gcmd=gcmd)
+        return self._move_to(float(self.disengage_pos),
+                             mode=self.disengage_mode, gcmd=gcmd)
 
     def read_angle(self, gcmd=None):
         """Synchronous direct read; returns offset-applied true angle in [0, 360)."""
@@ -109,20 +118,14 @@ class VortacGrabber:
     def cmd_simple_move(self, gcmd):
         target = gcmd.get_float('TARGET', default=0.0)
         kwargs = {
-            'mode':         gcmd.get('MODE', default='shortest').lower(),
-            'speed':        gcmd.get_float('SPEED', default=self.speed),
-            'tol':          gcmd.get_float('TOL', default=2.0),
-            'overshoot':    gcmd.get_float('OVERSHOOT_MARGIN', default=None),
-            'guard':        gcmd.get_float('GUARD', default=None),
-            'min_step':     gcmd.get_float('MIN_STEP', default=0.20),
-            'max_step':     gcmd.get_float('MAX_STEP', default=6.0),
-            'kP':           gcmd.get_float('K', default=1.4),
-            'max_iters':    gcmd.get_int('MAX_ITERS', default=40),
-            'fine_speed':   gcmd.get_float('FINE_SPEED', default=None),
-            'n_reads':      gcmd.get_int('READS', default=2),
-            'r_settle':     gcmd.get_float('READ_SETTLE', default=0.010),
-            'near_sw':      gcmd.get_float('NEAR_SWITCH', default=None),
-            'coarse_ratio': gcmd.get_float('COARSE_RATIO', default=0.93),
+            'mode':      gcmd.get('MODE', default='shortest').lower(),
+            'speed':     gcmd.get_float('SPEED', default=self.speed),
+            'tol':       gcmd.get_float('TOL', default=2.0),
+            'backoff':   gcmd.get_float('BACKOFF', default=None),
+            'guard_frac': gcmd.get_float('GUARD_FRAC', default=0.05),
+            'max_iters': gcmd.get_int('MAX_ITERS', default=10),
+            'n_reads':   gcmd.get_int('READS', default=2),
+            'r_settle':  gcmd.get_float('READ_SETTLE', default=0.010),
         }
         return self._move_to(target, gcmd=gcmd, **kwargs)
 
@@ -158,20 +161,27 @@ class VortacGrabber:
     # --------------------------------------------------------------------
 
     cmd_vortac_calibrate_help = (
-        "Populate LUT via direct synchronous SPI reads (forward, multi-turn)")
+        "Populate LUT via direct synchronous SPI reads "
+        "(DIR=cw|ccw|both, default both)")
 
     def cmd_vortac_calibrate(self, gcmd):
         """
         VORTAC_CALIBRATE [SAMPLES=<n>] [SPEED=<v>] [TURNS=<n>] [PHASE=<deg>]
                          [SETTLE=<s>] [READS=<n>] [READ_DWELL=<s>]
+                         [DIR=cw|ccw|both]
 
-        Forward-only calibration. At every bin:
-          1. manual_move forward by 360/SAMPLES
+        At every bin:
+          1. manual_move by ±360/SAMPLES
           2. dwell SETTLE then wait_moves so the move + dwell complete
              in wall-clock before any SPI read fires
           3. take READS direct SPI reads, circular-mean them
-        Multi-turn with last-turn-wins so the saved LUT reflects the
-        post-backlash steady-state reading at each bin.
+        TURNS passes per direction with last-turn-wins so each sweep
+        reflects the post-backlash steady-state reading at each bin.
+
+        DIR=cw sweeps with increasing true angle only (same convention as
+        VORTAC_MOVE MODE=cw), ccw with decreasing only. DIR=both (default)
+        sweeps cw then ccw, stores the per-bin circular midpoint, and
+        reports the cw/ccw spread — a direct backlash measurement.
         """
         def circ_mean(vals):
             sx = sum(math.cos(math.radians(v)) for v in vals)
@@ -181,12 +191,18 @@ class VortacGrabber:
             ang = math.degrees(math.atan2(sy, sx))
             return (ang % 360.0 + 360.0) % 360.0
 
+        def wrap180(a):
+            return ((a + 180.0) % 360.0) - 180.0
+
         samples    = gcmd.get_int('SAMPLES', default=180, minval=4)
         speed      = gcmd.get_float('SPEED', default=40.0, above=0.0)
         turns      = gcmd.get_int('TURNS', default=2, minval=1)
         settle     = gcmd.get_float('SETTLE', default=0.10, minval=0.0)
         reads      = gcmd.get_int('READS', default=8, minval=1)
         read_dwell = gcmd.get_float('READ_DWELL', default=0.001, minval=0.0)
+        dir_       = gcmd.get('DIR', default='both').lower()
+        if dir_ not in ('cw', 'ccw', 'both'):
+            raise gcmd.error("DIR must be cw, ccw or both")
         step  = 360.0 / float(samples)
         phase = gcmd.get_float('PHASE', default=step / 2.0)
 
@@ -200,52 +216,87 @@ class VortacGrabber:
             toolhead.dwell(settle)
             toolhead.wait_moves()
 
-        measured = [None] * samples
-        total = samples * turns
+        # Bin bookkeeping: after the pre-roll we sit at "bin -1"; every
+        # +step lands on the next bin, every -step on the previous one, so
+        # cw and ccw sweeps label the same physical positions identically.
+        cur_bin = [-1]
+
+        def sweep(direction):
+            measured = [None] * samples
+            for _k in range(samples * turns):
+                force_move(stepper, direction * step, speed)
+                toolhead.dwell(settle)
+                toolhead.wait_moves()
+                vals = []
+                for _ in range(reads):
+                    vals.append(self.read_raw())
+                    if read_dwell > 0:
+                        time.sleep(read_dwell)
+                cur_bin[0] += direction
+                # Earlier turns (where backlash/settling skewed readings)
+                # are overwritten by the final pass; last turn wins.
+                measured[cur_bin[0] % samples] = circ_mean(vals)
+            missing = [i for i, v in enumerate(measured) if v is None]
+            if missing:
+                raise self.printer.command_error(
+                    f"Incomplete data, empty bins: {missing}")
+            return measured
+
+        n_dirs = 2 if dir_ == 'both' else 1
         gcmd.respond_info(
-            f"Calibrating: {samples} bins x {turns} turn(s) = {total} steps; "
-            f"{reads} reads/pos, settle={settle}s")
+            f"Calibrating: {samples} bins x {turns} turn(s) x {n_dirs} "
+            f"direction(s); {reads} reads/pos, settle={settle}s")
 
-        for k in range(total):
-            force_move(stepper, +step, speed)
-            toolhead.dwell(settle)
-            toolhead.wait_moves()
-            vals = []
-            for _ in range(reads):
-                vals.append(self.read_raw())
-                if read_dwell > 0:
-                    time.sleep(read_dwell)
-            bin_idx = k % samples
-            # Earlier turns (where backlash/settling skewed readings) are
-            # overwritten by the final pass; last turn wins.
-            measured[bin_idx] = circ_mean(vals)
-
-        missing = [i for i, v in enumerate(measured) if v is None]
-        if missing:
-            raise self.printer.command_error(
-                f"Incomplete data, empty bins: {missing}")
+        if dir_ == 'ccw':
+            final = sweep(-1)
+        elif dir_ == 'cw':
+            final = sweep(+1)
+        else:
+            fw = sweep(+1)
+            gcmd.respond_info("cw sweep done, starting ccw sweep")
+            bw = sweep(-1)
+            final = [circ_mean([fw[i], bw[i]]) for i in range(samples)]
+            spread = [abs(wrap180(fw[i] - bw[i])) for i in range(samples)]
+            gcmd.respond_info(
+                "Backlash (cw vs ccw raw reading): mean {:.3f} deg, "
+                "max {:.3f} deg".format(sum(spread) / samples, max(spread)))
 
         # LUT entries are [true_deg, raw_deg]; 3 decimals = ~0.001° (well
         # below sensor LSB ~0.022° but plenty for interpolation precision).
-        pairs = [[round(i * step, 3), round(measured[i], 3)]
+        pairs = [[round(i * step, 3), round(final[i], 3)]
                  for i in range(samples)]
         cfg = self.printer.lookup_object('configfile')
         cfg.set(self.name, 'lookup_table', json.dumps(pairs))
         self.table = pairs[:]
 
         gcmd.respond_info(
-            f"Calibration OK. lookup_table saved ({samples} bins, last of "
-            f"{turns} turns, {reads} reads/pos). Run SAVE_CONFIG.")
+            f"Calibration OK. lookup_table saved ({samples} bins, "
+            f"DIR={dir_}, {turns} turn(s)/direction, {reads} reads/pos). "
+            f"Run SAVE_CONFIG.")
 
     # --------------------------------------------------------------------
     # Closed-loop move engine (drives engage/disengage and VORTAC_MOVE)
     # --------------------------------------------------------------------
 
     def _move_to(self, target_true, mode='shortest', speed=None, tol=2.0,
-                 overshoot=None, guard=None, min_step=0.20, max_step=6.0,
-                 kP=1.4, max_iters=40, fine_speed=None,
-                 n_reads=2, r_settle=0.010, near_sw=None,
-                 coarse_ratio=0.93, gcmd=None):
+                 backoff=None, guard_frac=0.05, max_iters=10,
+                 n_reads=2, r_settle=0.010, gcmd=None):
+        """
+        Closed-loop absolute move. The angle sensor is absolute ground
+        truth, so every pass commands the FULL remaining error in a single
+        manual_move and re-measures; lost steps or backlash simply show up
+        in the next reading and are corrected by the next full pass.
+        Typically converges in 1-2 moves.
+
+        Direction-constrained modes (cw/ccw) stop short of the target on
+        every pass by max(backoff, guard_frac * distance) — backoff
+        defaults to 0.5*tol (clamped below tol), guard_frac to 5% of the
+        remaining distance: mechanically overshooting the target there
+        could not be corrected without a full extra revolution. A tiny
+        overshoot that still lands inside tol is accepted as reached.
+        Large constrained moves thus take one long pass plus one short
+        finishing pass.
+        """
         def wrap180(a):
             return ((a + 180.0) % 360.0) - 180.0
 
@@ -292,87 +343,47 @@ class VortacGrabber:
         mode = (mode or 'shortest').lower()
         speed = float(speed) if speed is not None else float(self.speed)
         tol = float(tol)
-        overshoot = float(overshoot) if overshoot is not None else max(0.5 * tol, 0.5)
-        guard = float(guard) if guard is not None else max(1.0, tol)
-        fine_speed = (float(fine_speed) if fine_speed is not None
-                      else max(40.0, min(speed, 80.0)))
-        near_sw = float(near_sw) if near_sw is not None else max(2.0 * tol, 2.0)
+        constrained = mode in ('cw', 'clockwise',
+                               'ccw', 'counterclockwise', 'cclockwise')
+        backoff = float(backoff) if backoff is not None else 0.5 * tol
+        backoff = min(backoff, 0.8 * tol)
 
         toolhead = self.printer.lookup_object('toolhead')
         force_mv = self.printer.lookup_object('force_move').manual_move
         stepper = self.angle_sensor.calibration.mcu_stepper
 
-        # Stage A: bold coarse hop with safety buffer (don't enter the band).
-        cur_true = read_true_quiet(n_reads, r_settle)
-        err = err_by_mode(cur_true, target_true, mode)
-
-        if abs(err) > tol:
-            proposed = err * coarse_ratio
-            buf = max(guard, overshoot)
-            max_allow = max(0.0, abs(err) - buf)
-            step_mag = min(abs(proposed), max_allow)
-            sgn = 1.0 if err >= 0.0 else -1.0
-            coarse = sgn * step_mag
-            if mode in ('cw', 'clockwise') and coarse < 0:
-                coarse = 0.0
-            if mode in ('ccw', 'counterclockwise', 'cclockwise') and coarse > 0:
-                coarse = 0.0
-            if abs(coarse) > 0.01:
-                coarse = max(-10 * max_step, min(10 * max_step, coarse))
-                force_mv(stepper, coarse, speed)
-                toolhead.wait_moves()
-
-        # Stage B: fast proportional → halving near target.
         stable = 0
-        last_err = None
-        last_step_mag = max_step
-
+        moves = 0
+        cur_true = read_true_quiet(n_reads, r_settle)
         for i in range(max_iters):
-            cur_true = read_true_quiet(n_reads, r_settle)
-            err = err_by_mode(cur_true, target_true, mode)
-
-            if abs(err) <= tol:
+            # Accept by shortest distance even in constrained modes: a tiny
+            # mechanical overshoot inside tol is not worth going all the
+            # way around again.
+            if abs(wrap180(target_true - cur_true)) <= tol:
                 stable += 1
                 if stable >= 2:
-                    respond(f"Reached {cur_true:.2f}° (target {target_true:.2f}°, "
-                            f"tol {tol}) in {i + 1} iters")
+                    respond(f"Reached {cur_true:.2f}° (target "
+                            f"{target_true:.2f}°, tol {tol}) "
+                            f"in {moves} move(s)")
                     return cur_true
-                toolhead.dwell(0.008)
+                cur_true = read_true_quiet(n_reads, r_settle)
                 continue
             stable = 0
 
-            max_safe = max(0.0, abs(err) - 0.5 * tol)
+            err = err_by_mode(cur_true, target_true, mode)
+            step_ = err
+            if constrained:
+                back = max(backoff, guard_frac * abs(err))
+                step_ = math.copysign(max(0.0, abs(err) - back), err)
+            if abs(step_) >= 1e-3:
+                force_mv(stepper, step_, speed)
+                toolhead.wait_moves()
+                moves += 1
+            cur_true = read_true_quiet(n_reads, r_settle)
 
-            if abs(err) > near_sw:
-                proposal = kP * err
-                proposal = max(-max_step, min(max_step, proposal))
-                if abs(proposal) < min_step and max_safe >= min_step:
-                    proposal = math.copysign(min_step, err)
-            else:
-                last_step_mag = max(min_step, 0.5 * last_step_mag)
-                proposal = math.copysign(last_step_mag, err)
-
-            if mode in ('cw', 'clockwise') and proposal < 0:
-                proposal = abs(proposal)
-            if mode in ('ccw', 'counterclockwise', 'cclockwise') and proposal > 0:
-                proposal = -abs(proposal)
-
-            step_ = proposal
-            if abs(step_) > max_safe:
-                step_ = math.copysign(max_safe, step_)
-            if abs(step_) < 1e-3:
-                toolhead.dwell(0.006)
-                continue
-
-            force_mv(stepper, step_, fine_speed)
-            toolhead.wait_moves()
-
-            if last_err is not None and abs(err) > abs(last_err) + 0.05:
-                kP *= 0.75
-            last_err = err
-
-        respond(f"Stopped after {max_iters} iters at {cur_true:.2f}° "
-                f"(target {target_true:.2f}°, err {err:.2f}°)")
+        respond(f"Stopped after {max_iters} passes ({moves} moves) at "
+                f"{cur_true:.2f}° (target {target_true:.2f}°, err "
+                f"{wrap180(target_true - cur_true):.2f}°)")
         return cur_true
 
     # --------------------------------------------------------------------
@@ -429,14 +440,17 @@ class VortacGrabber:
             m1 += 360.0
             if xm < m0:
                 xm += 360.0
-        if t1 <= t0:
-            t1 += 360.0
 
         if abs(m1 - m0) < 1e-12:
             out = t0
         else:
             frac = (xm - m0) / (m1 - m0)
-            out = t0 + frac * (t1 - t0)
+            # Raw-adjacent LUT entries are one bin apart on the true circle in
+            # either direction (sensor may run reversed vs. the stepper) —
+            # take the shortest signed delta instead of assuming true
+            # increases with raw.
+            dt = ((t1 - t0 + 180.0) % 360.0) - 180.0
+            out = t0 + frac * dt
 
         if include_offset:
             out -= self.zero_pos_offset
