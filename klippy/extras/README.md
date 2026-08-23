@@ -11,15 +11,81 @@ Custom Klipper modules for the Vortac toolchanger. `install.sh` symlinks every
 Hardware-only: AS5047D angle sensor (SPI), `manual_stepper grabber` closed-loop
 control, LUT-based raw→true angle interpolation.
 
-- **Gcode:** `VORTAC_CALIBRATE`, `VORTAC_SET_ZERO`, `VORTAC_MOVE`,
-  `VORTAC_SIMPLE_READ`, `VORTAC_MESURE`, `VORTAC_ENGAGE [ANGLE=<deg>]`,
-  `VORTAC_DISENGAGE`.
 - **Python API** (called by manager): `engage(angle=None, gcmd=None)`,
   `disengage(gcmd=None)`, `read_angle(gcmd=None)`.
-- **Calibration:** synchronous direct-read (forward-only, multi-turn,
-  last-turn-wins, circular mean per bin). The Klipper bulk-stream approach
-  was lossy at sub-bit precision — direct reads are required for trustworthy
-  LUTs.
+- **Calibration** (`VORTAC_CALIBRATE`): synchronous direct-read (multi-turn,
+  last-turn-wins, circular mean per bin). `DIR=both` (default) sweeps cw
+  then ccw, stores the per-bin circular midpoint and reports the cw/ccw
+  spread as a backlash measurement; `DIR=cw|ccw` sweeps one direction only
+  (use the later operating/approach direction). The Klipper bulk-stream
+  approach was lossy at sub-bit precision — direct reads are required for
+  trustworthy LUTs.
+- **Closed-loop moves** (`VORTAC_MOVE`, engage/disengage): each pass
+  commands the full remaining error in one `manual_move`, re-measures,
+  repeats (typically 1–2 moves; lost steps show up in the next absolute
+  reading). `MODE=cw|ccw` constrained moves stop
+  `max(BACKOFF, GUARD_FRAC·dist)` short per pass so overshoot never forces
+  an extra revolution. `cw` means increasing true angle.
+
+#### Config options (`[vortac_grabber]`)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `angleSensor` | (required) | name of the `[angle ...]` section for the AS5047D |
+| `speed` | `50` | default move speed (deg/s) for closed-loop moves |
+| `engage_pos` | `130` | true angle for `VORTAC_ENGAGE` / `engage()` |
+| `disengage_pos` | `0` | true angle for `VORTAC_DISENGAGE` / `disengage()` |
+| `engage_mode` | `shortest` | direction constraint for engage: `shortest`, `cw`, `ccw` |
+| `disengage_mode` | `shortest` | direction constraint for disengage: `shortest`, `cw`, `ccw` |
+| `lookup_table` | (saved) | JSON LUT `[[true_deg, raw_deg], ...]` written by `VORTAC_CALIBRATE` |
+| `zero_pos_offset` | `0.0` | offset written by `VORTAC_SET_ZERO` |
+
+#### Gcode commands
+
+**`VORTAC_CALIBRATE`** — build and store the LUT (run `SAVE_CONFIG` after):
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `SAMPLES` | `180` | bins per revolution (LUT size) |
+| `SPEED` | `40` | sweep speed (deg/s) |
+| `TURNS` | `2` | revolutions **per direction**; last turn wins |
+| `DIR` | `both` | `cw`, `ccw`, or `both` (cw + ccw, midpoint stored, backlash reported) |
+| `PHASE` | `step/2` | pre-roll so the sensor seam falls between bins |
+| `SETTLE` | `0.10` | dwell (s) after each step before reading |
+| `READS` | `8` | direct SPI reads per bin (circular-meaned) |
+| `READ_DWELL` | `0.001` | pause (s) between the reads of one bin |
+
+**`VORTAC_MOVE`** — closed-loop move to an absolute true angle:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `TARGET` | `0.0` | target true angle (deg) |
+| `MODE` | `shortest` | `shortest`, `cw`, or `ccw` |
+| `SPEED` | config `speed` | move speed (deg/s) |
+| `TOL` | `2.0` | acceptance tolerance (deg, shortest-distance) |
+| `BACKOFF` | `0.5·TOL` | cw/ccw only: minimum stop-short distance per pass (clamped < TOL) |
+| `GUARD_FRAC` | `0.05` | cw/ccw only: stop short by this fraction of the remaining distance |
+| `MAX_ITERS` | `10` | maximum measure/move passes |
+| `READS` | `2` | sensor reads per measurement (circular median) |
+| `READ_SETTLE` | `0.010` | dwell (s) before each measurement |
+
+**`VORTAC_ENGAGE [ANGLE=<deg>]`** / **`VORTAC_DISENGAGE`** — closed-loop
+move to `engage_pos` (or `ANGLE`) / `disengage_pos`, using
+`engage_mode` / `disengage_mode` as the direction constraint.
+
+**`VORTAC_SET_ZERO`** — store the current LUT-corrected angle as
+`zero_pos_offset` (run `SAVE_CONFIG` after). Approach the reference
+position in the operating direction if you use cw/ccw modes.
+
+**`VORTAC_SIMPLE_READ`** — print raw and true angle once.
+
+**`VORTAC_MESURE`** — diagnostic sweep over one revolution, prints
+`rawPairs` / `lutPairs` / `finalPairs` for `dev_scripts/plotData.py`:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `SAMPLES` | `90` | measurement points over one revolution |
+| `SPEED` | `60` | sweep speed (deg/s) |
 - **Persistence:** `lookup_table` and `zero_pos_offset` written via
   `configfile.set` → user runs `SAVE_CONFIG`.
 

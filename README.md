@@ -109,11 +109,19 @@ rotate freely (no tool attached).
    VORTAC_CALIBRATE
    ```
 
-   The grabber turns forward through 2 full revolutions sampling 180 bins.
-   At each bin it settles, takes 8 direct SPI reads of the AS5047D and
-   stores their circular mean; the last revolution wins so backlash effects
-   drop out. Optional parameters: `SAMPLES`, `SPEED`, `TURNS`, `PHASE`,
-   `SETTLE`, `READS`, `READ_DWELL`.
+   By default the grabber sweeps 2 full revolutions clockwise and 2
+   counterclockwise, sampling 180 bins. At each bin it settles, takes 8
+   direct SPI reads of the AS5047D and stores their circular mean; per
+   direction the last revolution wins, and the saved LUT is the per-bin
+   midpoint of both directions. The cw/ccw spread is reported as a direct
+   backlash measurement (`Backlash ... mean/max`).
+
+   Optional parameters (defaults in parentheses): `SAMPLES` (180) bins per
+   revolution, `SPEED` (40) deg/s, `TURNS` (2) revolutions per direction,
+   `DIR` (`both`) — `cw`, `ccw` or `both`; with `cw`/`ccw` only that
+   direction is swept (pick the later operating direction), `PHASE`
+   (half a bin) pre-roll, `SETTLE` (0.10 s) dwell before reading, `READS`
+   (8) SPI reads per bin, `READ_DWELL` (0.001 s) pause between reads.
 
 2. On success Klipper reports `Calibration OK. lookup_table saved (...)` —
    persist it:
@@ -124,12 +132,16 @@ rotate freely (no tool attached).
 
 3. **Set the zero position:** move the grabber to its mechanical reference
    position <!-- TODO: document how the zero position is physically
-   defined/approached -->, then:
+   defined/approached --> (if you use `engage_mode`/`disengage_mode` cw or
+   ccw, approach the reference in that same direction), then:
 
    ```
    VORTAC_SET_ZERO
    SAVE_CONFIG
    ```
+
+   `VORTAC_SET_ZERO` may also be run directly after `VORTAC_CALIBRATE`,
+   before saving — one `SAVE_CONFIG` then persists both values.
 
 4. **Verify:**
 
@@ -139,8 +151,15 @@ rotate freely (no tool attached).
    ```
 
    The true angle should read ~0° at the reference position and
-   `VORTAC_MOVE` should reach its target within tolerance (default ±2°).
-   `VORTAC_MESURE` sweeps a full revolution for detailed diagnostics.
+   `VORTAC_MOVE` should reach its target within tolerance (default ±2°) in
+   1–2 moves. Optional `VORTAC_MOVE` parameters (defaults in parentheses):
+   `MODE` (`shortest`) — `shortest`, `cw` or `ccw` direction constraint,
+   `SPEED` (config `speed`), `TOL` (2.0°) acceptance tolerance, `BACKOFF`
+   (0.5·TOL) and `GUARD_FRAC` (0.05) — how far cw/ccw passes stop short of
+   the target, `MAX_ITERS` (10) measure/move passes, `READS` (2) sensor
+   reads per measurement, `READ_SETTLE` (0.010 s) dwell before reading.
+   `VORTAC_MESURE [SAMPLES=90] [SPEED=60]` sweeps a full revolution for
+   detailed diagnostics.
 
 ## 5. Test the setup
 
@@ -153,9 +172,12 @@ rotate freely (no tool attached).
    ```
 
    Both are closed-loop moves to the positions configured on
-   `[vortac_grabber]` — equivalent to `VORTAC_MOVE TARGET=<pos>`.
+   `[vortac_grabber]` — equivalent to `VORTAC_MOVE TARGET=<pos>`. The
+   direction can be constrained via the `engage_mode` / `disengage_mode`
+   config options (`shortest` (default), `cw`, `ccw`).
 
-   Both moves should converge within tolerance (default ±2°).
+   Both moves should converge within tolerance (default ±2°) in 1–2 moves
+   (the console reports e.g. `Reached 130.02° ... in 1 move(s)`).
 
    To verify the LUT linearizes the full 360°, run a diagnostic sweep:
 

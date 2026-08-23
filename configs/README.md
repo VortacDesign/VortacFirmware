@@ -2,14 +2,20 @@
 
 Klipper configs for the Vortac toolchanger. Files under `vortac_configs/` are
 bind-mounted into `~/printer_data/config/vortac_configs/` by `install.sh` and
-reload after `git pull` + `systemctl restart klipper`. `configs/printer.cfg`
-is gitignored — it's a local reference; the real one lives on the Pi.
+reload after `git pull` + `systemctl restart klipper`.
+
+**User-specific configs follow the `.example` pattern:** the repo only ships
+`*.example.cfg` templates; the real files (`printer.cfg`, `tools.cfg`, every
+`tools/*.cfg`) are gitignored. Copy `<name>.example.cfg` to `<name>.cfg` and
+edit — Klipper never reads `.example` files, it only loads what `printer.cfg`
+pulls in via `[include]`. General hardware configs (everything under `mcu/`)
+stay tracked as-is.
 
 ## Layout
 
 ```
 configs/
-├── printer.cfg                  (gitignored, local reference)
+├── printer.example.cfg          template for your printer.cfg (real one gitignored)
 └── vortac_configs/
     ├── mcu/
     │   ├── octopus.cfg          mainboard: XY, Z×4 sensorless, dock LEDs
@@ -17,9 +23,10 @@ configs/
     │   ├── SB2209.cfg           toolboard PCB template — reused by every SB2209 tool
     │   └── kraken.cfg           placeholder for future mainboard
     ├── tools/
-    │   ├── tool0.cfg            static [mcu tool0] + SB2209 include + [vortac_tool T0]
-    │   └── miniStealth.cfg      placeholder
-    └── tools.cfg                top-level: includes per-tool files + [vortac_manager]
+    │   └── tool0.example.cfg    template: static [mcu tool0] + SB2209 include
+    │                            + [vortac_tool T0] (real tools/*.cfg gitignored)
+    └── tools.example.cfg        template: per-tool includes + [vortac_manager]
+                                 (real tools.cfg gitignored)
 ```
 
 ## Boot order (`printer.cfg`)
@@ -99,10 +106,12 @@ SAVE_CONFIG
 | `VORTAC_SET_CURRENT_TOOL CLEAR=1` | manager | clear logical current tool |
 | `VORTAC_DOCK_SAVE_POS TOOL=Tn DOCK=name` | manager | save current hooked/engage XYZ as tool's pos for `name` |
 | `VORTAC_GANTRY_FLAT/TILT/STATUS` | qgl_state | toggle gantry between frame- and bed-flat |
-| `VORTAC_CALIBRATE` | grabber | populate AS5047D LUT |
+| `VORTAC_CALIBRATE [DIR=cw\|ccw\|both]` | grabber | populate AS5047D LUT (default: both directions, reports backlash) |
 | `VORTAC_SET_ZERO` | grabber | set zero offset to current angle |
-| `VORTAC_MOVE TARGET=deg` | grabber | closed-loop angle move |
+| `VORTAC_MOVE TARGET=deg [MODE=shortest\|cw\|ccw]` | grabber | closed-loop angle move |
+| `VORTAC_ENGAGE [ANGLE=deg]` | grabber | closed-loop move to `engage_pos` |
+| `VORTAC_DISENGAGE` | grabber | closed-loop move to `disengage_pos` |
 | `VORTAC_SIMPLE_READ` | grabber | read raw + true angle |
-| `VORTAC_MESURE` | grabber | LUT sweep dump (debug) |
+| `VORTAC_MESURE [SAMPLES=n]` | grabber | LUT sweep dump (debug) |
 
 For module internals, see [`klippy/extras/README.md`](../klippy/extras/README.md).

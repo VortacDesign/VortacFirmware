@@ -9,20 +9,39 @@
 #   1. [include_with <namespace> <filename>]  -- config-section wrapper
 #        tool_index: <int>          (default 0; >=1 triggers section renames)
 #        mcu_from:   <name>         (auto-detected from [mcu <name>] otherwise)
-#        overrides:  <json-dict>    (optional; {"orig section": {"key": "val"}})
+#        overrides:  (optional) per-section option overrides, one per line:
+#                        overrides:
+#                          extruder.sensor_type: MAX31865
+#                          extruder.sensor_pin: EBBCan: PA4
+#                    Format: <orig section>.<key>: <value>. Section names use
+#                    ORIGINAL (pre-rename) template names and may contain
+#                    spaces ("heater_fan hotend_fan.pin: ..."). Values run
+#                    through the same MCU/value rewriter as template values,
+#                    so pins may be written template-relative ("EBBCan: PA4").
+#                    Keys missing from the template are added; an EMPTY value
+#                    removes the option from the injected section.
+#                    A JSON dict ({"section": {"key": "val"}}) is also
+#                    accepted; there, null removes an option.
 #        skip_sections: comma/newline list of original template sections to skip
 #   2. include_with_remap(...)      -- programmatic API / config generator helper
 #
-# Section-rename table (tool_index >= 1; tool_index 0 is namespace-swap only):
+# Section-rename table:
 #
-#   [mcu <mcu_from>]     -> [mcu <namespace>]      (any tool_index)
-#   [extruder]           -> [extruder<N>]
-#   [tmcXXXX extruder]   -> [tmcXXXX extruder<N>]
-#   [fan]                -> [fan_generic tool<N>_fan]   (type change!)
+#   Any tool_index (named sections get a uniform tool<N>_ prefix so macros
+#   can address per-tool hardware as tool0_logo_rgb, tool1_logo_rgb, ...):
+#
+#   [mcu <mcu_from>]     -> [mcu <namespace>]
 #   [heater_fan name]    -> [heater_fan tool<N>_name]
 #   [neopixel name]      -> [neopixel tool<N>_name]
 #   [adxl345]            -> [adxl345 tool<N>]
 #   [adxl345 name]       -> [adxl345 tool<N>_name]
+#
+#   tool_index >= 1 only (Klipper needs a primary [extruder] and the [fan]
+#   singleton for M106, so tool 0 keeps those unrenamed):
+#
+#   [extruder]           -> [extruder<N>]
+#   [tmcXXXX extruder]   -> [tmcXXXX extruder<N>]
+#   [fan]                -> [fan_generic tool<N>_fan]   (type change!)
 #
 # Singletons that can't be safely renamed (resonance_tester, input_shaper,
 # shaketune) are skipped for tool_index >= 1 by default. Caller can override
@@ -47,18 +66,10 @@ def _rename_section(orig, idx, mcu_from, mcu_to):
     if head == 'mcu' and rest and rest[0] == mcu_from:
         return f"mcu {mcu_to}"
 
-    if idx == 0:
-        return orig
-
     sfx = str(idx)
 
-    if orig == 'extruder':
-        return f"extruder{sfx}"
-    if head in _TMC_HEADS and rest == ['extruder']:
-        return f"{head} extruder{sfx}"
-    if orig == 'fan':
-        # [fan] is a Klipper singleton; promote to fan_generic for tools >= 1.
-        return f"fan_generic tool{sfx}_fan"
+    # Uniform per-tool prefix for named sections — applies to tool 0 too,
+    # so macros can address tool<N>_logo_rgb etc. for every tool alike.
     if head == 'heater_fan' and rest:
         return f"heater_fan tool{sfx}_{'_'.join(rest)}"
     if head == 'neopixel' and rest:
@@ -67,6 +78,17 @@ def _rename_section(orig, idx, mcu_from, mcu_to):
         return f"adxl345 tool{sfx}"
     if head == 'adxl345' and rest:
         return f"adxl345 tool{sfx}_{'_'.join(rest)}"
+
+    if idx == 0:
+        return orig
+
+    if orig == 'extruder':
+        return f"extruder{sfx}"
+    if head in _TMC_HEADS and rest == ['extruder']:
+        return f"{head} extruder{sfx}"
+    if orig == 'fan':
+        # [fan] is a Klipper singleton; promote to fan_generic for tools >= 1.
+        return f"fan_generic tool{sfx}_fan"
 
     return orig
 
@@ -86,6 +108,48 @@ def _resolve_filepath(printer, filepath):
     if not cfg_file:
         return filepath
     return os.path.join(os.path.dirname(cfg_file), filepath)
+
+
+def _parse_overrides(config, raw):
+    """Parse the `overrides` option.
+
+    Primary format, one override per line:
+        <orig section>.<key>: <value>
+    Keys never contain dots, so the section/key split is the LAST dot —
+    section names with spaces ("heater_fan hotend_fan") work unquoted.
+    An empty value marks the option for removal (stored as None).
+
+    A JSON dict ({"section": {"key": "val"}}) is accepted as fallback.
+    """
+    raw = raw.strip()
+    if raw.startswith('{'):
+        try:
+            overrides = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise config.error(
+                f"include_with overrides: invalid JSON ({e})")
+        if not isinstance(overrides, dict):
+            raise config.error(
+                "include_with overrides must be a JSON object of the "
+                "form {\"section\": {\"key\": \"value\"}}")
+        return overrides
+    overrides = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        left, sep, value = line.partition(':')
+        if not sep or '.' not in left:
+            raise config.error(
+                f"include_with overrides: expected "
+                f"'<section>.<key>: <value>', got {line!r}")
+        section, key = left.rsplit('.', 1)
+        section, key, value = section.strip(), key.strip(), value.strip()
+        if not section or not key:
+            raise config.error(
+                f"include_with overrides: empty section or key in {line!r}")
+        overrides.setdefault(section, {})[key] = value if value else None
+    return overrides
 
 
 def _parse_section_list(value):
@@ -142,7 +206,10 @@ def include_with_remap(printer, parent_config, filepath, namespace,
       tool_index:     0..N. Index 0 is namespace-swap only; >=1 triggers
                       section renames per the module docstring.
       overrides:      Optional dict {orig_section: {key: value}}. Keys use
-                      the ORIGINAL (pre-rename) section names.
+                      the ORIGINAL (pre-rename) section names. Values pass
+                      through the MCU/value rewriter (template-relative pin
+                      names allowed); keys absent from the template are
+                      added; a None/null value removes the option.
       skip_sections:  Optional iterable of orig-section names to skip.
                       Defaults to DEFAULT_SINGLETON_SKIP for tool_index >= 1.
 
@@ -177,13 +244,23 @@ def include_with_remap(printer, parent_config, filepath, namespace,
             continue
         new_sect = rename_map[orig_sect]
         items = template.fileconfig.items(section=orig_sect)
-        section_overrides = overrides.get(orig_sect, {})
+        # Copy: we pop consumed keys to find the ones the template lacks.
+        section_overrides = dict(overrides.get(orig_sect, {}))
         new_items = {}
         for k, v in items:
             if k in section_overrides:
-                new_items[k] = str(section_overrides[k])
+                ov = section_overrides.pop(k)
+                if ov is None:
+                    continue  # JSON null removes the option entirely
+                new_items[k] = rewrite(str(ov))
             else:
                 new_items[k] = rewrite(v)
+        # Override keys absent from the template are ADDED, not dropped —
+        # needed e.g. to switch a sensor_type that brings new options along
+        # (MAX31865: spi_bus, rtd_nominal_r, rtd_reference_r, ...).
+        for k, ov in section_overrides.items():
+            if ov is not None:
+                new_items[k] = rewrite(str(ov))
         parent_config.fileconfig.read_dict({new_sect: new_items})
         printer.load_object(parent_config, new_sect, default=None)
 
@@ -209,15 +286,7 @@ class IncludeWith:
         overrides_str = config.get('overrides', default=None)
         overrides = None
         if overrides_str:
-            try:
-                overrides = json.loads(overrides_str)
-            except json.JSONDecodeError as e:
-                raise config.error(
-                    f"include_with overrides: invalid JSON ({e})")
-            if not isinstance(overrides, dict):
-                raise config.error(
-                    "include_with overrides must be a JSON object of the "
-                    "form {\"section\": {\"key\": \"value\"}}")
+            overrides = _parse_overrides(config, overrides_str)
 
         skip_sections = _parse_section_list(
             config.get('skip_sections', default=None))
