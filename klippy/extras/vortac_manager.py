@@ -17,6 +17,12 @@
 #
 # VORTAC_DETECT uses ARGB strobe-by-subtraction to populate the dock
 # occupancy map at runtime instead of relying only on the home_dock bootstrap.
+#
+# Dock ARGB channel semantics: red = power feed (never touched), green =
+# pulls the dock_sense pad active low, blue = status LED mirroring green.
+# dock_sense readings are ONLY valid while a dock's green channel is on —
+# outside of the detection strobe, ALL docks keep G+B on, and every
+# sense-dependent operation re-asserts that first (_ensure_sense_active).
 
 import logging
 import re
@@ -32,7 +38,10 @@ DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
 DOCK_SLIDE_F     = 500     # mm/min, slow slide-in/out and Z hop
 
 # Unhook verification (fetch only). dock_sense is a pogo pin on a landing
-# pad; the dock board rides along on its spring travel during the Z lift, so:
+# pad, actively pulled low by the dock's green LED channel — the whole check
+# is meaningless unless the dock's sense channels are on (see
+# _ensure_sense_active). The dock board rides along on its spring travel
+# during the Z lift, so:
 #   dock_sense LOW  = pogo contact to the dock pad (tool board is powered
 #                     through these pogos while parked!)
 #   grab_sense LOW  = grabber physically holding the tool
@@ -58,7 +67,15 @@ class VortacManager:
 
         self.dock_count = config.getint('dock_count', minval=1)
         self.argb_led = config.get('argb_led', default=None)
+        # Dock ARGB channel semantics (per dock LED index):
+        #   red   = Sicherung/power feed for the tool board — NEVER touched
+        #   green = pulls the dock_sense pad active low (sense channel);
+        #           sense logic only works while this channel is ON
+        #   blue  = status LED, always switched in parallel with green so
+        #           the active sense logic is visible at the dock
         self.argb_channel = config.get('argb_channel', default='green').lower()
+        self.argb_status_channel = config.get(
+            'argb_status_channel', default='blue').lower()
         self.dock_strobe_time = config.getfloat(
             'dock_strobe_time', default=0.10, above=0.0)
 
@@ -119,6 +136,8 @@ class VortacManager:
 
         self.printer.register_event_handler(
             'klippy:connect', self._handle_connect)
+        self.printer.register_event_handler(
+            'klippy:ready', self._handle_ready)
 
     # --------------------------------------------------------------------
     # Connect-time discovery
@@ -266,6 +285,16 @@ class VortacManager:
             f"grabbed; the nozzle would hit the bed first. Park the tool "
             f"(VORTAC_UNLOAD) before QGL/bed mesh/probing.")
 
+    def _handle_ready(self):
+        # Defined baseline after every (re)start: sense logic active on all
+        # docks, regardless of the neopixel initial_* config values.
+        try:
+            self._ensure_sense_active()
+        except self.printer.command_error as e:
+            logging.warning(
+                "vortac_manager: could not enable dock sense channels "
+                "at startup: %s", e)
+
     # --------------------------------------------------------------------
     # Dock / tool detection
     # --------------------------------------------------------------------
@@ -286,12 +315,21 @@ class VortacManager:
                 f"Dock {dock_name} out of range (dock0..dock{self.dock_count - 1})")
         return dock_index
 
-    def _channel_index(self):
+    def _channel_index(self, name):
         channels = {'red': 0, 'green': 1, 'blue': 2, 'white': 3}
-        if self.argb_channel not in channels:
+        if name not in channels:
             raise self.printer.command_error(
-                f"Unsupported argb_channel '{self.argb_channel}'")
-        return channels[self.argb_channel]
+                f"Unsupported ARGB channel '{name}'")
+        return channels[name]
+
+    def _sense_channel_indices(self):
+        """Channel indices switched together for the sense logic: the
+        sense-pull channel (green) plus the status LED channel (blue)."""
+        idx = [self._channel_index(self.argb_channel)]
+        status = self._channel_index(self.argb_status_channel)
+        if status not in idx:
+            idx.append(status)
+        return idx
 
     def _get_led_color_data(self):
         if not self.argb_led:
@@ -319,9 +357,42 @@ class VortacManager:
             f"WHITE={white:.6f} SYNC=0 TRANSMIT=1")
 
     def _with_strobe_channel(self, color, value):
+        """Return `color` with the sense channel AND the status channel set
+        to `value` — green (sense pull) and blue (status LED) are always
+        switched in parallel; red (power) is never touched."""
         color = list(color)
-        color[self._channel_index()] = float(value)
+        for idx in self._sense_channel_indices():
+            color[idx] = float(value)
         return tuple(color)
+
+    def _sense_active_on_dock(self, color):
+        return all(color[idx] > 0.0 for idx in self._sense_channel_indices())
+
+    def _ensure_sense_active(self, gcmd=None):
+        """Make sure every dock has the sense (green) and status (blue)
+        channels ON. The dock_sense logic only works while green pulls the
+        pad — manual LED changes could have switched it off in between, so
+        this is (re)asserted before every sense-dependent operation.
+        Returns True if anything had to be corrected."""
+        if not self.argb_led:
+            return False
+        colors = self._get_led_color_data()
+        fixed = []
+        for i in range(self.dock_count):
+            if not self._sense_active_on_dock(colors[i]):
+                self._set_dock_led_color(
+                    i, self._with_strobe_channel(colors[i], 1.0))
+                fixed.append(self._dock_name(i))
+        if not fixed:
+            return False
+        self._dwell_for_sense()
+        msg = (f"Vortac: sense channels (G+B) were off on "
+               f"{', '.join(fixed)} — re-enabled before continuing")
+        if gcmd is not None:
+            gcmd.respond_info(msg)
+        else:
+            logging.info(msg)
+        return True
 
     def _sense_label(self, state):
         if state is None:
@@ -353,8 +424,9 @@ class VortacManager:
         debug = bool(gcmd and gcmd.get_int('DEBUG', 0, minval=0, maxval=1))
         debug_lines = []
         original_colors = self._get_led_color_data()
-        # Detection baseline: all Tool_id channels off. Then each dock is
-        # strobed on in turn; the docked tool flips its dock_sense state.
+        # Detection baseline: sense (G) + status (B) channels off on all
+        # docks. Then each dock is strobed on in turn; the docked tool
+        # flips its dock_sense state. Red (power) stays untouched.
         baseline_colors = [
             self._with_strobe_channel(original_colors[i], 0.0)
             for i in range(self.dock_count)
@@ -435,8 +507,12 @@ class VortacManager:
                                         missing, ambiguous, debug_lines)
             return detected
         finally:
+            # Normal operating state after detection: sense logic active on
+            # ALL docks (G+B on), other channels as they were before.
             for i in range(self.dock_count):
-                self._set_dock_led_color(i, original_colors[i])
+                self._set_dock_led_color(
+                    i, self._with_strobe_channel(original_colors[i], 1.0))
+            self._dwell_for_sense()
 
     def _assign_park_dock(self, tool, detected, gcmd):
         """Detection found `tool` in the grabber. Decide where it will be
@@ -520,6 +596,12 @@ class VortacManager:
             return
 
         gcode = self.printer.lookup_object('gcode')
+
+        # 0. Sense logic sanity: dock_sense only works while the dock's
+        # green channel pulls the pad low. Manual LED tinkering may have
+        # switched it off — re-assert G+B on all docks before any motion
+        # that relies on sense feedback.
+        self._ensure_sense_active(gcmd)
 
         # 1. Deactivate current tool
         if self.current_tool is not None:
@@ -669,6 +751,7 @@ class VortacManager:
                 gcode.run_script_from_command(
                     f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
                 self._wait_sense()
+                self._log_unhook_checkpoint(tool, 'reseat', 0.0)
                 if not tool.is_docked():
                     raise self.printer.command_error(
                         f"Vortac: dock contact for {tool.tool_id} at "
@@ -881,6 +964,18 @@ class VortacManager:
                 f"grab={self._sense_label(tool.grab_sense_state)} "
                 f"dock_pin={tool.dock_sense_pin or 'n/a'} "
                 f"grab_pin={tool.grab_sense_pin or 'n/a'}")
+        if self.argb_led:
+            colors = self._get_led_color_data()
+            states = ', '.join(
+                f"{self._dock_name(i)}="
+                f"{'on' if self._sense_active_on_dock(colors[i]) else 'OFF'}"
+                for i in range(self.dock_count))
+            lines.append(f"  Dock sense channels (G+B): {states}")
+            if any(not self._sense_active_on_dock(colors[i])
+                   for i in range(self.dock_count)):
+                lines.append(
+                    "  WARNING: dock_sense is only valid while a dock's "
+                    "sense channels are on (green pulls the pad low)")
         gcmd.respond_info('\n'.join(lines))
 
     def cmd_VORTAC_SENSE_MONITOR(self, gcmd):
@@ -931,7 +1026,8 @@ class VortacManager:
         self._set_dock_led_color(
             dock_index, self._with_strobe_channel(color, value))
         gcmd.respond_info(
-            f"Set {dock} {self.argb_channel} strobe channel to {value:.3f}")
+            f"Set {dock} sense channels ({self.argb_channel}+"
+            f"{self.argb_status_channel}) to {value:.3f}")
 
     def cmd_VORTAC_SELECT_DOCK(self, gcmd):
         dock = gcmd.get('DOCK').strip().lower()
@@ -940,6 +1036,10 @@ class VortacManager:
             self._detect_tools(gcmd)
         elif not self.dock_detection_valid:
             raise gcmd.error("No dock detection map; run VORTAC_DETECT first")
+        else:
+            # No detection pass (which would restore them) — make sure the
+            # sense channels are on before calibration relies on them.
+            self._ensure_sense_active(gcmd)
 
         tool_id = self.dock_occupancy.get(dock)
         if tool_id is None:

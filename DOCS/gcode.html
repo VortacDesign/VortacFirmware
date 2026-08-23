@@ -24,7 +24,7 @@ the overview table down.</p>
 <tbody>
 <tr><td class="cmd"><code>T0</code>, <code>T1</code>, …</td><td>manager</td><td>full tool change (registered dynamically from each available tool's <code>tool_index</code>)</td></tr>
 <tr><td class="cmd"><code>VORTAC_STATUS</code></td><td>manager</td><td>report current tool, dock map, QGL state (tools listed as <code>&lt;name&gt; (T&lt;index&gt;)</code>)</td></tr>
-<tr><td class="cmd"><code>VORTAC_DETECT</code></td><td>manager</td><td>strobe dock Tool_id channels and update the dock map</td></tr>
+<tr><td class="cmd"><code>VORTAC_DETECT</code></td><td>manager</td><td>strobe dock sense channels (G+B) and update the dock map</td></tr>
 <tr><td class="cmd"><code>VORTAC_SELECT_DOCK DOCK=dockN</code></td><td>manager</td><td>detect/select a dock and its tool for calibration</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_CAL_STATUS</code></td><td>manager</td><td>report selected calibration dock/tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_CAL_SAVE</code></td><td>manager</td><td>save current hooked/engage XYZ for the selected dock/tool</td></tr>
@@ -35,7 +35,7 @@ the overview table down.</p>
 <tr><td class="cmd"><code>VORTAC_DOCK_SAVE_POS TOOL=&lt;name&gt;|Tn DOCK=dockN</code></td><td>manager</td><td>save current hooked/engage XYZ as tool's position for the dock (requires gantry flat)</td></tr>
 <tr><td class="cmd"><code>VORTAC_SENSE_STATUS</code></td><td>manager</td><td>raw cached dock/grab sense pin states per tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_SENSE_MONITOR [DURATION=s]</code></td><td>manager</td><td>poll sense states live, report transitions</td></tr>
-<tr><td class="cmd"><code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=0..1</code></td><td>manager</td><td>manually set one dock strobe channel (debug)</td></tr>
+<tr><td class="cmd"><code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=0..1</code></td><td>manager</td><td>manually set one dock's sense channels G+B (debug)</td></tr>
 <tr><td class="cmd"><code>VORTAC_GANTRY_FLAT</code> / <code>VORTAC_GANTRY_TILT</code></td><td>qgl_state</td><td>toggle gantry between frame-flat and bed-flat</td></tr>
 <tr><td class="cmd"><code>VORTAC_QGL_STATUS</code></td><td>qgl_state</td><td>report gantry state and stored QGL deltas</td></tr>
 <tr><td class="cmd"><code>VORTAC_CALIBRATE [DIR=cw|ccw|both]</code></td><td>grabber</td><td>populate the AS5047D LUT (default: both directions, reports backlash)</td></tr>

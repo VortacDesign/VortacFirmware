@@ -64,8 +64,10 @@ Each tool is a complete toolhead (extruder, hotend, fans, LEDs, accelerometer) d
 own CAN-bus board. A single <strong>grabber</strong> mechanism on the carriage picks tools up
 and puts them back: a stepper rotates a hook, and an <strong>AS5047D magnetic angle sensor</strong>
 closes the loop so engage/disengage angles are hit reliably. Which tool sits in which dock is
-discovered electrically: each dock has an ARGB LED channel (<em>Tool_id</em> strobe), each tool
-has an optical <em>dock sense</em> pin — strobing one dock at a time reveals the mapping.</p>
+discovered electrically: each dock's ARGB LED green channel actively pulls the tool's
+<em>dock sense</em> pad low (blue mirrors green as a status LED, red powers the parked board) —
+strobing one dock's green channel at a time reveals the mapping, and outside of detection all
+docks keep it on so the sense logic stays valid.</p>
 
 <h2 id="architecture">Architecture at a glance</h2>
 

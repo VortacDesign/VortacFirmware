@@ -141,7 +141,8 @@ value wins), so a copied-but-not-fully-renamed tool file never errors on its own
 catches the detectable leftovers.</p>
 
 <h3>Tool-change sequence (<code>_change_to</code>)</h3>
-<pre><code>tool_deactivate_gcode
+<pre><code>_ensure_sense_active (all docks G+B on — sense logic valid)
+→ tool_deactivate_gcode
 → VORTAC_GANTRY_FLAT
 → _park_at_dock(current)
 → _fetch_from_dock(target)
@@ -182,13 +183,25 @@ Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> before dropping to saved Z.</p>
 <h3 id="detection">Dock detection (strobe-by-subtraction)</h3>
 <p>Every tool has two GPIO sense pins: <code>dock_sense_pin</code> (dock Tool_id after opto
 logic) and <code>grab_sense_pin</code> (default HIGH; pulled LOW by the grabber on the held
-tool). <code>VORTAC_DETECT</code>:</p>
+tool).</p>
+<p>Each dock's ARGB LED channels have fixed roles: <strong>red</strong> is the power feed for
+the parked tool board (the manager never touches it), <strong>green</strong> actively pulls the
+<code>dock_sense</code> pad low, and <strong>blue</strong> is a status LED that the manager
+always switches in parallel with green — a lit blue channel means the dock's sense logic is
+active. <code>dock_sense</code> readings are <em>only</em> valid while the dock's green channel
+is on; outside of the detection strobe, <strong>all docks keep G+B on</strong>. Every
+sense-dependent operation (tool change, <code>VORTAC_LOAD</code>/<code>VORTAC_UNLOAD</code>,
+calibration selection) first re-asserts G+B on all docks
+(<code>_ensure_sense_active</code>), so a manual <code>SET_LED</code> in between cannot silently
+disable the sense logic; the same state is asserted at <code>klippy:ready</code>.</p>
+<p><code>VORTAC_DETECT</code>:</p>
 <ol>
-  <li>Turns <strong>all</strong> dock Tool_id LED channels off.</li>
-  <li>Strobes one dock's configured LED channel on at a time
+  <li>Turns the sense (G) and status (B) channels off on <strong>all</strong> docks.</li>
+  <li>Strobes one dock's G+B channels on at a time
       (<code>dock_strobe_time</code>, default 0.10&nbsp;s).</li>
   <li>Assigns the dock to any tool whose cached <code>dock_sense_pin</code> reads LOW.</li>
-  <li>Restores every LED's original RGBW value afterwards.</li>
+  <li>Restores every dock to the normal operating state afterwards: G+B on, other channels
+      as they were before.</li>
 </ol>
 <p>The grabbed tool is detected from <code>grab_sense_pin</code>. Detection <strong>aborts</strong>
 if any tool already reads dock LOW while all dock Tool_id channels are off (that would make the
