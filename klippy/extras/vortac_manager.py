@@ -35,9 +35,12 @@ import re
 DOCK_Y_SAFE      = 50.0    # mm, Y clearance for approach/depart
 DOCK_Z_CLEARANCE = 5.0     # mm, lift from saved hooked Z to clearance Z
 DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
-DOCK_SLIDE_F     = 200     # mm/min, slow slide-in/out and Z hop
+DOCK_SLIDE_F     = 400     # mm/min, Y slide-in/out only (Z drop/lift at the
+                           # dock is always the checked DOCK_UNHOOK_* phase)
 
-# Unhook verification (fetch only). dock_sense is a pogo pin on a landing
+# Hook/unhook verification (used by BOTH park and fetch: the checked
+# stepwise Z drop when hooking in mirrors the checked lift when unhooking,
+# with the same step size and feedrate). dock_sense is a pogo pin on a landing
 # pad, actively pulled low by the dock's green LED channel — the whole check
 # is meaningless unless the dock's sense channels are on (see
 # _ensure_sense_active). The dock board rides along on its spring travel
@@ -672,8 +675,11 @@ class VortacManager:
     # --------------------------------------------------------------------
 
     def _park_at_dock(self, tool, dock_name, gcmd):
-        """Park a held tool: approach lifted, slide in, drop to saved hooked
-        Z, disengage the grabber, slide back out."""
+        """Park a held tool: approach lifted, slide in, then hook in with a
+        checked stepwise Z drop (mirror of the unhook verification — same
+        step size and feedrate). dock_sense must be LOW at the hooked
+        position before the grabber lets go; after backing out, the tool
+        must still read docked and no longer grabbed."""
         x = tool.get_dock_pos(dock_name, 'x')
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
@@ -682,11 +688,86 @@ class VortacManager:
             f'G90\n'
             f'G1 X{x} Y{y + DOCK_Y_SAFE} Z{z + DOCK_Z_CLEARANCE} '
             f'F{DOCK_APPROACH_F}\n'
-            f'G1 Y{y} F{DOCK_SLIDE_F}\n'
-            f'G1 Z{z} F{DOCK_SLIDE_F}')
+            f'G1 Y{y} F{DOCK_SLIDE_F}')
+
+        if not tool.sense_ready():
+            # No sense feedback available — blind hook-in, but slow.
+            if gcmd is not None:
+                gcmd.respond_info(
+                    f"Vortac: {tool.tool_id} sense pins not ready, "
+                    f"hooking in blind")
+            gcode.run_script_from_command(
+                f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
+            self.grabber.disengage(gcmd=gcmd)
+            gcode.run_script_from_command(
+                f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+            return
+
+        self._ensure_sense_active(gcmd)
+        for attempt in range(1, DOCK_UNHOOK_RETRIES + 1):
+            result = self._try_hook(tool, z)
+            if result == 'seated':
+                break
+            if result == 'lost_grab':
+                raise self.printer.command_error(
+                    f"Vortac: grab_sense went HIGH while hooking "
+                    f"{tool.tool_id} into {dock_name} — grabber lost the "
+                    f"tool. Motion stopped; intervene manually.")
+            # result == 'not_seated': no pogo contact at the hooked
+            # position — misaligned on the screws. Lift back up and retry.
+            if gcmd is not None:
+                gcmd.respond_info(
+                    f"Vortac: {tool.tool_id} shows no dock contact at the "
+                    f"hooked position of {dock_name}, lifting to retry "
+                    f"(attempt {attempt}/{DOCK_UNHOOK_RETRIES})")
+            gcode.run_script_from_command(
+                f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_UNHOOK_LIFT_F}')
+        else:
+            # Never seated — keep holding the tool, back out lifted.
+            gcode.run_script_from_command(
+                f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+            raise self.printer.command_error(
+                f"Vortac: failed to seat {tool.tool_id} in {dock_name} "
+                f"after {DOCK_UNHOOK_RETRIES} attempts (no dock contact); "
+                f"tool is still held by the grabber, backed out lifted. "
+                f"Check dock calibration and pogo pins.")
+
         self.grabber.disengage(gcmd=gcmd)
         gcode.run_script_from_command(
             f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+        self._wait_sense()
+        self._log_unhook_checkpoint(tool, 'park-backout', DOCK_Y_SAFE)
+        if not tool.is_docked():
+            raise self.printer.command_error(
+                f"Vortac: dock contact for {tool.tool_id} at {dock_name} "
+                f"was lost while backing out after disengage — tool may "
+                f"have been dragged out. Stopped; check the dock manually.")
+        if tool.is_grabbed():
+            raise self.printer.command_error(
+                f"Vortac: {tool.tool_id} still reports grabbed after "
+                f"disengage and backout at {dock_name}. Stopped; check "
+                f"the grabber before continuing.")
+
+    def _try_hook(self, tool, z):
+        """One hook-in attempt: checked stepwise Z drop from clearance to
+        the hooked position (same steps/feedrate as the unhook lift).
+        grab_sense must STAY LOW the whole way; dock_sense is expected to
+        flip to LOW as the pogos make contact near the hooked position.
+
+        Returns 'seated' (dock contact at hooked Z), 'not_seated' (no dock
+        contact after the full drop), or 'lost_grab'. Leaves the toolhead
+        at the hooked position (or wherever grab was lost)."""
+        gcode = self.printer.lookup_object('gcode')
+        cur_z = z + DOCK_Z_CLEARANCE
+        while cur_z > z + 1e-6:
+            cur_z = max(cur_z - DOCK_UNHOOK_ZSTEP, z)
+            gcode.run_script_from_command(
+                f'G1 Z{cur_z:.3f} F{DOCK_UNHOOK_LIFT_F}')
+            self._wait_sense()
+            self._log_unhook_checkpoint(tool, 'drop', cur_z - z)
+            if not tool.is_grabbed():
+                return 'lost_grab'
+        return 'seated' if tool.is_docked() else 'not_seated'
 
     def _fetch_from_dock(self, tool, dock_name, gcmd):
         """Fetch a docked tool: approach at saved hooked Z, slide in, engage

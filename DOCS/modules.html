@@ -168,9 +168,11 @@ nozzle would hit the bed before the probe triggers. Park the tool
 <thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
 <tbody>
 <tr><td><code>DOCK_Y_SAFE</code></td><td>50.0</td><td>safe Y line in front of the docks</td></tr>
-<tr><td><code>DOCK_Z_CLEARANCE</code></td><td>4.5</td><td>lift above the saved (hooked/engage) Z</td></tr>
+<tr><td><code>DOCK_Z_CLEARANCE</code></td><td>5.0</td><td>lift above the saved (hooked/engage) Z</td></tr>
 <tr><td><code>DOCK_APPROACH_F</code></td><td>2000</td><td>approach feedrate (mm/min)</td></tr>
-<tr><td><code>DOCK_SLIDE_F</code></td><td>500</td><td>slide in/out feedrate (mm/min)</td></tr>
+<tr><td><code>DOCK_SLIDE_F</code></td><td>400</td><td>Y slide in/out feedrate (mm/min) — Y only</td></tr>
+<tr><td><code>DOCK_UNHOOK_LIFT_F</code></td><td>40</td><td>checked Z lift/drop feedrate (mm/min)</td></tr>
+<tr><td><code>DOCK_UNHOOK_ZSTEP</code></td><td>1.0</td><td>Z per checked step (hook and unhook)</td></tr>
 </tbody>
 </table>
 </div>
@@ -179,6 +181,24 @@ nozzle would hit the bed before the probe triggers. Park the tool
 the hooked/engage position; load uses saved Z then lifts to
 Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code>, and unload approaches at
 Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> before dropping to saved Z.</p>
+
+<h3 id="hook-verification">Checked hook / unhook (sense-verified Z phases)</h3>
+<p>Both Z phases at the dock are stepwise and sense-verified with the same
+<code>DOCK_UNHOOK_ZSTEP</code>/<code>DOCK_UNHOOK_LIFT_F</code> constants; only the Y slides use
+<code>DOCK_SLIDE_F</code>. Every step waits for motion, lets the sense callbacks settle, and logs
+a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
+<ul>
+  <li><strong>Fetch (unhook):</strong> engage, then checked lift — <code>dock_sense</code> must
+      STAY LOW (going HIGH mid-lift = tilt/bind → lower back, re-seat, retry) — then checked Y
+      backout where <code>dock_sense</code> going HIGH is the clean release. <code>grab_sense</code>
+      HIGH at any checkpoint freezes motion (tool lost).</li>
+  <li><strong>Park (hook-in):</strong> slide in lifted, then checked drop from
+      Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> to the hooked Z — <code>dock_sense</code> must be
+      LOW (pogo contact) at the hooked position <em>before</em> the grabber disengages; no contact
+      → lift back up and retry (<code>DOCK_UNHOOK_RETRIES</code>), final failure backs out with the
+      tool still held. After disengage + backout, the tool must still read docked and no longer
+      grabbed. Tools without sense pins hook in blind (slow drop, no verification).</li>
+</ul>
 
 <h3 id="detection">Dock detection (strobe-by-subtraction)</h3>
 <p>Every tool has two GPIO sense pins: <code>dock_sense_pin</code> (dock Tool_id after opto
