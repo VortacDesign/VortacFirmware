@@ -33,9 +33,9 @@ import re
 # Z + DOCK_Z_CLEARANCE, used to lift a grabbed tool off the dock screws or
 # approach with a held tool before dropping it into the dock.
 DOCK_Y_SAFE      = 50.0    # mm, Y clearance for approach/depart
-DOCK_Z_CLEARANCE = 4.5     # mm, lift from saved hooked Z to clearance Z
+DOCK_Z_CLEARANCE = 5.0     # mm, lift from saved hooked Z to clearance Z
 DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
-DOCK_SLIDE_F     = 500     # mm/min, slow slide-in/out and Z hop
+DOCK_SLIDE_F     = 200     # mm/min, slow slide-in/out and Z hop
 
 # Unhook verification (fetch only). dock_sense is a pogo pin on a landing
 # pad, actively pulled low by the dock's green LED channel — the whole check
@@ -49,14 +49,14 @@ DOCK_SLIDE_F     = 500     # mm/min, slow slide-in/out and Z hop
 # follows) and only goes HIGH on the Y backout when the pin slides off the
 # pad. Therefore:
 #   - dock HIGH *during the lift*  -> tool is tilting/binding, contact lost
-#     -> stop within one 0.5mm step, before the pogos tear off.
+#     -> stop within one DOCK_UNHOOK_ZSTEP, before the pogos tear off.
 #   - dock LOW *after a backward step* -> hooks did not release -> stop,
 #     re-seat, retry.
 #   - grab HIGH at any checkpoint -> grabber lost the tool -> freeze, error.
-DOCK_UNHOOK_LIFT_F      = 20    # mm/min, slow Z lift off the dock screws
-DOCK_UNHOOK_BACK_F      = 20    # mm/min, checked backward steps
-DOCK_UNHOOK_ZSTEP       = 0.5   # mm per checked lift step
-DOCK_UNHOOK_STEP        = 1.0   # mm per checked backward step
+DOCK_UNHOOK_LIFT_F      = 40    # mm/min, slow Z lift off the dock screws
+DOCK_UNHOOK_BACK_F      = 40    # mm/min, checked backward steps
+DOCK_UNHOOK_ZSTEP       = 1.0   # mm per checked lift step
+DOCK_UNHOOK_STEP        = 1.5   # mm per checked backward step
 DOCK_UNHOOK_CHECK_STEPS = 1     # backward steps for dock decoupling check
 DOCK_UNHOOK_RETRIES     = 3     # re-seat + lift attempts before reversing
 
