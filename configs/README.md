@@ -21,10 +21,11 @@ configs/
     │   ├── octopus.cfg          mainboard: XY, Z×4 sensorless, dock LEDs
     │   ├── vortac.cfg           grabber MCU + [vortac_grabber] + [vortac_qgl_state]
     │   ├── SB2209.cfg           toolboard PCB template — reused by every SB2209 tool
+    │   ├── EBB42_V12.cfg        toolboard PCB template — reused by every EBB42 tool
     │   └── kraken.cfg           placeholder for future mainboard
     ├── tools/
-    │   └── tool0.example.cfg    template: static [mcu tool0] + SB2209 include
-    │                            + [vortac_tool T0] (real tools/*.cfg gitignored)
+    │   └── tool0.example.cfg    template: static [mcu <name>] + PCB-template
+    │                            include (real tools/*.cfg gitignored)
     └── tools.example.cfg        template: per-tool includes + [vortac_manager]
                                  (real tools.cfg gitignored)
 ```
@@ -37,72 +38,75 @@ configs/
 [include vortac_configs/tools.cfg]         # tools + manager
 ```
 
-## Adding a tool — the checklist
+## Tool naming & numbering — the conventions
 
-The trailing number is the convention that links everything: `tool1` ↔ `T1` ↔
-`dock1`. `tool_index`, `mcu_name`, `home_dock` and `mcu_from` are all derived
-from it — you never write them.
+**The tool's NAME is defined exactly once**: the `[mcu <name>]` section /
+`include_with` namespace (e.g. `miniGrey`). It is also the display name
+dashboards show (`miniGrey_logo_rgb`, `miniGrey_hotend_fan`, …).
+
+**The tool's NUMBER comes from the include ORDER in `tools.cfg`**: the first
+(uncommented) tool include is `T0`, the next `T1`, and so on. The first tool
+always owns Klipper's primary `[extruder]` and `[fan]` (hardwired by Klipper
+for `M104`/`M106`), so commenting a broken tool out simply renumbers the rest
+— Klipper never sees `[extruder1]` without `[extruder]`.
+
+**The tool's DOCK is physical and never renumbers**: set `home_dock`
+explicitly per tool via the `overrides:` block (`vortac_tool TN.home_dock:
+dockX`). Saved dock positions are keyed by tool name, so they survive
+renumbering too — and a commented-out tool's calibration survives in
+`printer.cfg`'s autosave block as a harmless ghost `[vortac_tool <name>]`
+section (loaded as `available: False`) until the tool returns.
+
+The `[vortac_tool]` section itself is injected from the PCB template's
+`[vortac_tool TN]` placeholder; `tool_index`, `mcu_name`, `canbus_uuid` (from
+the static `[mcu]` section) and `extruder_name` (the renamed extruder) are
+auto-filled. The manager runs `ACTIVATE_EXTRUDER` with `extruder_name` on
+every tool change.
+
+## Adding a tool — the checklist
 
 1. **Get the board's CAN UUID** (every board has a unique one):
    `~/klipper/scripts/canbus_query.py can0`
-2. **Copy a tool file**: `cp tools/tool0.cfg tools/tool1.cfg`
-3. **Replace every `tool0` → `tool1`, `T0` → `T1`, `dock0` → `dock1`.**
-   The number appears in exactly three section headers (`[mcu tool1]`,
-   `[include_with tool1 …]`, `[vortac_tool T1]`), the sense-pin prefixes
-   (`tool1:PB…`), the `params_dock1_*` keys, and
-   `ACTIVATE_EXTRUDER EXTRUDER=extruder1`. **Grep the file afterwards** for
-   the old number — a missed spot does NOT error, it silently merges into the
-   other tool's sections (Klipper merges duplicate sections, last one wins;
-   the symptom is one franken-tool, e.g. one board shut down by the other
-   tool's sensor config).
-4. **Set the new `canbus_uuid`** under `[mcu tool1]`.
-5. **Add `[include tools/tool1.cfg]` to `tools.cfg`** and make sure
-   `dock_count` covers the new dock.
+2. **Copy a tool file**: `cp tools/miniStealth_grey.cfg tools/myTool.cfg`
+   (or start from `tools/tool0.example.cfg`).
+3. **Rename the namespace**: `[mcu myTool]` + `[include_with myTool …]` —
+   those two headers are the only places the name appears.
+4. **Set the new `canbus_uuid`** under `[mcu myTool]` and the tool's physical
+   dock in `overrides:` (`vortac_tool TN.home_dock: dockX`).
+5. **Add `[include tools/myTool.cfg]` to `tools.cfg`** — its position in the
+   include list is its tool number. Make sure `dock_count` covers the dock.
 6. **Restart Klipper**. `vortac_manager` refuses to start (with a clear
-   message) on duplicated `tool_index`/`mcu_name`/`canbus_uuid`/sense pins or
-   an `mcu_name` without a matching `[mcu …]` section — fix what it names.
+   message) on duplicated `mcu_name`/`canbus_uuid`/sense pins,
+   non-contiguous tool indices, a missing `home_dock`, or an `mcu_name`
+   without a matching `[mcu …]` section — fix what it names.
 7. **Verify**: `VORTAC_STATUS` lists both tools; `VORTAC_DETECT DEBUG=1`
    shows each tool flip only on its own dock's strobe.
 8. **Calibrate the dock position** (next section), then `SAVE_CONFIG`.
 
-Why the remaining duplication exists: `[mcu toolN]` must be declared
-statically because Klipper registers MCU pin chips before extras like
-`include_with` run — it cannot be injected. And pins must name their chip
-(`tool1:PB7`), which is plain Klipper syntax.
+Why the `[mcu <name>]` section stays in the tool file: Klipper registers MCU
+pin chips before extras like `include_with` run — it cannot be injected.
 
 `include_with` reads the PCB template once per tool, swaps the MCU namespace,
 rewrites every `EBBCan:` pin reference, prefixes named sections with the
-namespace (`[neopixel logo_rgb]` → `[neopixel tool1_logo_rgb]` — so LEDs are
-addressable per tool: `SET_LED LED=tool1_logo_rgb …`), and renames the Klipper
-singletons for index ≥ 1 (`[extruder]` → `[extruder1]`, `[fan]` →
-`[fan_generic tool1_fan]`).
+namespace (`[neopixel logo_rgb]` → `[neopixel miniGrey_logo_rgb]` — so LEDs
+are addressable per tool: `SET_LED LED=miniGrey_logo_rgb …`), renames the
+Klipper singletons for index ≥ 1 (`[extruder]` → `[extruder1]`, `[fan]` →
+`[fan_generic miniGrey_fan]`), and turns `[vortac_tool TN]` into
+`[vortac_tool miniGrey]`.
 
-The namespace is also the display name dashboards show. Prefer pretty names?
-Name the MCU after the physical tool — then set the two derived options
-explicitly (a namespace without a trailing number can't derive them):
+Only `extruder`/`extruder1` stay index-based (hardwired by Klipper), and the
+`T0`/`T1` commands plus `dock0`/`dock1` names are index-based too (slicers
+emit `T<n>`; docks map to LED chain indices). Manager commands accept either
+form: `VORTAC_LOAD TOOL=miniGrey` and `VORTAC_LOAD TOOL=T1` both work. Macros
+can address per-tool hardware uniformly via the tool's `mcu_name`, e.g. in
+`tool_activate_gcode`: `SET_LED LED={tool.mcu_name}_logo_rgb …`. The template
+`[mcu EBBCan]` is skipped with `skip_sections:` because each tool file owns
+its real `[mcu <name>]`.
 
-```ini
-[mcu miniPink]
-canbus_uuid: …
-
-[include_with miniPink vortac_configs/mcu/EBB42_V12.cfg]
-tool_index: 0                # required: no trailing number in the namespace
-skip_sections:
-  mcu EBBCan
-
-[vortac_tool T0]
-mcu_name: miniPink           # default would be tool0
-dock_sense_pin: miniPink:PB7
-grab_sense_pin: miniPink:PB5
-```
-
-Dashboards then show `miniPink_logo_rgb`, `miniPink_hotend_fan`, etc. Only
-`extruder`/`extruder1` stay index-based (hardwired by Klipper), and the
-`T0`/`T1` commands plus `dock0`/`dock1` names are fixed too (slicers emit
-`T<n>`; docks map to LED chain indices). Macros can still address per-tool
-hardware uniformly via the tool's `mcu_name`, e.g. in
-`tool_activate_gcode`: `SET_LED LED={tool.mcu_name}_logo_rgb …`. The template `[mcu EBBCan]` is skipped with
-`skip_sections:` because each tool file owns its real `[mcu toolN]`.
+Legacy/static alternative: a hand-written `[vortac_tool T0]` section still
+works when the template carries no `[vortac_tool TN]` placeholder — its
+trailing number derives `tool_index=0`, `mcu_name=tool0`, `home_dock=dock0`,
+and a trailing-numbered namespace (`tool0`) derives the include's tool_index.
 
 ### Per-tool hardware deviations (`overrides:`)
 
@@ -135,10 +139,13 @@ MCU shutdown).
 - **XYZ approach/depart** is hardcoded in `vortac_manager.py`
   (constants `DOCK_Y_SAFE`, `DOCK_Z_CLEARANCE`, feedrates at the top).
 - **Per-tool warm-up / cool-down** → `tool_activate_gcode` /
-  `tool_deactivate_gcode` on `[vortac_tool Tn]`.
+  `tool_deactivate_gcode` on `[vortac_tool <name>]` (set via include_with
+  overrides: `vortac_tool TN.tool_activate_gcode: …`).
+- **Extruder switching** is automatic: the manager runs `ACTIVATE_EXTRUDER`
+  with the tool's injected `extruder_name` on every tool change.
 - **FLAT / TILT** of the gantry around dock approach is automatic.
-- **Per-tool offsets** → `gcode_offset_x/y/z` on `[vortac_tool Tn]`; manager
-  applies them via `SET_GCODE_OFFSET` on every tool change.
+- **Per-tool offsets** → `gcode_offset_x/y/z` on `[vortac_tool <name>]`;
+  manager applies them via `SET_GCODE_OFFSET` on every tool change.
 
 ## Homing, QGL & probing — the gantry workflow
 
@@ -192,7 +199,7 @@ approaches at saved Z + `DOCK_Z_CLEARANCE`, drops to saved Z, then disengages.
 Manual fallback:
 
 ```
-VORTAC_DOCK_SAVE_POS TOOL=T0 DOCK=dock0
+VORTAC_DOCK_SAVE_POS TOOL=miniGrey DOCK=dock0
 SAVE_CONFIG
 ```
 
@@ -206,11 +213,11 @@ SAVE_CONFIG
 | `VORTAC_SELECT_DOCK DOCK=dockN` | manager | detect/select dock and its tool for calibration |
 | `VORTAC_DOCK_CAL_STATUS` | manager | report selected calibration dock/tool |
 | `VORTAC_DOCK_CAL_SAVE` | manager | save current hooked/engage XYZ for selected calibration dock/tool |
-| `VORTAC_LOAD TOOL=Tn` | manager | fetch Tn from its dock |
+| `VORTAC_LOAD TOOL=<name>\|Tn` | manager | fetch a tool from its dock |
 | `VORTAC_UNLOAD` | manager | park the held tool at its dock |
-| `VORTAC_SET_CURRENT_TOOL TOOL=Tn` | manager | set logical current tool without movement |
+| `VORTAC_SET_CURRENT_TOOL TOOL=<name>\|Tn` | manager | set logical current tool without movement |
 | `VORTAC_SET_CURRENT_TOOL CLEAR=1` | manager | clear logical current tool |
-| `VORTAC_DOCK_SAVE_POS TOOL=Tn DOCK=name` | manager | save current hooked/engage XYZ as tool's pos for `name` |
+| `VORTAC_DOCK_SAVE_POS TOOL=<name>\|Tn DOCK=dockN` | manager | save current hooked/engage XYZ as tool's pos for `name` |
 | `VORTAC_GANTRY_FLAT` / `VORTAC_GANTRY_TILT` | qgl_state | toggle gantry between frame- and bed-flat |
 | `VORTAC_QGL_STATUS` | qgl_state | report gantry state and stored QGL deltas |
 | `VORTAC_SENSE_STATUS` | manager | raw cached dock/grab sense pin states per tool |

@@ -50,7 +50,9 @@ Persisted state lives in the config section itself: `lookup_table`, `zero_pos_of
 
 Implements `[include_with <namespace> <filename>]`. It reads `<filename>` relative to the active Klipper config directory, iterates every section/option, and re-injects them into the calling config with MCU name remapping, value rewrites, section renaming, optional overrides, and optional `skip_sections`.
 
-This is the mechanism by which one shared template can be loaded multiple times under different MCU names. Tool files must still declare `[mcu toolN]` statically before `[include_with ...]`, because Klipper registers MCU pin chips before extras run.
+This is the mechanism by which one shared template can be loaded multiple times under different MCU names. Tool files must still declare `[mcu <name>]` statically before `[include_with ...]`, because Klipper registers MCU pin chips before extras run.
+
+Tool numbering is ORDER-BASED: templates that carry a `[vortac_tool TN]` placeholder take their `tool_index` from a per-printer counter in include order (first tool include in `tools.cfg` → 0). The placeholder is renamed to `[vortac_tool <namespace>]` with `tool_index`/`mcu_name`/`canbus_uuid`/`extruder_name` auto-injected; `home_dock` is set per tool via `overrides:`. Persisted `params_*` dock positions live in that section — a commented-out tool leaves a harmless autosave-only "ghost" section (`available=False`, calibration preserved). The per-printer counter must never be module-global (RESTART reuses the process).
 
 ### Configs (`configs/vortac_configs/`)
 
@@ -71,6 +73,22 @@ Live-mounted into Klipper at runtime. Layout:
 - **Section-renaming table** for the include_with rewriter is in the plan doc — consult it before adding new section types.
 
 The refactor is in progress on the development branch; check current git status before assuming which config files are staged or deployed.
+
+## HTML documentation (`DOCS/`) — keep it in sync
+
+`DOCS/` holds the user-facing HTML documentation (static, no build step; open
+`DOCS/index.html`). **Whenever a change touches modules, configs, gcode
+commands, workflows or the READMEs, update the matching `DOCS/` chapter in the
+same commit.** Docs are written in English.
+
+Structure: shared styling in `DOCS/assets/style.css`, shared behavior
+(sidebar, per-page TOC, persistent checklists, table filter, prev/next nav) in
+`DOCS/assets/docs.js`. To add a chapter: create the page (copy an existing one
+as skeleton) and add one entry to the `PAGES` array in `docs.js` — every
+page's navigation updates automatically. Give every `h2`/`h3` an `id`.
+Building blocks: `.callout` (+ `.warn`/`.tip`/`.danger`), `details.fold`
+collapsibles, `.checklist` with `data-ck` checkboxes (localStorage-persisted),
+`.filterbox` with `data-target` for filterable tables.
 
 ## Conventions worth knowing
 

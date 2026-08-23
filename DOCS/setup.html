@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Installation &amp; Setup — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Installation &amp; Setup</h1>
+<p class="subtitle">Bringing up a Vortac toolchanger from scratch — from flashing a toolhead
+board to a running installation. Checkboxes are saved in your browser, so you can work through
+the list across sessions.</p>
+
+<div class="checklist">
+  <div class="checklist-head">
+    <h3>Bring-up checklist</h3>
+    <button class="reset" type="button">Reset checklist</button>
+  </div>
+  <label class="check"><input type="checkbox" data-ck="flash">
+    <span class="check-text"><span class="check-title">Flash the toolhead board(s)</span>
+    <span class="check-sub">Katapult + Klipper via CAN — note each board's CAN UUID.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="install">
+    <span class="check-text"><span class="check-title">Install VortacFirmware on the Pi</span>
+    <span class="check-sub"><code>sudo ./install.sh</code> — symlinks, bind-mount, update watcher.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="printercfg">
+    <span class="check-text"><span class="check-title">Wire up printer.cfg</span>
+    <span class="check-sub">Include mainboard → grabber MCU → tools, in that order.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="toolscfg">
+    <span class="check-text"><span class="check-title">Create tools.cfg and per-tool files</span>
+    <span class="check-sub">Copy the <code>.example</code> templates, set CAN UUIDs.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="restart">
+    <span class="check-text"><span class="check-title">Restart Klipper without errors</span>
+    <span class="check-sub"><code>sudo systemctl restart klipper</code> — fix anything the manager complains about.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="calibrate">
+    <span class="check-text"><span class="check-title">Calibrate grabber &amp; docks</span>
+    <span class="check-sub">Continue in the <a href="calibration.html">Calibration</a> chapter.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="test">
+    <span class="check-text"><span class="check-title">Test detection and the first tool change</span>
+    <span class="check-sub"><code>VORTAC_DETECT</code>, <code>VORTAC_LOAD</code>, <code>T0</code>.</span></span>
+  </label>
+</div>
+
+<h2 id="flash">1 — Flash the toolhead board</h2>
+<p>Flash <strong>Katapult</strong> (bootloader) and <strong>Klipper</strong> onto the CAN toolhead
+board. Follow the excellent guide at
+<a href="https://canbus.esoterical.online/toolhead_flashing.html">canbus.esoterical.online</a>.</p>
+<p>After flashing, query the board's <strong>CAN bus UUID</strong> — you will need it for the
+tool config:</p>
+<pre><code>~/klippy-env/bin/python ~/klipper/scripts/canbus_query.py can0</code></pre>
+
+<details class="fold">
+  <summary>Good to know: every board has a unique UUID</summary>
+  <div class="fold-body">
+    <p>The UUID is burned into the MCU, not assigned by you. When you add a second tool with the
+    same PCB, only the tool name (the <code>[mcu &lt;name&gt;]</code> / <code>include_with</code>
+    namespace), the UUID and the <code>home_dock</code> override differ between the two tool
+    config files — the entire rest of the hardware definition comes from one shared template
+    (see <a href="configuration.html#include-with">include_with</a>).</p>
+  </div>
+</details>
+
+<h2 id="install">2 — Install VortacFirmware on the Pi</h2>
+<p>Clone the repository directly:</p>
+<pre><code>git clone https://github.com/VortacDesign/VortacFirmware.git ~/vortac</code></pre>
+<p>…or let Moonraker manage updates by adding this to <code>moonraker.conf</code>
+(adjust path/branch if needed):</p>
+<pre><code>[update_manager vortac]
+type: git_repo
+path: ~/vortac
+origin: https://github.com/VortacDesign/VortacFirmware.git
+primary_branch: development
+managed_services: klipper</code></pre>
+<p>Then run the installer once, as root:</p>
+<pre><code>cd ~/vortac &amp;&amp; sudo ./install.sh</code></pre>
+
+<h3 id="what-install-does">What the installer actually does</h3>
+<ol>
+  <li><strong>Symlinks</strong> every <code>*.py</code> from the repo's
+      <code>klippy/extras/</code> into Klipper's <code>klippy/extras/</code>
+      (top-level only; existing non-symlink files are skipped, never overwritten).</li>
+  <li>Sets up a <strong>systemd bind-mount + automount</strong> that exposes
+      <code>configs/vortac_configs/</code> at
+      <code>~/printer_data/config/vortac_configs/</code>.</li>
+  <li>Installs a <strong>systemd <code>.path</code> watcher</strong> on
+      <code>.git/refs/heads/&lt;branch&gt;</code> and <code>.git/packed-refs</code> —
+      every <code>git pull</code> re-runs <code>install.sh</code> automatically.</li>
+</ol>
+<p>So the installer is normally a <strong>one-time step</strong>. After any update:
+<code>sudo systemctl restart klipper</code>.</p>
+<p><code>uninstall.sh</code> reverses everything (removes the systemd units, unmounts, deletes
+the symlinks).</p>
+
+<div class="callout warn">
+  <span class="callout-title">vortac_configs/ shows up empty?</span>
+  <p>Run <code>install.sh</code> manually once more, then clear your browser cache and reload the
+  web interface — Mainsail/Fluidd caches the file tree. See
+  <a href="troubleshooting.html#empty-configs">Troubleshooting</a>.</p>
+</div>
+
+<h2 id="printer-cfg">3 — Wire up printer.cfg</h2>
+<p>Include the Vortac configs from your <code>printer.cfg</code> <strong>in this order</strong>
+(boot order matters — each tool file must declare its <code>[mcu &lt;name&gt;]</code> before the
+template include runs):</p>
+<pre><code>[include vortac_configs/mcu/octopus.cfg]   # mainboard: XY, Z×4, bed, dock LEDs, [printer]
+[include vortac_configs/mcu/vortac.cfg]    # grabber MCU + [vortac_grabber] + [vortac_qgl_state]
+[include vortac_configs/tools.cfg]         # per-tool includes + [vortac_manager]</code></pre>
+<p>A ready-made template is in the repo: <code>configs/printer.example.cfg</code>.
+Pick the mainboard include that matches your hardware from <code>vortac_configs/mcu/</code>
+(currently <code>octopus.cfg</code>; <code>kraken.cfg</code> is a placeholder) and verify
+stepper/fan/LED pins against your wiring.</p>
+
+<details class="fold">
+  <summary>Good to know: the <code>.example</code> pattern</summary>
+  <div class="fold-body">
+    <p>The repo only ships <code>*.example.cfg</code> templates for user-specific files. The real
+    files (<code>printer.cfg</code>, <code>tools.cfg</code>, every <code>tools/*.cfg</code>) are
+    <strong>gitignored</strong> — they contain your CAN UUIDs, dock positions and offsets. Copy
+    <code>&lt;name&gt;.example.cfg</code> → <code>&lt;name&gt;.cfg</code> and edit. Klipper never
+    reads <code>.example</code> files; it only loads what <code>printer.cfg</code> pulls in via
+    <code>[include]</code>. General hardware configs (everything under <code>mcu/</code>) stay
+    tracked as-is.</p>
+  </div>
+</details>
+
+<h2 id="tools-cfg">4 — Set up tools.cfg and the tool files</h2>
+<p><code>vortac_configs/tools.cfg</code> is the tool registry: it includes one file per tool and
+configures <code>[vortac_manager]</code>. Start from the templates:</p>
+<pre><code>cd ~/printer_data/config/vortac_configs
+cp tools.example.cfg tools.cfg
+cp tools/tool0.example.cfg tools/myTool.cfg   # any name — it is NOT the tool number</code></pre>
+<p>In the tool file, set the board's <code>canbus_uuid</code> (from step 1) and the tool's
+physical dock (<code>vortac_tool TN.home_dock: dockX</code> in <code>overrides:</code>). The
+tool's <strong>number is its include position</strong> in <code>tools.cfg</code> (first include
+= <code>T0</code>); its <strong>name</strong> is the <code>[mcu &lt;name&gt;]</code> /
+<code>include_with</code> namespace. Dock positions are calibrated at runtime and persisted via
+<code>SAVE_CONFIG</code> — nothing to write by hand. The full walk-through for the file contents
+— and for adding more tools — is in
+<a href="configuration.html#adding-a-tool">Configuration → Adding a tool</a>.</p>
+<p>Restart Klipper after config changes:</p>
+<pre><code>sudo systemctl restart klipper</code></pre>
+
+<div class="callout tip">
+  <span class="callout-title">The manager checks your work</span>
+  <p>On startup, <code>vortac_manager</code> refuses to start — with a clear message — if two
+  tools share a <code>tool_index</code>, <code>mcu_name</code>, <code>canbus_uuid</code> or sense
+  pin, if the tool indices are not contiguous 0..N-1, if an available tool lacks
+  <code>home_dock</code> or <code>tool_index</code>, or if a tool's <code>mcu_name</code> has no
+  matching <code>[mcu …]</code> section. Fix exactly what it names.</p>
+</div>
+
+<h2 id="first-tests">5 — First tests</h2>
+<p>After <a href="calibration.html">calibration</a>, verify the setup layer by layer:</p>
+
+<h3>Grabber only (no tool attached)</h3>
+<pre><code>VORTAC_SIMPLE_READ        ; sensor sanity check — raw and true angle
+VORTAC_ENGAGE             ; move to engage_pos (default 130)
+VORTAC_DISENGAGE          ; move to disengage_pos (default 0)</code></pre>
+<p>Both are closed-loop moves and should converge within tolerance (default ±2°) in 1–2 moves —
+the console reports e.g. <code>Reached 130.02° … in 1 move(s)</code>.</p>
+
+<h3>Sense pins and dock detection (tools parked in their docks)</h3>
+<pre><code>VORTAC_SENSE_STATUS       ; raw dock/grab sense pin states per tool
+VORTAC_DETECT             ; strobe-based dock occupancy + grabbed tool
+VORTAC_STATUS             ; current tool, dock map, QGL state</code></pre>
+
+<h3>First manual tool change (after dock positions are calibrated)</h3>
+<pre><code>VORTAC_LOAD TOOL=T0       ; fetch T0 from its dock (TOOL= also takes the name: TOOL=miniGrey)
+VORTAC_UNLOAD             ; park it back
+T0                        ; full tool-change command</code></pre>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

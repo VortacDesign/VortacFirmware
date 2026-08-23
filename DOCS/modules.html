@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Module Reference — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Module Reference</h1>
+<p class="subtitle">Internals of the Klipper extras in <code>klippy/extras/</code>. For the
+command tables, see the <a href="gcode.html">G-code Reference</a>.</p>
+
+<div class="callout">
+  <span class="callout-title">The Klipper plugin contract</span>
+  <p>Klipper imports an extra when it sees a config section matching the file name. The factory
+  functions are <code>load_config(config)</code> for singleton sections
+  (<code>[vortac_grabber]</code>) and <code>load_config_prefix(config)</code> for prefix sections
+  (<code>[vortac_tool T0]</code>, <code>[include_with foo bar]</code>). Extras look up shared
+  objects via <code>printer.lookup_object(…)</code>, register commands via
+  <code>gcode.register_command(…)</code>, and persist tuned values via
+  <code>configfile.set(…)</code> + user-run <code>SAVE_CONFIG</code>.</p>
+</div>
+
+<h2 id="vortac-grabber">vortac_grabber — [vortac_grabber]</h2>
+<p>Hardware-only module: AS5047D angle sensor (SPI), closed-loop control of the
+<code>[manual_stepper grabber]</code>, LUT-based raw→true angle interpolation.</p>
+<ul>
+  <li><strong>Python API</strong> (called by the manager): <code>engage(angle=None, gcmd=None)</code>,
+      <code>disengage(gcmd=None)</code>, <code>read_angle(gcmd=None)</code>.</li>
+  <li><strong>Calibration</strong> (<code>VORTAC_CALIBRATE</code>): synchronous direct-read
+      (multi-turn, last-turn-wins, circular mean per bin). <code>DIR=both</code> (default) sweeps
+      cw then ccw, stores the per-bin circular midpoint and reports the cw/ccw spread as a
+      backlash measurement. Details in <a href="calibration.html#lut">Calibration</a>.</li>
+  <li><strong>Closed-loop moves</strong> (<code>VORTAC_MOVE</code>, engage/disengage): each pass
+      commands the full remaining error in one <code>force_move.manual_move</code>, re-measures,
+      repeats — typically 1–2 moves; lost steps show up in the next absolute reading.
+      <code>MODE=cw|ccw</code> constrained moves stop
+      <code>max(BACKOFF, GUARD_FRAC·dist)</code> short per pass so overshoot never forces an
+      extra revolution. <code>cw</code> means <em>increasing</em> true angle.</li>
+  <li><strong>Persistence:</strong> <code>lookup_table</code> and <code>zero_pos_offset</code>
+      are written via <code>configfile.set</code> → user runs <code>SAVE_CONFIG</code>.</li>
+</ul>
+
+<h3>Config options</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>angleSensor</code></td><td>(required)</td><td>name of the <code>[angle …]</code> section for the AS5047D</td></tr>
+<tr><td><code>speed</code></td><td>50</td><td>default move speed (deg/s) for closed-loop moves</td></tr>
+<tr><td><code>engage_pos</code></td><td>130</td><td>true angle for <code>VORTAC_ENGAGE</code> / <code>engage()</code></td></tr>
+<tr><td><code>disengage_pos</code></td><td>0</td><td>true angle for <code>VORTAC_DISENGAGE</code> / <code>disengage()</code></td></tr>
+<tr><td><code>engage_mode</code></td><td>shortest</td><td>direction constraint for engage: <code>shortest</code>, <code>cw</code>, <code>ccw</code></td></tr>
+<tr><td><code>disengage_mode</code></td><td>shortest</td><td>direction constraint for disengage</td></tr>
+<tr><td><code>lookup_table</code></td><td>(saved)</td><td>JSON LUT <code>[[true_deg, raw_deg], …]</code> written by <code>VORTAC_CALIBRATE</code></td></tr>
+<tr><td><code>zero_pos_offset</code></td><td>0.0</td><td>offset written by <code>VORTAC_SET_ZERO</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="fold">
+  <summary>Deep dive: angle math on a circle</summary>
+  <div class="fold-body">
+    <p>All angle math wraps to <code>[0, 360)</code> and must handle seam crossings. The
+    <code>wrap360</code> / <code>wrap180</code> / <code>circ_mean</code> helpers in
+    <code>vortac_grabber.py</code> are the reference implementations —
+    <code>_measured_to_true</code> does wrap-aware circular interpolation across the LUT,
+    including entries that straddle the 0°/360° seam. <code>read_raw</code> builds 16-bit AS5047D
+    SPI commands (with parity bit) and returns the angle in degrees at 14-bit precision.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Deep dive: the standard stepper-nudge pattern</summary>
+  <div class="fold-body">
+    <p>The grabber stepper is never driven through the kinematics path. The standard pattern is
+    <code>force_move.manual_move(stepper, distance, speed)</code> followed by
+    <code>toolhead.wait_moves()</code> and a small <code>dwell</code> to let the sensor settle
+    before reading. Keep this pattern for any new grabber motion code.</p>
+  </div>
+</details>
+
+<h2 id="vortac-tool">vortac_tool — [vortac_tool &lt;name&gt;]</h2>
+<p>Per-tool logical definition. Normally <strong>injected by <code>include_with</code></strong>
+from the PCB template's <code>[vortac_tool TN]</code> placeholder (identity auto-filled); a
+statically written <code>[vortac_tool T0]</code> still works. The tool <em>hardware</em> must
+already be present in normal Klipper config (<code>[mcu &lt;name&gt;]</code> plus
+<code>[include_with &lt;name&gt; …]</code>) before this extra loads — Klipper registers MCU pin
+chips before extras run.</p>
+<ul>
+  <li><strong>Identity:</strong> injected sections get <code>tool_index</code>,
+      <code>mcu_name</code> and <code>extruder_name</code> from <code>include_with</code>; static
+      <code>[vortac_tool T1]</code> sections derive them from the trailing number
+      (<code>T1</code> → index 1, <code>tool1</code>, <code>extruder1</code>,
+      <code>home_dock=dock1</code>). <code>home_dock</code> is <strong>not</strong> derived from
+      the (order-based, unstable) <code>tool_index</code> — injected tools must set it via
+      include_with overrides (<code>vortac_tool TN.home_dock: dockX</code>).</li>
+  <li><strong>Availability &amp; ghosts:</strong> <code>available:</code> defaults to
+      <code>True</code> only when <em>both</em> sense pins are configured. A leftover
+      autosave-only section (a commented-out tool whose SAVE_CONFIG'd <code>params_*</code> dock
+      positions remain in <code>printer.cfg</code>) therefore loads harmlessly as a "ghost":
+      <code>tool_index=None</code>, <code>available=False</code>, calibration preserved until the
+      tool file returns. A genuinely sense-pin-less tool (degraded blind-unhook mode) must set
+      <code>available: True</code> explicitly.</li>
+  <li><strong>Per-dock storage:</strong> <code>params_&lt;dock&gt;_&lt;x|y|z&gt;</code>
+      (persisted via <code>configfile.set</code> + SAVE_CONFIG; keyed by tool NAME, so calibration
+      survives renumbering). Manager-facing API: <code>get_dock_pos(dock, axis)</code>,
+      <code>has_dock_pos(dock)</code>, <code>save_dock_pos(dock, x, y, z)</code>.</li>
+  <li><strong>Templates:</strong> <code>tool_activate_gcode</code> /
+      <code>tool_deactivate_gcode</code> — run by the manager around the dock motion. Jinja
+      context: <code>tool</code> (this VortacTool), <code>dock=None</code>,
+      <code>params</code>.</li>
+</ul>
+
+<h2 id="vortac-manager">vortac_manager — [vortac_manager]</h2>
+<p>The coordinator. At <code>klippy:connect</code> it discovers all
+<code>[vortac_tool *]</code> sections (only those with <code>available=True</code>; ghosts are
+skipped), the grabber (required), and <code>[vortac_qgl_state]</code> (optional), then registers
+a <code>T&lt;tool_index&gt;</code> command for every available tool — the command comes from the
+INDEX, tool ids are display names like <code>miniGrey</code>. <code>TOOL=</code> parameters
+accept the tool name (case-insensitive), <code>T&lt;n&gt;</code>, or a bare index.</p>
+
+<h3>Identity validation</h3>
+<p>Startup fails with a clear message if two tools share a <code>tool_index</code>,
+<code>mcu_name</code>, <code>canbus_uuid</code>, or sense pin, if the non-ghost tools' indices
+are not contiguous 0..N-1 (Klipper's extruder-naming contract; holds by construction with
+order-based numbering), if an available tool lacks <code>home_dock</code> or
+<code>tool_index</code>, or if a tool's <code>mcu_name</code> has no matching
+<code>[mcu …]</code> section. Klipper itself merges duplicate config sections silently (last
+value wins), so a copied-but-not-fully-renamed tool file never errors on its own — this guard
+catches the detectable leftovers.</p>
+
+<h3>Tool-change sequence (<code>_change_to</code>)</h3>
+<pre><code>tool_deactivate_gcode
+→ VORTAC_GANTRY_FLAT
+→ _park_at_dock(current)
+→ _fetch_from_dock(target)
+→ VORTAC_GANTRY_TILT
+→ ACTIVATE_EXTRUDER EXTRUDER=&lt;extruder_name&gt; (automatic)
+→ SET_GCODE_OFFSET (per-tool offsets)
+→ tool_activate_gcode</code></pre>
+
+<h3>Probe guard</h3>
+<p>At <code>klippy:connect</code> the manager wraps the <code>[probe]</code> object's entry
+points (<code>start_probe_session</code> / <code>run_probe</code>), so <strong>every</strong>
+probe-based operation — <code>QUAD_GANTRY_LEVEL</code>, <code>BED_MESH_CALIBRATE</code>,
+<code>PROBE</code>, <code>PROBE_ACCURACY</code>, <code>PROBE_CALIBRATE</code>, … — refuses while
+a tool is held (logical <code>current_tool</code> OR any tool's <code>grab_sense</code> reading
+grabbed). Reason: the probe touch point sits above the nozzle tip when a tool is grabbed, so the
+nozzle would hit the bed before the probe triggers. Park the tool
+(<code>VORTAC_UNLOAD</code>) before probing.</p>
+
+<h3>Dock motion constants</h3>
+<p>Hardcoded at the top of <code>vortac_manager.py</code>:</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>DOCK_Y_SAFE</code></td><td>50.0</td><td>safe Y line in front of the docks</td></tr>
+<tr><td><code>DOCK_Z_CLEARANCE</code></td><td>4.5</td><td>lift above the saved (hooked/engage) Z</td></tr>
+<tr><td><code>DOCK_APPROACH_F</code></td><td>2000</td><td>approach feedrate (mm/min)</td></tr>
+<tr><td><code>DOCK_SLIDE_F</code></td><td>500</td><td>slide in/out feedrate (mm/min)</td></tr>
+</tbody>
+</table>
+</div>
+<p>Edit there for global geometry tweaks; per-tool tweaks belong in
+<code>tool_activate_gcode</code> / <code>tool_deactivate_gcode</code>. Saved dock positions are
+the hooked/engage position; load uses saved Z then lifts to
+Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code>, and unload approaches at
+Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> before dropping to saved Z.</p>
+
+<h3 id="detection">Dock detection (strobe-by-subtraction)</h3>
+<p>Every tool has two GPIO sense pins: <code>dock_sense_pin</code> (dock Tool_id after opto
+logic) and <code>grab_sense_pin</code> (default HIGH; pulled LOW by the grabber on the held
+tool). <code>VORTAC_DETECT</code>:</p>
+<ol>
+  <li>Turns <strong>all</strong> dock Tool_id LED channels off.</li>
+  <li>Strobes one dock's configured LED channel on at a time
+      (<code>dock_strobe_time</code>, default 0.10&nbsp;s).</li>
+  <li>Assigns the dock to any tool whose cached <code>dock_sense_pin</code> reads LOW.</li>
+  <li>Restores every LED's original RGBW value afterwards.</li>
+</ol>
+<p>The grabbed tool is detected from <code>grab_sense_pin</code>. Detection <strong>aborts</strong>
+if any tool already reads dock LOW while all dock Tool_id channels are off (that would make the
+mapping ambiguous — see <a href="troubleshooting.html#detect-aborts">Troubleshooting</a>).</p>
+
+<h3>Dock calibration context</h3>
+<p><code>VORTAC_SELECT_DOCK DOCK=dockN</code> runs detection and stores the detected dock/tool
+pair. <code>VORTAC_DOCK_CAL_SAVE</code> saves the current hooked/engage XYZ to that selected
+tool/dock and fails if no tool was detected. <code>VORTAC_DOCK_SAVE_POS</code> additionally
+refuses unless the gantry state is <code>flat</code>.</p>
+
+<h2 id="vortac-qgl-state">vortac_qgl_state — [vortac_qgl_state]</h2>
+<p>Toggles the gantry between <strong>frame-flat</strong> (dock geometry valid) and
+<strong>bed-flat</strong> (printing geometry valid) without re-probing.</p>
+<ul>
+  <li><strong>Mechanic:</strong> at <code>klippy:ready</code>, hooks
+      <code>quad_gantry_level.z_helper.adjust_steppers</code> to capture each delta vector into
+      <code>stored_deltas</code>. FLAT replays <code>−stored_deltas</code>, TILT replays
+      <code>+stored_deltas</code>. Wraps <code>QUAD_GANTRY_LEVEL</code> to zero
+      <code>stored_deltas</code> when re-running while flat, so the new measurement starts
+      clean.</li>
+  <li><strong>Reset:</strong> <code>homing:home_rails_end</code> on any
+      <code>stepper_z*</code> clears state and sets it to <code>flat</code>.</li>
+  <li><strong>State is RAM only</strong> — power cycle, mid-print loss, or a fresh Z-home
+      invalidates it; the user must re-run QGL.</li>
+  <li><strong>Manager dependency:</strong> <code>VORTAC_DOCK_SAVE_POS</code> refuses unless
+      <code>state == 'flat'</code>.</li>
+</ul>
+
+<h2 id="include-with">include_with — [include_with &lt;namespace&gt; &lt;filename&gt;]</h2>
+<p>Loads one Klipper template under a remapped MCU namespace; auto-renames sections per
+<code>tool_index</code> so one PCB-level config can be instantiated N times. The user-facing
+behavior (rename table, overrides, skip lists, pretty names) is documented in
+<a href="configuration.html#include-with">Configuration</a>. Implementation notes:</p>
+<ul>
+  <li><strong><code>tool_index</code> is assigned by LOAD ORDER for tool templates:</strong>
+      when the template carries a (non-skipped) <code>[vortac_tool …]</code> section, each
+      <code>[include_with]</code> takes the next value from a per-printer counter — the first
+      tool include in <code>tools.cfg</code> is 0, the next 1, … Commenting a tool out renumbers
+      the ones after it, which keeps Klipper's <code>extruder</code>/<code>extruder&lt;N&gt;</code>
+      contract intact. An explicit <code>tool_index:</code> wins; templates without a
+      <code>vortac_tool</code> section fall back to the namespace's trailing number
+      (<code>tool1</code> → 1, else the option is required). Mixing explicit indices with
+      auto-numbered includes is unsupported (the counter ignores explicit values).</li>
+  <li><strong><code>[vortac_tool TN]</code> injection:</strong> the template's
+      <code>vortac_tool</code> placeholder is renamed to
+      <code>[vortac_tool &lt;namespace&gt;]</code> (name REPLACED, not prefixed), and
+      <code>tool_index</code>, <code>mcu_name</code> (= namespace), <code>canbus_uuid</code>
+      (from the static <code>[mcu &lt;namespace&gt;]</code> section) and
+      <code>extruder_name</code> (the renamed extruder) are auto-injected. Template values and
+      overrides win over the injection. Set <code>home_dock</code> per tool via
+      <code>overrides:</code>. If SAVE_CONFIG's autosave block already created the section
+      (persisted <code>params_*</code> dock positions), the injection MERGES into it —
+      calibration data is preserved.</li>
+  <li><strong>Value rewrite:</strong> any <code>&lt;from&gt;:</code> pin token in option values
+      becomes <code>&lt;to&gt;:</code>; whole-string section refs
+      (<code>heater: extruder</code> → <code>heater: extruder1</code>) are fixed up.</li>
+  <li><strong>Built-in skip list</strong> for <code>tool_index ≥ 1</code>:
+      <code>resonance_tester</code>, <code>input_shaper</code>, <code>shaketune</code>
+      (Klipper singletons that can't be renamed). Config sections can also pass
+      <code>skip_sections:</code> as a comma/newline list.</li>
+  <li><strong>Overrides:</strong> the config option takes <code>section.key: value</code> lines;
+      a JSON dict (<code>{"section": {"key": "value"}}</code>, <code>null</code> deletes) is also
+      accepted and is the format of the programmatic <code>overrides=</code> argument.</li>
+  <li><strong>Programmatic API</strong> (used by <code>vortac_tool</code>):
+      <code>include_with_remap(printer, parent_config, filepath, namespace, mcu_from=None,
+      tool_index=0, overrides=None, skip_sections=None, template=None)</code>.</li>
+</ul>
+
+<h2 id="lifecycle">Lifecycle &amp; dependencies</h2>
+<pre><code>config parse:
+  [vortac_grabber]    → register grabber gcode commands
+  [vortac_qgl_state]  → register FLAT/TILT (hooks attach at klippy:ready)
+  [mcu &lt;name&gt;]        → register tool MCU pin chip early
+  [include_with ...]  → take next order-based tool_index, inject remapped
+                        toolboard sections (incl. [vortac_tool &lt;name&gt;])
+  [vortac_manager]    → register VORTAC_LOAD/UNLOAD/STATUS/DOCK_SAVE_POS;
+                        defer rest to klippy:connect
+
+klippy:ready    → vortac_qgl_state hooks QGL.adjust_steppers + QUAD_GANTRY_LEVEL
+klippy:connect  → vortac_manager finds tools/grabber/qgl, validates identities,
+                  registers T&lt;index&gt; commands</code></pre>
+<p>Hard dependencies:</p>
+<ul>
+  <li><code>vortac_manager</code> requires <code>[vortac_grabber]</code>.</li>
+  <li>Each active tool requires a static <code>[mcu &lt;name&gt;]</code> section before
+      <code>[include_with]</code>.</li>
+  <li><code>vortac_qgl_state</code> requires <code>[quad_gantry_level]</code> to be defined.</li>
+</ul>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

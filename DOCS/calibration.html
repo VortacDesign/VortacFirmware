@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calibration — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Calibration</h1>
+<p class="subtitle">Three calibrations make the toolchanger work: the grabber's angle lookup
+table, its zero position, and each dock's XYZ position.</p>
+
+<div class="checklist">
+  <div class="checklist-head">
+    <h3>Calibration checklist</h3>
+    <button class="reset" type="button">Reset checklist</button>
+  </div>
+  <label class="check"><input type="checkbox" data-ck="lut">
+    <span class="check-text"><span class="check-title">Build the angle LUT</span>
+    <span class="check-sub"><code>VORTAC_CALIBRATE</code> + <code>SAVE_CONFIG</code> — grabber free, no tool attached.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="zero">
+    <span class="check-text"><span class="check-title">Set the zero position</span>
+    <span class="check-sub"><code>VORTAC_SET_ZERO</code> + <code>SAVE_CONFIG</code> at the mechanical reference.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="verify">
+    <span class="check-text"><span class="check-title">Verify the closed loop</span>
+    <span class="check-sub"><code>VORTAC_SIMPLE_READ</code>, <code>VORTAC_MOVE TARGET=90</code>, optional <code>VORTAC_MESURE</code> sweep.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="docks">
+    <span class="check-text"><span class="check-title">Calibrate every dock position</span>
+    <span class="check-sub"><code>VORTAC_SELECT_DOCK</code> → jog → <code>VORTAC_DOCK_CAL_SAVE</code> → <code>SAVE_CONFIG</code>, per dock.</span></span>
+  </label>
+</div>
+
+<h2 id="lut">1 — Build the angle lookup table</h2>
+<p><strong>Prerequisites:</strong> <code>[vortac_grabber]</code> loads without errors, and the
+grabber can rotate freely (no tool attached).</p>
+<pre><code>VORTAC_CALIBRATE</code></pre>
+<p>By default the grabber sweeps 2 full revolutions clockwise and 2 counterclockwise, sampling
+180 bins. At each bin it settles, takes 8 direct SPI reads of the AS5047D and stores their
+circular mean; per direction the last revolution wins, and the saved LUT is the per-bin midpoint
+of both directions. The cw/ccw spread is reported as a direct backlash measurement
+(<code>Backlash … mean/max</code>).</p>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>SAMPLES</code></td><td>180</td><td>bins per revolution (LUT size)</td></tr>
+<tr><td><code>SPEED</code></td><td>40</td><td>sweep speed (deg/s)</td></tr>
+<tr><td><code>TURNS</code></td><td>2</td><td>revolutions <strong>per direction</strong>; last turn wins</td></tr>
+<tr><td><code>DIR</code></td><td>both</td><td><code>cw</code>, <code>ccw</code>, or <code>both</code> (cw + ccw, midpoint stored, backlash reported)</td></tr>
+<tr><td><code>PHASE</code></td><td>step/2</td><td>pre-roll so the sensor seam falls between bins</td></tr>
+<tr><td><code>SETTLE</code></td><td>0.10</td><td>dwell (s) after each step before reading</td></tr>
+<tr><td><code>READS</code></td><td>8</td><td>direct SPI reads per bin (circular-meaned)</td></tr>
+<tr><td><code>READ_DWELL</code></td><td>0.001</td><td>pause (s) between the reads of one bin</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>On success Klipper reports <code>Calibration OK. lookup_table saved (…)</code> — persist it
+with <code>SAVE_CONFIG</code>.</p>
+
+<details class="fold">
+  <summary>Good to know: which DIR to pick</summary>
+  <div class="fold-body">
+    <p><code>DIR=both</code> (the default) averages out gear backlash and tells you how big it is.
+    If your engage/disengage moves are direction-constrained
+    (<code>engage_mode</code>/<code>disengage_mode</code> = <code>cw</code> or <code>ccw</code>),
+    calibrating with only that direction (<code>DIR=cw</code> or <code>DIR=ccw</code>) puts the
+    LUT exactly on the operating flank instead of the midpoint.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Good to know: why direct SPI reads instead of the bulk stream</summary>
+  <div class="fold-body">
+    <p>Klipper's bulk angle stream was lossy at sub-bit precision — direct reads are required for
+    trustworthy LUTs. (Historical trap: bulk angle data from Klipper is in
+    <strong>radians × 10 000</strong>, so any consumer must convert with
+    <code>(raw / 10000.0) · 180/π</code>.)</p>
+  </div>
+</details>
+
+<h2 id="zero">2 — Set the zero position</h2>
+<p>Move the grabber to its mechanical reference position. If you use
+<code>engage_mode</code>/<code>disengage_mode</code> = <code>cw</code> or <code>ccw</code>,
+<strong>approach the reference in that same direction</strong> (so backlash is loaded the same
+way as in operation). Then:</p>
+<pre><code>VORTAC_SET_ZERO
+SAVE_CONFIG</code></pre>
+<p><code>VORTAC_SET_ZERO</code> may also be run directly after <code>VORTAC_CALIBRATE</code>,
+before saving — one <code>SAVE_CONFIG</code> then persists both values
+(<code>lookup_table</code> and <code>zero_pos_offset</code>).</p>
+
+<h2 id="verify">3 — Verify</h2>
+<pre><code>VORTAC_SIMPLE_READ      ; prints raw and true angle
+VORTAC_MOVE TARGET=90   ; closed-loop test move</code></pre>
+<p>The true angle should read ~0° at the reference position, and <code>VORTAC_MOVE</code> should
+reach its target within tolerance (default ±2°) in 1–2 moves.</p>
+
+<h3 id="mesure">Full-revolution diagnostic sweep</h3>
+<p>To verify the LUT linearizes the full 360°:</p>
+<pre><code>VORTAC_MESURE SAMPLES=180</code></pre>
+<p>It steps through one full revolution and prints three data sets:
+<code>rawPairs</code> (commanded vs. raw sensor), <code>lutPairs</code> (LUT-corrected) and
+<code>finalPairs</code> (LUT + zero offset). Paste a set into
+<code>dev_scripts/plotData.py</code> to plot it: <code>rawPairs</code> may be arbitrarily
+non-linear, but <code>lutPairs</code>/<code>finalPairs</code> must form a straight line with
+slope 1 (one clean wrap at the 360° seam). The sweep starts at the current position, so the line
+is offset — <strong>the slope is what matters</strong>.</p>
+
+<h2 id="dock-positions">4 — Calibrate dock positions</h2>
+<p>Per dock, with the tool parked in it and the gantry frame-flat:</p>
+<pre><code>VORTAC_GANTRY_FLAT
+G28                           # if not homed
+VORTAC_SELECT_DOCK DOCK=dock0 # detects the tool in dock0 and selects it
+# jog the toolhead to the exact hooked/engage position in the dock
+VORTAC_DOCK_CAL_SAVE
+SAVE_CONFIG</code></pre>
+<ul>
+  <li><code>VORTAC_SELECT_DOCK</code> runs <code>VORTAC_DETECT</code>, stores the detected
+      dock/tool pair, and fails if the selected dock has no detected tool.</li>
+  <li><code>VORTAC_DOCK_CAL_SAVE</code> refuses if the gantry is <code>tilted</code>
+      (dock geometry is only valid frame-flat) or no dock/tool was selected.</li>
+  <li>The saved Z is the <strong>hooked/engage height</strong>. Tool loading uses that saved Z
+      directly, then lifts by <code>DOCK_Z_CLEARANCE</code>; unloading approaches at saved
+      Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code>, drops to saved Z, then disengages.</li>
+</ul>
+<p>Manual fallback (saves the current position without the detection context —
+<code>TOOL=</code> accepts the tool name, case-insensitive, <code>T&lt;n&gt;</code>, or a bare
+index):</p>
+<pre><code>VORTAC_DOCK_SAVE_POS TOOL=miniGrey DOCK=dock0
+SAVE_CONFIG</code></pre>
+
+<div class="callout warn">
+  <span class="callout-title">Persistence always goes through SAVE_CONFIG</span>
+  <p>All calibration results (<code>lookup_table</code>, <code>zero_pos_offset</code>,
+  <code>params_dockN_x/y/z</code>) are staged via Klipper's <code>configfile.set</code> and only
+  written to disk when you run <code>SAVE_CONFIG</code> — which restarts Klipper. Don't skip it,
+  or the calibration is gone after the next restart.</p>
+</div>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

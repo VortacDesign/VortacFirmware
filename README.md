@@ -4,6 +4,9 @@ Klipper plugins and config files for the **Vortac Toolchanger** — a custom
 3D-printer toolchanger with CAN-bus tool boards, an angle-sensor-driven
 grabber, and ARGB-based dock detection.
 
+- **Full documentation (HTML):** open [DOCS/index.html](DOCS/index.html) in a browser —
+  setup, configuration, calibration, module reference, G-code reference and
+  troubleshooting, with interactive checklists.
 - Module documentation (Klipper extras): [klippy/extras/README.md](klippy/extras/README.md)
 - Config layout and boot order: [configs/README.md](configs/README.md)
 
@@ -81,13 +84,19 @@ placeholder). Verify stepper/fan/LED pins against your wiring.
 tool and configures `[vortac_manager]`.
 
 For each tool, create/adjust a file under `vortac_configs/tools/`
-(use `tools/tool0.cfg` as the template):
+(use `tools/tool0.example.cfg` as the template). Tool NUMBERS come from the
+include ORDER in `tools.cfg` (first include is T0); the tool's NAME is the
+`[mcu]` / `include_with` namespace and appears only in those two headers:
 
-1. Copy `tools/tool0.cfg` → `tools/tool<N>.cfg`
-2. Replace every `T0` / `tool0` / `dock0` with `T<N>` / `tool<N>` / `dock<N>`
-3. Bump `tool_index`, set the board's `canbus_uuid` (from step 1)
-4. Set placeholder `params_dock<N>_x/y/z` dock positions (calibrated later)
-5. Uncomment/add `[include tools/tool<N>.cfg]` in `tools.cfg`
+1. Copy a tool file → `tools/<yourToolName>.cfg`
+2. Rename the namespace in the two headers (`[mcu <name>]`,
+   `[include_with <name> …]`)
+3. Set the board's `canbus_uuid` (from step 1) and the tool's physical dock
+   (`overrides:` → `vortac_tool TN.home_dock: dock<N>`)
+4. Add `[include tools/<yourToolName>.cfg]` to `tools.cfg` — its position in
+   the include list is its tool number
+5. Dock positions are calibrated later at runtime and persisted via
+   `SAVE_CONFIG` (they survive commenting the tool out)
 
 See [configs/README.md](configs/README.md) for details on the `include_with`
 template mechanism and section renaming.

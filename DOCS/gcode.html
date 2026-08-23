@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G-code Reference — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>G-code Reference</h1>
+<p class="subtitle">Every command the Vortac extras register. Type in the filter box to narrow
+the overview table down.</p>
+
+<h2 id="overview">Command overview</h2>
+<input class="filterbox" data-target="cmd-table" type="search"
+       placeholder="Filter commands… (e.g. dock, calibrate, sense)" aria-label="Filter commands">
+<div class="table-wrap">
+<table id="cmd-table">
+<thead><tr><th>Command</th><th>Module</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td class="cmd"><code>T0</code>, <code>T1</code>, …</td><td>manager</td><td>full tool change (registered dynamically from each available tool's <code>tool_index</code>)</td></tr>
+<tr><td class="cmd"><code>VORTAC_STATUS</code></td><td>manager</td><td>report current tool, dock map, QGL state</td></tr>
+<tr><td class="cmd"><code>VORTAC_DETECT</code></td><td>manager</td><td>strobe dock Tool_id channels and update the dock map</td></tr>
+<tr><td class="cmd"><code>VORTAC_SELECT_DOCK DOCK=dockN</code></td><td>manager</td><td>detect/select a dock and its tool for calibration</td></tr>
+<tr><td class="cmd"><code>VORTAC_DOCK_CAL_STATUS</code></td><td>manager</td><td>report selected calibration dock/tool</td></tr>
+<tr><td class="cmd"><code>VORTAC_DOCK_CAL_SAVE</code></td><td>manager</td><td>save current hooked/engage XYZ for the selected dock/tool</td></tr>
+<tr><td class="cmd"><code>VORTAC_LOAD TOOL=&lt;name&gt;|Tn</code></td><td>manager</td><td>fetch a tool from its dock</td></tr>
+<tr><td class="cmd"><code>VORTAC_UNLOAD</code></td><td>manager</td><td>park the held tool at its dock</td></tr>
+<tr><td class="cmd"><code>VORTAC_SET_CURRENT_TOOL TOOL=&lt;name&gt;|Tn</code></td><td>manager</td><td>set logical current tool without movement</td></tr>
+<tr><td class="cmd"><code>VORTAC_SET_CURRENT_TOOL CLEAR=1</code></td><td>manager</td><td>clear logical current tool</td></tr>
+<tr><td class="cmd"><code>VORTAC_DOCK_SAVE_POS TOOL=&lt;name&gt;|Tn DOCK=dockN</code></td><td>manager</td><td>save current hooked/engage XYZ as tool's position for the dock (requires gantry flat)</td></tr>
+<tr><td class="cmd"><code>VORTAC_SENSE_STATUS</code></td><td>manager</td><td>raw cached dock/grab sense pin states per tool</td></tr>
+<tr><td class="cmd"><code>VORTAC_SENSE_MONITOR [DURATION=s]</code></td><td>manager</td><td>poll sense states live, report transitions</td></tr>
+<tr><td class="cmd"><code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=0..1</code></td><td>manager</td><td>manually set one dock strobe channel (debug)</td></tr>
+<tr><td class="cmd"><code>VORTAC_GANTRY_FLAT</code> / <code>VORTAC_GANTRY_TILT</code></td><td>qgl_state</td><td>toggle gantry between frame-flat and bed-flat</td></tr>
+<tr><td class="cmd"><code>VORTAC_QGL_STATUS</code></td><td>qgl_state</td><td>report gantry state and stored QGL deltas</td></tr>
+<tr><td class="cmd"><code>VORTAC_CALIBRATE [DIR=cw|ccw|both]</code></td><td>grabber</td><td>populate the AS5047D LUT (default: both directions, reports backlash)</td></tr>
+<tr><td class="cmd"><code>VORTAC_SET_ZERO</code></td><td>grabber</td><td>store the current LUT-corrected angle as zero offset</td></tr>
+<tr><td class="cmd"><code>VORTAC_MOVE TARGET=deg [MODE=…]</code></td><td>grabber</td><td>closed-loop move to an absolute true angle</td></tr>
+<tr><td class="cmd"><code>VORTAC_ENGAGE [ANGLE=deg]</code></td><td>grabber</td><td>closed-loop move to <code>engage_pos</code> (or ANGLE)</td></tr>
+<tr><td class="cmd"><code>VORTAC_DISENGAGE</code></td><td>grabber</td><td>closed-loop move to <code>disengage_pos</code></td></tr>
+<tr><td class="cmd"><code>VORTAC_SIMPLE_READ</code></td><td>grabber</td><td>print raw and true angle once</td></tr>
+<tr><td class="cmd"><code>VORTAC_MESURE [SAMPLES=n]</code></td><td>grabber</td><td>diagnostic LUT sweep dump for plotting</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="grabber-params">Grabber command parameters</h2>
+
+<h3 id="calibrate"><code>VORTAC_CALIBRATE</code></h3>
+<p>Builds and stores the LUT — run <code>SAVE_CONFIG</code> after. Full workflow in
+<a href="calibration.html#lut">Calibration</a>.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>SAMPLES</code></td><td>180</td><td>bins per revolution (LUT size)</td></tr>
+<tr><td><code>SPEED</code></td><td>40</td><td>sweep speed (deg/s)</td></tr>
+<tr><td><code>TURNS</code></td><td>2</td><td>revolutions <strong>per direction</strong>; last turn wins</td></tr>
+<tr><td><code>DIR</code></td><td>both</td><td><code>cw</code>, <code>ccw</code>, or <code>both</code> (midpoint stored, backlash reported)</td></tr>
+<tr><td><code>PHASE</code></td><td>step/2</td><td>pre-roll so the sensor seam falls between bins</td></tr>
+<tr><td><code>SETTLE</code></td><td>0.10</td><td>dwell (s) after each step before reading</td></tr>
+<tr><td><code>READS</code></td><td>8</td><td>direct SPI reads per bin (circular-meaned)</td></tr>
+<tr><td><code>READ_DWELL</code></td><td>0.001</td><td>pause (s) between the reads of one bin</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="move"><code>VORTAC_MOVE</code></h3>
+<p>Closed-loop move to an absolute true angle. <code>cw</code> means increasing true angle.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>TARGET</code></td><td>0.0</td><td>target true angle (deg)</td></tr>
+<tr><td><code>MODE</code></td><td>shortest</td><td><code>shortest</code>, <code>cw</code>, or <code>ccw</code></td></tr>
+<tr><td><code>SPEED</code></td><td>config <code>speed</code></td><td>move speed (deg/s)</td></tr>
+<tr><td><code>TOL</code></td><td>2.0</td><td>acceptance tolerance (deg, shortest-distance)</td></tr>
+<tr><td><code>BACKOFF</code></td><td>0.5·TOL</td><td>cw/ccw only: minimum stop-short distance per pass (clamped &lt; TOL)</td></tr>
+<tr><td><code>GUARD_FRAC</code></td><td>0.05</td><td>cw/ccw only: stop short by this fraction of the remaining distance</td></tr>
+<tr><td><code>MAX_ITERS</code></td><td>10</td><td>maximum measure/move passes</td></tr>
+<tr><td><code>READS</code></td><td>2</td><td>sensor reads per measurement (circular median)</td></tr>
+<tr><td><code>READ_SETTLE</code></td><td>0.010</td><td>dwell (s) before each measurement</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3 id="engage"><code>VORTAC_ENGAGE</code> / <code>VORTAC_DISENGAGE</code></h3>
+<p>Closed-loop move to <code>engage_pos</code> (or an explicit <code>ANGLE=&lt;deg&gt;</code>) /
+<code>disengage_pos</code>, using the configured <code>engage_mode</code> /
+<code>disengage_mode</code> as the direction constraint. Equivalent to
+<code>VORTAC_MOVE TARGET=&lt;pos&gt;</code> with that mode.</p>
+
+<h3 id="set-zero"><code>VORTAC_SET_ZERO</code></h3>
+<p>Stores the current LUT-corrected angle as <code>zero_pos_offset</code> — run
+<code>SAVE_CONFIG</code> after. Approach the reference position in the operating direction if
+you use cw/ccw modes.</p>
+
+<h3 id="mesure"><code>VORTAC_MESURE</code></h3>
+<p>Diagnostic sweep over one revolution; prints <code>rawPairs</code> / <code>lutPairs</code> /
+<code>finalPairs</code> for <code>dev_scripts/plotData.py</code>.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>SAMPLES</code></td><td>90</td><td>measurement points over one revolution</td></tr>
+<tr><td><code>SPEED</code></td><td>60</td><td>sweep speed (deg/s)</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="manager-notes">Manager command notes</h2>
+<ul>
+  <li><code>TOOL=</code> parameters of <code>VORTAC_LOAD</code>,
+      <code>VORTAC_SET_CURRENT_TOOL</code> and <code>VORTAC_DOCK_SAVE_POS</code> accept the tool
+      name (case-insensitive, e.g. <code>miniGrey</code>), <code>T&lt;n&gt;</code>, or a bare
+      index — <code>TOOL=miniGrey</code> and <code>TOOL=T1</code> both work.</li>
+  <li>The <code>T&lt;n&gt;</code> commands are registered from each tool's
+      <code>tool_index</code>, which comes from the include order in <code>tools.cfg</code> —
+      tool ids are display names like <code>miniGrey</code>.</li>
+  <li><code>VORTAC_DETECT</code> accepts <code>DEBUG=1</code> for verbose per-strobe output —
+      useful when bringing up a new tool.</li>
+  <li><code>VORTAC_DOCK_CAL_SAVE</code> refuses while the gantry is <code>tilted</code> or when
+      no dock/tool was selected via <code>VORTAC_SELECT_DOCK</code>.</li>
+  <li>All probe-based commands (<code>QUAD_GANTRY_LEVEL</code>, <code>BED_MESH_CALIBRATE</code>,
+      <code>PROBE*</code>) are guarded by the manager and refuse while a tool is held — run
+      <code>VORTAC_UNLOAD</code> first.</li>
+</ul>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

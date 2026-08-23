@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Vortac Firmware</h1>
+<p class="subtitle">Klipper plugins and configuration files for the <strong>Vortac Toolchanger</strong> —
+a custom 3D-printer toolchanger with CAN-bus tool boards, an angle-sensor-driven grabber,
+and ARGB-based dock detection.</p>
+
+<div class="card-grid">
+  <a class="card" href="setup.html">
+    <span class="card-icon">🚀</span>
+    <span class="card-title">Installation &amp; Setup</span>
+    <span class="card-desc">From flashing a toolhead board to a running installation — with an interactive checklist.</span>
+  </a>
+  <a class="card" href="configuration.html">
+    <span class="card-icon">🧩</span>
+    <span class="card-title">Configuration</span>
+    <span class="card-desc">Config layout, the <code>include_with</code> template system, adding tools, overrides.</span>
+  </a>
+  <a class="card" href="calibration.html">
+    <span class="card-icon">🎯</span>
+    <span class="card-title">Calibration</span>
+    <span class="card-desc">Grabber LUT, zero position, dock positions — step by step.</span>
+  </a>
+  <a class="card" href="modules.html">
+    <span class="card-icon">⚙️</span>
+    <span class="card-title">Module Reference</span>
+    <span class="card-desc">Internals of the four Klipper extras and their config options.</span>
+  </a>
+  <a class="card" href="gcode.html">
+    <span class="card-icon">⌨️</span>
+    <span class="card-title">G-code Reference</span>
+    <span class="card-desc">Every <code>VORTAC_*</code> command with parameters — filterable.</span>
+  </a>
+  <a class="card" href="troubleshooting.html">
+    <span class="card-icon">🩺</span>
+    <span class="card-title">Troubleshooting</span>
+    <span class="card-desc">Symptoms, causes and fixes for the known failure modes.</span>
+  </a>
+</div>
+
+<h2 id="what-is-this">What is this repository?</h2>
+<p>This is <strong>not a standalone application</strong>. The Python files under
+<code>klippy/extras/</code> are loaded into Klipper at runtime as
+<em>Klipper extras</em>, and the files under <code>configs/</code> are consumed by
+Klipper at printer startup. Everything runs on the printer's Raspberry Pi —
+there is no build step, no test suite, and nothing to compile.</p>
+
+<p>The primary branch is <code>development</code>, not <code>main</code>.</p>
+
+<h2 id="the-machine">The machine in one paragraph</h2>
+<p>The Vortac is a CoreXY printer with a four-Z gantry and a row of tool docks.
+Each tool is a complete toolhead (extruder, hotend, fans, LEDs, accelerometer) driven by its
+own CAN-bus board. A single <strong>grabber</strong> mechanism on the carriage picks tools up
+and puts them back: a stepper rotates a hook, and an <strong>AS5047D magnetic angle sensor</strong>
+closes the loop so engage/disengage angles are hit reliably. Which tool sits in which dock is
+discovered electrically: each dock has an ARGB LED channel (<em>Tool_id</em> strobe), each tool
+has an optical <em>dock sense</em> pin — strobing one dock at a time reveals the mapping.</p>
+
+<h2 id="architecture">Architecture at a glance</h2>
+
+<div class="diagram">
+<svg viewBox="0 0 760 430" role="img" aria-label="Vortac firmware architecture diagram">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/>
+    </marker>
+  </defs>
+
+  <!-- manager -->
+  <rect class="dbox-hl" x="270" y="20" width="220" height="70"/>
+  <text class="dlabel" x="380" y="48" text-anchor="middle">vortac_manager</text>
+  <text class="dsub"   x="380" y="68" text-anchor="middle">T0/T1…, dock map, detection</text>
+
+  <!-- grabber -->
+  <rect class="dbox" x="40" y="160" width="200" height="70"/>
+  <text class="dlabel" x="140" y="188" text-anchor="middle">vortac_grabber</text>
+  <text class="dsub"   x="140" y="208" text-anchor="middle">AS5047D + closed-loop stepper</text>
+
+  <!-- tools -->
+  <rect class="dbox" x="280" y="160" width="200" height="70"/>
+  <text class="dlabel" x="380" y="188" text-anchor="middle">vortac_tool &lt;name&gt;</text>
+  <text class="dsub"   x="380" y="208" text-anchor="middle">sense pins, offsets, dock params</text>
+
+  <!-- qgl -->
+  <rect class="dbox" x="520" y="160" width="200" height="70"/>
+  <text class="dlabel" x="620" y="188" text-anchor="middle">vortac_qgl_state</text>
+  <text class="dsub"   x="620" y="208" text-anchor="middle">gantry FLAT ⇄ TILT</text>
+
+  <!-- include_with -->
+  <rect class="dbox" x="280" y="300" width="200" height="70"/>
+  <text class="dlabel" x="380" y="328" text-anchor="middle">include_with</text>
+  <text class="dsub"   x="380" y="348" text-anchor="middle">PCB template → N tools</text>
+
+  <!-- hardware row -->
+  <text class="dsub" x="140" y="270" text-anchor="middle">grabber MCU (CAN)</text>
+  <text class="dsub" x="620" y="270" text-anchor="middle">[quad_gantry_level]</text>
+  <text class="dsub" x="380" y="410" text-anchor="middle">[mcu &lt;name&gt;] — CAN toolhead boards</text>
+
+  <!-- edges -->
+  <path class="dline" d="M320 90 L180 160"/>
+  <path class="dline" d="M380 90 L380 160"/>
+  <path class="dline" d="M440 90 L580 160"/>
+  <path class="dline" d="M380 230 L380 300"/>
+  <path class="dline" d="M140 230 L140 255"/>
+  <path class="dline" d="M620 230 L620 255"/>
+  <path class="dline" d="M380 370 L380 392"/>
+</svg>
+</div>
+
+<ul>
+  <li><strong><a href="modules.html#vortac-manager">vortac_manager</a></strong> — the coordinator.
+      Registers <code>T0</code>/<code>T1</code>/…, runs the tool-change sequence, owns dock
+      detection and the probe guard.</li>
+  <li><strong><a href="modules.html#vortac-grabber">vortac_grabber</a></strong> — hardware only:
+      reads the AS5047D over SPI, linearizes it through a calibrated lookup table, and drives the
+      grabber stepper in a closed loop.</li>
+  <li><strong><a href="modules.html#vortac-tool">vortac_tool</a></strong> — one logical
+      <code>[vortac_tool &lt;name&gt;]</code> section per tool (injected from the PCB template by
+      <code>include_with</code>): sense pins, G-code offsets, saved dock positions,
+      activate/deactivate hooks.</li>
+  <li><strong><a href="modules.html#vortac-qgl-state">vortac_qgl_state</a></strong> — toggles the
+      four-Z gantry between <em>frame-flat</em> (dock geometry valid) and <em>bed-flat</em>
+      (print geometry valid) without re-probing.</li>
+  <li><strong><a href="modules.html#include-with">include_with</a></strong> — instantiates one
+      shared toolboard PCB template N times under remapped MCU namespaces.</li>
+</ul>
+
+<h2 id="quick-start">Quick start</h2>
+<pre><code># on the Pi
+git clone https://github.com/VortacDesign/VortacFirmware.git ~/vortac
+cd ~/vortac &amp;&amp; sudo ./install.sh
+sudo systemctl restart klipper</code></pre>
+<p>Then continue with <a href="setup.html">Installation &amp; Setup</a> — configs, tools and
+calibration.</p>
+
+<details class="fold">
+  <summary>Good to know: why editing here updates the printer</summary>
+  <div class="fold-body">
+    <p><code>install.sh</code> <em>symlinks</em> every plugin into Klipper's
+    <code>klippy/extras/</code> and <em>bind-mounts</em> <code>configs/vortac_configs/</code> into
+    <code>~/printer_data/config/</code>. A systemd <code>.path</code> unit watches the git branch
+    ref, so every <code>git pull</code> re-runs the installer automatically. The only manual step
+    after pulling is <code>sudo systemctl restart klipper</code>.</p>
+  </div>
+</details>
+
+<div class="callout">
+  <span class="callout-title">Keeping these docs current</span>
+  <p>This documentation lives in <code>DOCS/</code> and is maintained alongside the code:
+  whenever modules, configs or workflows change, the matching chapter is updated in the same
+  commit. If you spot a mismatch, the code and the READMEs are the ground truth.</p>
+</div>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

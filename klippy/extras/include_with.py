@@ -7,9 +7,21 @@
 #
 # Two entry points:
 #   1. [include_with <namespace> <filename>]  -- config-section wrapper
-#        tool_index: <int>          (default: trailing number of <namespace>,
-#                                    e.g. "tool1" -> 1; required if the
-#                                    namespace has no trailing number)
+#        tool_index: <int>          (default: assigned by LOAD ORDER when the
+#                                    template contains a [vortac_tool ...]
+#                                    section — the first such include gets 0,
+#                                    the next 1, ... Klipper expands [include]
+#                                    inline and loads sections in file order,
+#                                    so the include order in tools.cfg IS the
+#                                    tool numbering. Commenting a tool out
+#                                    renumbers the ones after it, which keeps
+#                                    Klipper's extruder/extruder<N> contract
+#                                    intact. Fallback for non-tool templates:
+#                                    trailing number of <namespace>, e.g.
+#                                    "tool1" -> 1. Mixing explicit tool_index
+#                                    with auto-numbered includes is not
+#                                    supported — the counter ignores explicit
+#                                    values.)
 #        mcu_from:   <name>         (auto-detected from [mcu <name>] otherwise)
 #        overrides:  (optional) per-section option overrides, one per line:
 #                        overrides:
@@ -34,6 +46,10 @@
 #   namespace "miniPink" -> miniPink_logo_rgb):
 #
 #   [mcu <mcu_from>]     -> [mcu <namespace>]
+#   [vortac_tool <any>]  -> [vortac_tool <namespace>]     (name REPLACED, not
+#                            prefixed — the namespace IS the tool's logical
+#                            name; tool_index, mcu_name, canbus_uuid and
+#                            extruder_name are auto-injected, see below)
 #   [<head> name]        -> [<head> <namespace>_name]     (generic rule:
 #                            neopixel, heater_fan, temperature_sensor,
 #                            output_pin, filament_*_sensor, gcode_macro, ...)
@@ -81,6 +97,13 @@ def _rename_section(orig, idx, mcu_from, mcu_to):
     if head == 'mcu' and rest and rest[0] == mcu_from:
         return f"mcu {mcu_to}"
 
+    # The template's [vortac_tool <placeholder>] becomes THE logical tool
+    # section of this instantiation: the namespace replaces the placeholder
+    # name entirely (the generic prefix rule would yield "miniGrey_TN",
+    # which is not a usable tool name).
+    if head == 'vortac_tool':
+        return f"vortac_tool {mcu_to}"
+
     # Reference sections track their target's rename:
     # [tmc2209 extruder] -> [tmc2209 extruder1], [verify_heater extruder]
     # likewise; [tmc2209 manual_stepper foo] follows the renamed stepper.
@@ -107,6 +130,45 @@ def _rename_section(orig, idx, mcu_from, mcu_to):
     # Unhandled bare singleton ([input_shaper], [firmware_retraction], ...):
     # cannot be namespaced — leave as-is; use skip_sections if it collides.
     return orig
+
+
+class _ToolIndexCounter:
+    """Per-printer sequence for order-based tool numbering.
+
+    Must live on the Printer object, NOT at module level: Klipper's RESTART
+    rebuilds the Printer in the same process while imported modules stay
+    loaded — a module-global counter would keep counting across restarts.
+    """
+    def __init__(self):
+        self.next_index = 0
+
+    def take(self):
+        idx = self.next_index
+        self.next_index += 1
+        return idx
+
+
+def _next_auto_tool_index(printer):
+    counter = printer.lookup_object('include_with_tool_counter', None)
+    if counter is None:
+        counter = _ToolIndexCounter()
+        printer.add_object('include_with_tool_counter', counter)
+    return counter.take()
+
+
+def _load_template(printer, filepath):
+    printer_config = printer.lookup_object('configfile')
+    template_path = _resolve_filepath(printer, filepath)
+    return printer_config.read_config(template_path)
+
+
+def _template_tool_section(template, skip_set):
+    """Return the template's [vortac_tool ...] section name, unless the
+    caller skips it — a skipped tool section must not consume an index."""
+    for sect in template.fileconfig.sections():
+        if sect.split()[0] == 'vortac_tool' and sect not in skip_set:
+            return sect
+    return None
 
 
 def _autodetect_mcu_from(template_config):
@@ -207,7 +269,7 @@ def _make_value_rewriter(mcu_from, mcu_to, rename_map):
 
 def include_with_remap(printer, parent_config, filepath, namespace,
                        mcu_from=None, tool_index=0, overrides=None,
-                       skip_sections=None):
+                       skip_sections=None, template=None):
     """Inject sections from `filepath` into `parent_config` under MCU
     namespace `namespace`, with per-tool-index renaming and value rewrites.
 
@@ -228,6 +290,8 @@ def include_with_remap(printer, parent_config, filepath, namespace,
                       added; a None/null value removes the option.
       skip_sections:  Optional iterable of orig-section names to skip.
                       Defaults to DEFAULT_SINGLETON_SKIP for tool_index >= 1.
+      template:       Already-loaded template ConfigWrapper (from
+                      _load_template); loaded from filepath if None.
 
     Returns: dict {orig_section: renamed_section}.
     """
@@ -237,9 +301,8 @@ def include_with_remap(printer, parent_config, filepath, namespace,
                          if tool_index >= 1 else ())
     skip_set = set(skip_sections)
 
-    printer_config = printer.lookup_object('configfile')
-    template_path = _resolve_filepath(printer, filepath)
-    template = printer_config.read_config(template_path)
+    if template is None:
+        template = _load_template(printer, filepath)
 
     if mcu_from is None:
         mcu_from = _autodetect_mcu_from(template)
@@ -277,6 +340,31 @@ def include_with_remap(printer, parent_config, filepath, namespace,
         for k, ov in section_overrides.items():
             if ov is not None:
                 new_items[k] = rewrite(str(ov))
+        # The logical tool section gets its identity injected — the
+        # namespace is the single source of truth for the tool's name.
+        # Template values / overrides win over the auto-injection.
+        if orig_sect.split()[0] == 'vortac_tool':
+            new_items.setdefault('tool_index', str(tool_index))
+            new_items.setdefault('mcu_name', namespace)
+            pc = parent_config.fileconfig
+            mcu_sect = f"mcu {namespace}"
+            if ('canbus_uuid' not in new_items
+                    and pc.has_section(mcu_sect)
+                    and pc.has_option(mcu_sect, 'canbus_uuid')):
+                new_items['canbus_uuid'] = pc.get(mcu_sect, 'canbus_uuid')
+            # The renamed extruder ('extruder' for index 0, 'extruder<N>'
+            # otherwise) — vortac_manager runs ACTIVATE_EXTRUDER with it on
+            # tool change. Injected here because the name shifts with
+            # order-based renumbering.
+            if 'extruder' in rename_map:
+                new_items.setdefault('extruder_name', rename_map['extruder'])
+        # read_dict MERGES into a pre-existing section instead of raising —
+        # that is load-bearing: SAVE_CONFIG's autosave block may already
+        # have created [vortac_tool <namespace>] holding the persisted
+        # params_* dock positions (autosave is merged into the config
+        # before extras run). Invariant: the autosave block for vortac_tool
+        # sections only ever holds params_* keys, which no template
+        # provides, so nothing here overwrites persisted data.
         parent_config.fileconfig.read_dict({new_sect: new_items})
         printer.load_object(parent_config, new_sect, default=None)
 
@@ -296,17 +384,6 @@ class IncludeWith:
         filename = ' '.join(parts[2:])
 
         printer = config.get_printer()
-        # tool_index derives from the namespace's trailing number
-        # ("tool1" -> 1) so copied tool files can't silently keep index 0.
-        tool_index = config.getint('tool_index', default=None, minval=0)
-        if tool_index is None:
-            m = re.search(r'(\d+)$', self.namespace)
-            if m is None:
-                raise config.error(
-                    f"include_with {self.namespace}: cannot derive "
-                    f"tool_index (namespace has no trailing number); "
-                    f"set tool_index explicitly")
-            tool_index = int(m.group(1))
         mcu_from = config.get('mcu_from', default=None)
 
         overrides_str = config.get('overrides', default=None)
@@ -317,6 +394,29 @@ class IncludeWith:
         skip_sections = _parse_section_list(
             config.get('skip_sections', default=None))
 
+        template = _load_template(printer, filename)
+
+        # tool_index resolution:
+        #   1. explicit option,
+        #   2. templates carrying a (non-skipped) [vortac_tool ...] section
+        #      are numbered by LOAD ORDER — include order in tools.cfg is
+        #      the tool numbering (first include -> 0),
+        #   3. legacy fallback: trailing number of the namespace
+        #      ("tool1" -> 1) for non-tool templates.
+        tool_index = config.getint('tool_index', default=None, minval=0)
+        if tool_index is None:
+            if _template_tool_section(template, set(skip_sections or ())):
+                tool_index = _next_auto_tool_index(printer)
+            else:
+                m = re.search(r'(\d+)$', self.namespace)
+                if m is None:
+                    raise config.error(
+                        f"include_with {self.namespace}: cannot derive "
+                        f"tool_index (template has no [vortac_tool] section "
+                        f"and namespace has no trailing number); "
+                        f"set tool_index explicitly")
+                tool_index = int(m.group(1))
+
         self.rename_map = include_with_remap(
             printer=printer,
             parent_config=config,
@@ -326,6 +426,7 @@ class IncludeWith:
             tool_index=tool_index,
             overrides=overrides,
             skip_sections=skip_sections,
+            template=template,
         )
 
 

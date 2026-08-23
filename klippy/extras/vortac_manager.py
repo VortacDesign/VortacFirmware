@@ -1,9 +1,10 @@
 # vortac_manager.py — coordinator for the Vortac toolchanger.
 #
-# At klippy:connect this module discovers all [vortac_tool Tn] sections,
+# At klippy:connect this module discovers all [vortac_tool <name>] sections,
 # the [vortac_grabber] hardware controller, and the optional
-# [vortac_qgl_state] toggle, then registers Tn commands for the configured
-# tools marked available.
+# [vortac_qgl_state] toggle, then registers a T<tool_index> command for
+# every tool marked available (ghost sections — autosave leftovers of
+# commented-out tools — load as unavailable and are skipped).
 #
 # Tool change sequence:
 #   1. tool_deactivate_gcode (current tool, if any)
@@ -18,6 +19,7 @@
 # occupancy map at runtime instead of relying only on the home_dock bootstrap.
 
 import logging
+import re
 
 
 # Hook-on-screws dock geometry. Saved dock positions are the hooked/engage
@@ -80,7 +82,7 @@ class VortacManager:
             desc="Report current tool, dock map, QGL state")
         gcode.register_command(
             'VORTAC_LOAD', self.cmd_VORTAC_LOAD,
-            desc="Manually load tool TOOL=Tn (no current tool)")
+            desc="Manually load tool TOOL=<name>|Tn (no current tool)")
         gcode.register_command(
             'VORTAC_UNLOAD', self.cmd_VORTAC_UNLOAD,
             desc="Manually park the held tool back at its dock")
@@ -123,9 +125,19 @@ class VortacManager:
     def _handle_connect(self):
         gcode = self.printer.lookup_object('gcode')
 
+        # indexed = every non-ghost tool section, including ones explicitly
+        # marked available=False — those still own their extruder<N> slot,
+        # so index contiguity is validated over this set. Unavailable tools
+        # whose index is merely name-derived (ghost autosave sections from
+        # the old [vortac_tool T1] naming scheme) are excluded.
+        indexed_tools = []
         for name, obj in self.printer.objects.items():
             if not name.startswith('vortac_tool '):
                 continue
+            if (getattr(obj, 'tool_index', None) is not None
+                    and (getattr(obj, 'available', False)
+                         or getattr(obj, 'tool_index_explicit', False))):
+                indexed_tools.append(obj)
             if not getattr(obj, 'available', False):
                 logging.info(
                     "vortac_manager: skipping %s (not available)", name)
@@ -134,7 +146,7 @@ class VortacManager:
             if obj.home_dock:
                 self.dock_occupancy.setdefault(obj.home_dock, obj.tool_id)
 
-        self._validate_tools()
+        self._validate_tools(indexed_tools)
 
         self.grabber = self.printer.lookup_object('vortac_grabber', None)
         if self.grabber is None:
@@ -146,24 +158,47 @@ class VortacManager:
         self._install_probe_guard()
 
         for tool_id, tool in self.tools.items():
+            # The gcode command is T<tool_index> (what slicers emit), NOT the
+            # section name — tool ids are display names like "miniGrey".
             # Default-arg trick to capture tool_id per-iteration in the closure.
             gcode.register_command(
-                tool_id,
+                f"T{tool.tool_index}",
                 (lambda gcmd, tid=tool_id: self._cmd_change(gcmd, tid)),
-                desc=f"Switch to {tool_id}")
+                desc=f"Switch to {tool_id} (T{tool.tool_index})")
 
         logging.info(
             "vortac_manager: registered tools=%s, grabber=%s, qgl_state=%s",
             sorted(self.tools.keys()), bool(self.grabber), bool(self.qgl_state))
 
-    def _validate_tools(self):
+    def _validate_tools(self, indexed_tools):
         """Cross-tool sanity checks. Klipper merges duplicate config
         sections silently, so a copied-but-not-fully-renamed tool file
         never errors on its own — it just produces one franken-tool or two
         tools sharing an identity. Catch that here with a clear message."""
         seen = {}
         conflicts = []
+        # Klipper hardwires multi-extruder naming to extruder, extruder1,
+        # ...: the indices of all non-ghost tools must be exactly 0..N-1.
+        # With order-based auto-numbering (include order in tools.cfg) this
+        # holds by construction; a gap means explicit tool_index values were
+        # mixed in, or a tool section was skipped via skip_sections while
+        # another include still counted past it.
+        indices = sorted(t.tool_index for t in indexed_tools)
+        if indices != list(range(len(indices))):
+            conflicts.append(
+                f"tool_index values {indices} are not contiguous 0..N-1 "
+                f"(check include order in tools.cfg / explicit tool_index "
+                f"options)")
         for tid, tool in sorted(self.tools.items()):
+            if tool.tool_index is None:
+                conflicts.append(
+                    f"{tid}: available but has no tool_index (ghost "
+                    f"section marked available?)")
+            if not tool.home_dock:
+                conflicts.append(
+                    f"{tid}: available but home_dock is not set — set it "
+                    f"via include_with overrides "
+                    f"(vortac_tool TN.home_dock: dockX)")
             for field, value in (
                     ('tool_index', tool.tool_index),
                     ('mcu_name', tool.mcu_name),
@@ -476,8 +511,18 @@ class VortacManager:
         if self.qgl_state is not None:
             gcode.run_script_from_command('VORTAC_GANTRY_TILT')
 
-        # 6. Apply target offsets, run activate gcode
+        # 6. Switch active extruder, apply target offsets, run activate gcode
         if target is not None:
+            if target.extruder_name:
+                if self.printer.lookup_object(
+                        target.extruder_name, None) is not None:
+                    gcode.run_script_from_command(
+                        f'ACTIVATE_EXTRUDER EXTRUDER={target.extruder_name}')
+                elif gcmd is not None:
+                    gcmd.respond_info(
+                        f"Vortac warning: extruder '{target.extruder_name}' "
+                        f"for {target.tool_id} not found, active extruder "
+                        f"unchanged")
             gcode.run_script_from_command(
                 f'SET_GCODE_OFFSET X={target.gcode_offset_x} '
                 f'Y={target.gcode_offset_y} Z={target.gcode_offset_z} MOVE=0')
@@ -657,18 +702,35 @@ class VortacManager:
                 return dock
         return None
 
-    def _normalize_tool_id(self, tool_id):
-        tool_id = tool_id.strip()
-        if not tool_id.upper().startswith('T'):
-            tool_id = 'T' + tool_id
-        return tool_id.upper()
+    def _resolve_tool_id(self, requested):
+        """Resolve a user-supplied tool reference to a registered tool_id.
+
+        Accepts the exact tool name ("miniGrey"), a case-insensitive name,
+        "T<index>", or a bare index. Ids coming from internal maps
+        (dock_occupancy) hit the exact match. Never mangles the input —
+        tool names are arbitrary (they are the include_with namespace)."""
+        req = requested.strip()
+        if req in self.tools:
+            return req
+        lowered = {tid.lower(): tid for tid in self.tools}
+        if req.lower() in lowered:
+            return lowered[req.lower()]
+        m = re.fullmatch(r'[Tt]?(\d+)', req)
+        if m:
+            idx = int(m.group(1))
+            for tid, tool in self.tools.items():
+                if tool.tool_index == idx:
+                    return tid
+        return None
 
     def _get_tool(self, tool_id, gcmd):
-        tool_id = self._normalize_tool_id(tool_id)
-        if tool_id not in self.tools:
+        resolved = self._resolve_tool_id(tool_id)
+        if resolved is None:
+            known = ', '.join(sorted(self.tools)) or '(none)'
             raise gcmd.error(
-                f"Tool {tool_id} not registered or unavailable")
-        return self.tools[tool_id]
+                f"Tool {tool_id!r} not registered or unavailable "
+                f"(known tools: {known})")
+        return self.tools[resolved]
 
     def _ensure_gantry_flat(self, gcmd):
         if self.qgl_state is not None and self.qgl_state.state != 'flat':
@@ -744,7 +806,7 @@ class VortacManager:
             gcmd.respond_info("Cleared current Vortac tool")
             return
         if tool_arg is None:
-            raise gcmd.error("Missing TOOL=Tn or CLEAR=1")
+            raise gcmd.error("Missing TOOL=<name>|Tn or CLEAR=1")
         self.current_tool = self._get_tool(tool_arg, gcmd)
         gcmd.respond_info(
             f"Set current Vortac tool to {self.current_tool.tool_id} "
@@ -862,7 +924,8 @@ class VortacManager:
                else self.current_tool
         if tool is None:
             raise gcmd.error(
-                "No tool selected; use TOOL=Tn or VORTAC_SET_CURRENT_TOOL")
+                "No tool selected; use TOOL=<name>|Tn or "
+                "VORTAC_SET_CURRENT_TOOL")
         self._save_dock_pos(tool, dock, gcmd)
 
     # --------------------------------------------------------------------

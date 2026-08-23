@@ -1,18 +1,32 @@
 # vortac_tool.py — per-tool config sections for the Vortac toolchanger
 #
-# Each [vortac_tool Tn] block describes ONE logical tool: its target MCU
+# Each [vortac_tool <name>] block describes ONE logical tool: its target MCU
 # namespace, gcode offsets, sense pins, and per-dock hooked/engage positions.
+# Normally the section is INJECTED by include_with from the MCU template
+# ([vortac_tool TN] placeholder -> [vortac_tool miniGrey]) with tool_index,
+# mcu_name, canbus_uuid and extruder_name auto-filled; a statically written
+# [vortac_tool T0] still works (identity derived from the trailing number).
 #
-# Hardware sections ([mcu toolN], extruder, fans, LEDs, etc.) must be present
+# Hardware sections ([mcu <name>], extruder, fans, LEDs, etc.) must be present
 # in normal Klipper config before this extra loads. Klipper registers MCU pin
 # chips before extras are initialized, so [vortac_tool] intentionally does not
 # inject [mcu ...] sections at runtime.
 #
-# Phase 5's vortac_manager iterates registered VortacTool objects, only
-# wires Tn commands for available tools, and uses get_dock_pos() to drive
-# the dock-approach gcode template.
+# GHOST sections: dock calibration is persisted via SAVE_CONFIG into this
+# section. When a tool file is commented out, its `#*# [vortac_tool <name>]`
+# autosave block remains and Klipper still instantiates a VortacTool from the
+# params_*-only config. Such a ghost must load without error, defaults to
+# available=False (no sense pins configured), and simply preserves the
+# calibration data until the tool file is included again. A sense-pin-less
+# tool that should still be usable (degraded blind-unhook mode) must set
+# `available: True` explicitly.
+#
+# vortac_manager iterates registered VortacTool objects, only wires
+# T<tool_index> commands for available tools, and uses get_dock_pos() to
+# drive the dock-approach motion.
 
 
+import logging
 import re
 
 
@@ -50,26 +64,56 @@ class VortacTool:
         parts = self.name.split()
         self.tool_id = parts[1] if len(parts) >= 2 else self.name
 
-        # Identity. Convention over configuration: [vortac_tool T1] derives
-        # tool_index=1, mcu_name=tool1, home_dock=dock1. Explicit options
-        # override the convention where a build deviates from it.
+        # Identity. Injected sections get tool_index/mcu_name/extruder_name
+        # from include_with; a static [vortac_tool T1] derives them from its
+        # trailing number. A ghost (autosave-only section, see module
+        # docstring) has neither — tool_index stays None, which is fine as
+        # long as the tool is not available.
         default_index = _trailing_int(self.tool_id)
-        self.tool_index = config.getint(
-            'tool_index', default=default_index, minval=0)
-        if self.tool_index is None:
-            raise config.error(
-                f"[{self.name}]: tool id has no trailing number; "
-                f"set tool_index explicitly")
-        self.mcu_name = config.get(
-            'mcu_name', default=f"tool{self.tool_index}")
+        explicit_index = config.getint('tool_index', default=None, minval=0)
+        # Explicit vs name-derived matters for the manager's contiguity
+        # check: a ghost autosave section left over from the OLD naming
+        # scheme ([vortac_tool T1]) derives an index from its name but must
+        # not count against the live tools' index range.
+        self.tool_index_explicit = explicit_index is not None
+        self.tool_index = (explicit_index if explicit_index is not None
+                           else default_index)
+        default_mcu = (f"tool{self.tool_index}"
+                       if self.tool_index is not None else None)
+        self.mcu_name = config.get('mcu_name', default=default_mcu)
         self.canbus_uuid = config.get('canbus_uuid', default='').lower().strip()
-        self.available = config.getboolean('available', True)
+        default_extruder = None
+        if self.tool_index == 0:
+            default_extruder = 'extruder'
+        elif self.tool_index is not None:
+            default_extruder = f"extruder{self.tool_index}"
+        self.extruder_name = config.get(
+            'extruder_name', default=default_extruder)
 
-        # Tool-change config
-        self.home_dock = config.get(
-            'home_dock', default=f"dock{self.tool_index}")
+        # Tool-change config. home_dock is intentionally NOT derived from
+        # tool_index — order-based numbering makes the index unstable while
+        # the physical dock is not. Injected tools set it via include_with
+        # overrides; static [vortac_tool T0] sections keep deriving it from
+        # their (stable) trailing number.
+        default_dock = (f"dock{default_index}"
+                        if default_index is not None else None)
+        self.home_dock = config.get('home_dock', default=default_dock)
         self.dock_sense_pin = config.get('dock_sense_pin', default=None)
         self.grab_sense_pin = config.get('grab_sense_pin', default=None)
+
+        # Ghost detection: without sense pins this is (almost always) a
+        # leftover autosave section for a commented-out tool — default to
+        # unavailable so vortac_manager skips it while the calibration data
+        # survives. Explicit `available: True` re-enables the degraded
+        # blind-unhook mode for genuinely sense-pin-less tools.
+        default_available = bool(self.dock_sense_pin and self.grab_sense_pin)
+        self.available = config.getboolean('available', default_available)
+        if not default_available and not self.available:
+            logging.info(
+                "vortac_tool %s: no sense pins configured — treating as "
+                "ghost/unavailable; calibration data is preserved. Set "
+                "'available: True' explicitly for a sense-pin-less tool.",
+                self.tool_id)
         self.dock_sense_state = None
         self.grab_sense_state = None
         self.sense_state_time = None
@@ -148,6 +192,7 @@ class VortacTool:
             'tool_index': self.tool_index,
             'mcu_name': self.mcu_name,
             'canbus_uuid': self.canbus_uuid,
+            'extruder_name': self.extruder_name,
             'available': self.available,
             'home_dock': self.home_dock,
             'gcode_offset_x': self.gcode_offset_x,

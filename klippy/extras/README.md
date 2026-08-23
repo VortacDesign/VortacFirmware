@@ -111,9 +111,25 @@ Toggle the gantry between **frame-flat** (dock geometry valid) and
 Load one Klipper template under a remapped MCU namespace; auto-rename sections
 per `tool_index` so one PCB-level config can be instantiated N times.
 
-- **`tool_index`** defaults to the trailing number of the namespace
-  (`tool1` → 1). Set it explicitly only for namespaces without a trailing
-  number (then it is required).
+- **`tool_index`** is assigned by LOAD ORDER for tool templates: when the
+  template carries a (non-skipped) `[vortac_tool …]` section, each
+  `[include_with]` takes the next value from a per-printer counter — the
+  first tool include in `tools.cfg` is 0, the next 1, … Commenting a tool
+  out renumbers the ones after it, which keeps Klipper's
+  `extruder`/`extruder<N>` contract intact. Explicit `tool_index:` wins;
+  templates without a `vortac_tool` section fall back to the namespace's
+  trailing number (`tool1` → 1, else the option is required). Mixing
+  explicit indices with auto-numbered includes is unsupported (the counter
+  ignores explicit values).
+- **`[vortac_tool TN]` injection:** the template's `vortac_tool` placeholder
+  is renamed to `[vortac_tool <namespace>]` (name REPLACED, not prefixed),
+  and `tool_index`, `mcu_name` (= namespace), `canbus_uuid` (from the static
+  `[mcu <namespace>]` section) and `extruder_name` (the renamed extruder)
+  are auto-injected. Template values and overrides win over the injection.
+  Set `home_dock` per tool via `overrides:` (`vortac_tool TN.home_dock:
+  dockX`). If SAVE_CONFIG's autosave block already created the section
+  (persisted `params_*` dock positions), the injection MERGES into it —
+  calibration data is preserved.
 - **Section rename rules.** EVERY named section gets the NAMESPACE as prefix,
   for every tool index — the namespace doubles as the display name in
   Mainsail/Fluidd/KlipperScreen (namespace `tool1` → `tool1_logo_rgb`,
@@ -160,25 +176,37 @@ per `tool_index` so one PCB-level config can be instantiated N times.
   the format of the programmatic `overrides=` arg.
 - **Programmatic API** (used by `vortac_tool`):
   `include_with_remap(printer, parent_config, filepath, namespace,
-  mcu_from=None, tool_index=0, overrides=None, skip_sections=None)`.
+  mcu_from=None, tool_index=0, overrides=None, skip_sections=None,
+  template=None)`.
 
-### `vortac_tool.py` — `[vortac_tool Tn]`
+### `vortac_tool.py` — `[vortac_tool <name>]`
 
-Per-tool logical definition. The tool hardware must already be present in
-normal Klipper config (`[mcu toolN]` plus `[include_with toolN ...]`) before
-this extra loads; Klipper registers MCU pin chips before extras run.
+Per-tool logical definition. Normally injected by `include_with` from the
+PCB template's `[vortac_tool TN]` placeholder (identity auto-filled, see
+above); a statically written `[vortac_tool T0]` still works. The tool
+hardware must already be present in normal Klipper config (`[mcu <name>]`
+plus `[include_with <name> ...]`) before this extra loads; Klipper registers
+MCU pin chips before extras run.
 
-- **Derived identity:** `tool_index` defaults to the trailing number of the
-  id (`T1` → 1), `mcu_name` to `tool<index>`, `home_dock` to `dock<index>`.
-  Set them explicitly only when a build deviates from the convention.
-- **Availability:** manual `available:` flag, default `True`. For now, comment
-  out absent tool includes in `tools.cfg` rather than relying on runtime CAN
-  auto-detection.
+- **Identity:** injected sections get `tool_index`, `mcu_name` and
+  `extruder_name` from `include_with`; static `[vortac_tool T1]` sections
+  derive them from the trailing number (`T1` → index 1, `tool1`,
+  `extruder1`, `home_dock=dock1`). `home_dock` is NOT derived from the
+  (order-based, unstable) tool_index — injected tools must set it via
+  include_with overrides.
+- **Availability & ghosts:** `available:` defaults to `True` only when BOTH
+  sense pins are configured. A leftover autosave-only section (a
+  commented-out tool whose SAVE_CONFIG'd `params_*` dock positions remain in
+  `printer.cfg`) therefore loads harmlessly as a "ghost": `tool_index=None`,
+  `available=False`, calibration preserved until the tool file returns. A
+  genuinely sense-pin-less tool (degraded blind-unhook mode) must set
+  `available: True` explicitly.
 - **Template loading:** lives in the tool config via `[include_with ...]`, not
   in `vortac_tool.py`.
-- **Per-dock storage:** `params_<dock>_<x|y|z>`. Manager API:
-  `get_dock_pos(dock, axis)`, `has_dock_pos(dock)`,
-  `save_dock_pos(dock, x, y, z)`.
+- **Per-dock storage:** `params_<dock>_<x|y|z>` in this section (persisted
+  via `configfile.set` + SAVE_CONFIG; keyed by tool NAME, so calibration
+  survives renumbering). Manager API: `get_dock_pos(dock, axis)`,
+  `has_dock_pos(dock)`, `save_dock_pos(dock, x, y, z)`.
 - **Templates:** `tool_activate_gcode`, `tool_deactivate_gcode` — run by
   manager around the dock motion. Jinja context: `tool` (this VortacTool),
   `dock=None`, `params`.
@@ -186,24 +214,31 @@ this extra loads; Klipper registers MCU pin chips before extras run.
 ### `vortac_manager.py` — `[vortac_manager]`
 
 Coordinator. At `klippy:connect` it discovers `[vortac_tool *]` (only those
-with `available=True`), the grabber (required), and `[vortac_qgl_state]`
-(optional). Registers `Tn` commands for every available tool.
+with `available=True`; ghosts are skipped), the grabber (required), and
+`[vortac_qgl_state]` (optional). Registers a `T<tool_index>` command for
+every available tool — the command comes from the INDEX, tool ids are
+display names like `miniGrey`. `TOOL=` parameters accept the tool name
+(case-insensitive), `T<n>`, or a bare index.
 
 - **Identity validation:** startup fails with a clear message if two tools
-  share a `tool_index`, `mcu_name`, `canbus_uuid`, or sense pin, or if a
-  tool's `mcu_name` has no matching `[mcu …]` section. Klipper itself merges
-  duplicate config sections silently (last value wins), so a
+  share a `tool_index`, `mcu_name`, `canbus_uuid`, or sense pin, if the
+  non-ghost tools' indices are not contiguous 0..N-1 (Klipper's
+  extruder-naming contract; holds by construction with order-based
+  numbering), if an available tool lacks `home_dock` or `tool_index`, or if
+  a tool's `mcu_name` has no matching `[mcu …]` section. Klipper itself
+  merges duplicate config sections silently (last value wins), so a
   copied-but-not-fully-renamed tool file never errors on its own — this
   guard catches the detectable leftovers.
 
 - **Gcode:** `T0/T1/…` (registered dynamically), `VORTAC_STATUS`,
-  `VORTAC_LOAD TOOL=Tn`, `VORTAC_UNLOAD`, `VORTAC_SET_CURRENT_TOOL`,
+  `VORTAC_LOAD TOOL=<name>|Tn`, `VORTAC_UNLOAD`, `VORTAC_SET_CURRENT_TOOL`,
   `VORTAC_DETECT`, `VORTAC_SELECT_DOCK DOCK=dockN`,
   `VORTAC_DOCK_CAL_STATUS`, `VORTAC_DOCK_CAL_SAVE`,
-  `VORTAC_DOCK_SAVE_POS TOOL=Tn DOCK=name`.
+  `VORTAC_DOCK_SAVE_POS TOOL=<name>|Tn DOCK=dockN`.
 - **Tool change sequence** in `_change_to`:
   `tool_deactivate_gcode` → `VORTAC_GANTRY_FLAT` → `_park_at_dock(current)`
-  → `_fetch_from_dock(target)` → `VORTAC_GANTRY_TILT` → `SET_GCODE_OFFSET`
+  → `_fetch_from_dock(target)` → `VORTAC_GANTRY_TILT` →
+  `ACTIVATE_EXTRUDER EXTRUDER=<extruder_name>` → `SET_GCODE_OFFSET`
   → `tool_activate_gcode`.
 - **Probe guard:** at `klippy:connect` the manager wraps the `[probe]`
   object's entry points (`start_probe_session` / `run_probe`), so EVERY
@@ -237,19 +272,20 @@ with `available=True`), the grabber (required), and `[vortac_qgl_state]`
 config parse:
   [vortac_grabber]    → register grabber gcode commands
   [vortac_qgl_state]  → register FLAT/TILT (hooks attach at klippy:ready)
-  [mcu toolN]         → register tool MCU pin chip early
-  [include_with ...]  → inject remapped toolboard sections that use toolN pins
-  [vortac_tool Tn]    → load logical dock/offset/tool metadata
+  [mcu <name>]        → register tool MCU pin chip early
+  [include_with ...]  → take next order-based tool_index, inject remapped
+                        toolboard sections (incl. [vortac_tool <name>])
   [vortac_manager]    → register VORTAC_LOAD/UNLOAD/STATUS/DOCK_SAVE_POS;
                         defer rest to klippy:connect
 
 klippy:ready    → vortac_qgl_state hooks QGL.adjust_steppers + QUAD_GANTRY_LEVEL
-klippy:connect  → vortac_manager finds tools/grabber/qgl, registers Tn commands
+klippy:connect  → vortac_manager finds tools/grabber/qgl, validates identities,
+                  registers T<index> commands
 ```
 
 Hard dependencies:
 - `vortac_manager` requires `[vortac_grabber]`.
-- Each active tool requires a static `[mcu toolN]` section before `[include_with]`.
+- Each active tool requires a static `[mcu <name>]` section before `[include_with]`.
 - `vortac_qgl_state` requires `[quad_gantry_level]` to be defined.
 
 For config layout and the user-side workflow, see
