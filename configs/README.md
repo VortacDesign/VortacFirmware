@@ -37,23 +37,98 @@ configs/
 [include vortac_configs/tools.cfg]         # tools + manager
 ```
 
-## Adding another SB2209-based tool
+## Adding a tool — the checklist
 
-1. `cp tools/tool0.cfg tools/tool1.cfg`
-2. Replace every `T0`/`tool0`/`dock0` with `T1`/`tool1`/`dock1`
-3. Bump `tool_index: 0` → `1`, set the new `[mcu tool1] canbus_uuid`
-4. Set placeholder `params_dock1_x/y/z` (calibrate later)
-5. Add `[include tools/tool1.cfg]` to `tools.cfg`
+The trailing number is the convention that links everything: `tool1` ↔ `T1` ↔
+`dock1`. `tool_index`, `mcu_name`, `home_dock` and `mcu_from` are all derived
+from it — you never write them.
 
-Each tool config declares its `[mcu toolN]` statically first. That is required
-because Klipper registers MCU pin chips before extras like `include_with` or
-`vortac_tool` run.
+1. **Get the board's CAN UUID** (every board has a unique one):
+   `~/klipper/scripts/canbus_query.py can0`
+2. **Copy a tool file**: `cp tools/tool0.cfg tools/tool1.cfg`
+3. **Replace every `tool0` → `tool1`, `T0` → `T1`, `dock0` → `dock1`.**
+   The number appears in exactly three section headers (`[mcu tool1]`,
+   `[include_with tool1 …]`, `[vortac_tool T1]`), the sense-pin prefixes
+   (`tool1:PB…`), the `params_dock1_*` keys, and
+   `ACTIVATE_EXTRUDER EXTRUDER=extruder1`. **Grep the file afterwards** for
+   the old number — a missed spot does NOT error, it silently merges into the
+   other tool's sections (Klipper merges duplicate sections, last one wins;
+   the symptom is one franken-tool, e.g. one board shut down by the other
+   tool's sensor config).
+4. **Set the new `canbus_uuid`** under `[mcu tool1]`.
+5. **Add `[include tools/tool1.cfg]` to `tools.cfg`** and make sure
+   `dock_count` covers the new dock.
+6. **Restart Klipper**. `vortac_manager` refuses to start (with a clear
+   message) on duplicated `tool_index`/`mcu_name`/`canbus_uuid`/sense pins or
+   an `mcu_name` without a matching `[mcu …]` section — fix what it names.
+7. **Verify**: `VORTAC_STATUS` lists both tools; `VORTAC_DETECT DEBUG=1`
+   shows each tool flip only on its own dock's strobe.
+8. **Calibrate the dock position** (next section), then `SAVE_CONFIG`.
 
-`include_with` then reads `vortac_configs/mcu/SB2209.cfg` once per tool, swaps
-the MCU namespace, rewrites every `EBBCan:` pin reference, and renames sections
-per `tool_index` (`[extruder]` → `[extruder1]`, `[fan]` →
-`[fan_generic tool1_fan]`, etc.). The template `[mcu EBBCan]` is skipped with
+Why the remaining duplication exists: `[mcu toolN]` must be declared
+statically because Klipper registers MCU pin chips before extras like
+`include_with` run — it cannot be injected. And pins must name their chip
+(`tool1:PB7`), which is plain Klipper syntax.
+
+`include_with` reads the PCB template once per tool, swaps the MCU namespace,
+rewrites every `EBBCan:` pin reference, prefixes named sections with the
+namespace (`[neopixel logo_rgb]` → `[neopixel tool1_logo_rgb]` — so LEDs are
+addressable per tool: `SET_LED LED=tool1_logo_rgb …`), and renames the Klipper
+singletons for index ≥ 1 (`[extruder]` → `[extruder1]`, `[fan]` →
+`[fan_generic tool1_fan]`).
+
+The namespace is also the display name dashboards show. Prefer pretty names?
+Name the MCU after the physical tool — then set the two derived options
+explicitly (a namespace without a trailing number can't derive them):
+
+```ini
+[mcu miniPink]
+canbus_uuid: …
+
+[include_with miniPink vortac_configs/mcu/EBB42_V12.cfg]
+tool_index: 0                # required: no trailing number in the namespace
+skip_sections:
+  mcu EBBCan
+
+[vortac_tool T0]
+mcu_name: miniPink           # default would be tool0
+dock_sense_pin: miniPink:PB7
+grab_sense_pin: miniPink:PB5
+```
+
+Dashboards then show `miniPink_logo_rgb`, `miniPink_hotend_fan`, etc. Only
+`extruder`/`extruder1` stay index-based (hardwired by Klipper), and the
+`T0`/`T1` commands plus `dock0`/`dock1` names are fixed too (slicers emit
+`T<n>`; docks map to LED chain indices). Macros can still address per-tool
+hardware uniformly via the tool's `mcu_name`, e.g. in
+`tool_activate_gcode`: `SET_LED LED={tool.mcu_name}_logo_rgb …`. The template `[mcu EBBCan]` is skipped with
 `skip_sections:` because each tool file owns its real `[mcu toolN]`.
+
+### Per-tool hardware deviations (`overrides:`)
+
+Never edit the shared PCB template for one tool. Deviations go on that tool's
+`[include_with]` section, one `section.key: value` per line:
+
+```ini
+[include_with tool0 vortac_configs/mcu/EBB42_V12.cfg]
+skip_sections:
+  mcu EBBCan
+overrides:
+  extruder.sensor_type: MAX31865
+  extruder.sensor_pin: EBBCan: PA4
+  extruder.spi_bus: spi1
+  extruder.rtd_nominal_r: 1000
+  extruder.rtd_reference_r: 4300
+  extruder.rtd_num_of_wires: 2
+  extruder.rtd_use_50Hz_filter: True
+```
+
+Section names are the ORIGINAL template names (pre-rename); pin values may be
+written template-relative (`EBBCan: PA4` — rewritten automatically). Keys the
+template lacks are added; an empty value deletes the option. RTD pairing rule
+of thumb: PT100 → `rtd_reference_r: 430`, PT1000 → `4300` (check the reference
+resistor on your board; a mismatch shows up as a `Thermocouple reader fault`
+MCU shutdown).
 
 ## Where the old `tool_doc_load`/`unload` jinja blocks went
 

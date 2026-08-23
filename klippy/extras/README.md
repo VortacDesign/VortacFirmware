@@ -111,17 +111,33 @@ Toggle the gantry between **frame-flat** (dock geometry valid) and
 Load one Klipper template under a remapped MCU namespace; auto-rename sections
 per `tool_index` so one PCB-level config can be instantiated N times.
 
-- **Section rename rules** (only triggered for `tool_index ≥ 1`; the MCU rename
-  is always applied):
-  | Original | Tool 1 | Tool 2 |
+- **`tool_index`** defaults to the trailing number of the namespace
+  (`tool1` → 1). Set it explicitly only for namespaces without a trailing
+  number (then it is required).
+- **Section rename rules.** EVERY named section gets the NAMESPACE as prefix,
+  for every tool index — the namespace doubles as the display name in
+  Mainsail/Fluidd/KlipperScreen (namespace `tool1` → `tool1_logo_rgb`,
+  namespace `miniPink` → `miniPink_logo_rgb`). Reference sections
+  (`tmcXXXX`, `verify_heater`) follow their target's rename. The Klipper
+  singletons `[extruder]` and `[fan]` are only renamed for `tool_index ≥ 1`
+  (tool 0 keeps the primary extruder and the M106 fan), and multi-extruder
+  naming is hardwired to `extruder<N>` by Klipper regardless of namespace —
+  `[extruder miniPink]` is not a valid Klipper section:
+  | Original | Tool 0 (ns `tool0`) | Tool 1 (ns `miniGrey`) |
   |---|---|---|
-  | `[mcu <from>]` | `[mcu <to>]` | `[mcu <to>]` |
-  | `[extruder]` | `[extruder1]` | `[extruder2]` |
-  | `[tmcXXXX extruder]` | `[tmcXXXX extruder1]` | `[tmcXXXX extruder2]` |
-  | `[fan]` | `[fan_generic tool1_fan]` | `[fan_generic tool2_fan]` |
-  | `[heater_fan name]` | `[heater_fan tool1_name]` | `[heater_fan tool2_name]` |
-  | `[neopixel name]` | `[neopixel tool1_name]` | `[neopixel tool2_name]` |
-  | `[adxl345 (name)]` | `[adxl345 tool1(_name)]` | `[adxl345 tool2(_name)]` |
+  | `[mcu <from>]` | `[mcu tool0]` | `[mcu miniGrey]` |
+  | `[<head> name]` (generic) | `[<head> tool0_name]` | `[<head> miniGrey_name]` |
+  | `[adxl345 (name)]` | `[adxl345 tool0(_name)]` | `[adxl345 miniGrey(_name)]` |
+  | `[extruder]` | `[extruder]` | `[extruder1]` |
+  | `[tmcXXXX extruder]` | `[tmcXXXX extruder]` | `[tmcXXXX extruder1]` |
+  | `[verify_heater extruder]` | `[verify_heater extruder]` | `[verify_heater extruder1]` |
+  | `[fan]` | `[fan]` | `[fan_generic miniGrey_fan]` |
+
+  The generic rule covers `neopixel`, `heater_fan`, `temperature_sensor`,
+  `output_pin`, `filament_*_sensor`, `gcode_macro`, `manual_stepper`, … —
+  anything with a name part. Bare singletons without a name part
+  (`input_shaper`, `firmware_retraction`, …) cannot be namespaced and pass
+  through unchanged; `skip_sections` them if they collide across tools.
 - **Value rewrite:** any `<from>:` pin token in option values becomes `<to>:`;
   whole-string section refs (e.g. `heater: extruder` → `heater: extruder1`)
   are also fixed up.
@@ -130,8 +146,18 @@ per `tool_index` so one PCB-level config can be instantiated N times.
   also pass `skip_sections:` as a comma/newline list; tool configs use this to
   skip the template `[mcu EBBCan]` because `[mcu toolN]` must be declared
   statically.
-- **Overrides:** JSON `{"orig section": {"key": "value"}}` via `overrides:`
-  config option, or programmatic `overrides=` arg.
+- **Overrides** (per-tool deviations from the shared template) via the
+  `overrides:` config option, one `section.key: value` per line:
+  ```ini
+  overrides:
+    extruder.sensor_type: MAX31865
+    extruder.sensor_pin: EBBCan: PA4
+  ```
+  Section names are the ORIGINAL template names; values run through the
+  MCU/value rewriter (template-relative pins allowed). Keys the template
+  lacks are added; an empty value deletes the option. A JSON dict
+  (`{"section": {"key": "value"}}`, null deletes) is also accepted, and is
+  the format of the programmatic `overrides=` arg.
 - **Programmatic API** (used by `vortac_tool`):
   `include_with_remap(printer, parent_config, filepath, namespace,
   mcu_from=None, tool_index=0, overrides=None, skip_sections=None)`.
@@ -142,6 +168,9 @@ Per-tool logical definition. The tool hardware must already be present in
 normal Klipper config (`[mcu toolN]` plus `[include_with toolN ...]`) before
 this extra loads; Klipper registers MCU pin chips before extras run.
 
+- **Derived identity:** `tool_index` defaults to the trailing number of the
+  id (`T1` → 1), `mcu_name` to `tool<index>`, `home_dock` to `dock<index>`.
+  Set them explicitly only when a build deviates from the convention.
 - **Availability:** manual `available:` flag, default `True`. For now, comment
   out absent tool includes in `tools.cfg` rather than relying on runtime CAN
   auto-detection.
@@ -159,6 +188,13 @@ this extra loads; Klipper registers MCU pin chips before extras run.
 Coordinator. At `klippy:connect` it discovers `[vortac_tool *]` (only those
 with `available=True`), the grabber (required), and `[vortac_qgl_state]`
 (optional). Registers `Tn` commands for every available tool.
+
+- **Identity validation:** startup fails with a clear message if two tools
+  share a `tool_index`, `mcu_name`, `canbus_uuid`, or sense pin, or if a
+  tool's `mcu_name` has no matching `[mcu …]` section. Klipper itself merges
+  duplicate config sections silently (last value wins), so a
+  copied-but-not-fully-renamed tool file never errors on its own — this
+  guard catches the detectable leftovers.
 
 - **Gcode:** `T0/T1/…` (registered dynamically), `VORTAC_STATUS`,
   `VORTAC_LOAD TOOL=Tn`, `VORTAC_UNLOAD`, `VORTAC_SET_CURRENT_TOOL`,

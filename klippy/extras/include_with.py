@@ -7,7 +7,9 @@
 #
 # Two entry points:
 #   1. [include_with <namespace> <filename>]  -- config-section wrapper
-#        tool_index: <int>          (default 0; >=1 triggers section renames)
+#        tool_index: <int>          (default: trailing number of <namespace>,
+#                                    e.g. "tool1" -> 1; required if the
+#                                    namespace has no trailing number)
 #        mcu_from:   <name>         (auto-detected from [mcu <name>] otherwise)
 #        overrides:  (optional) per-section option overrides, one per line:
 #                        overrides:
@@ -25,23 +27,31 @@
 #        skip_sections: comma/newline list of original template sections to skip
 #   2. include_with_remap(...)      -- programmatic API / config generator helper
 #
-# Section-rename table:
+# Section-rename rules:
 #
-#   Any tool_index (named sections get a uniform tool<N>_ prefix so macros
-#   can address per-tool hardware as tool0_logo_rgb, tool1_logo_rgb, ...):
+#   Any tool_index — EVERY named section gets the NAMESPACE as prefix, which
+#   is also what dashboards display (namespace "tool1" -> tool1_logo_rgb,
+#   namespace "miniPink" -> miniPink_logo_rgb):
 #
 #   [mcu <mcu_from>]     -> [mcu <namespace>]
-#   [heater_fan name]    -> [heater_fan tool<N>_name]
-#   [neopixel name]      -> [neopixel tool<N>_name]
-#   [adxl345]            -> [adxl345 tool<N>]
-#   [adxl345 name]       -> [adxl345 tool<N>_name]
+#   [<head> name]        -> [<head> <namespace>_name]     (generic rule:
+#                            neopixel, heater_fan, temperature_sensor,
+#                            output_pin, filament_*_sensor, gcode_macro, ...)
+#   [adxl345]            -> [adxl345 <namespace>]
+#   [tmcXXXX <target>]   -> follows <target>'s rename
+#   [verify_heater <t>]  -> follows <t>'s rename
 #
 #   tool_index >= 1 only (Klipper needs a primary [extruder] and the [fan]
-#   singleton for M106, so tool 0 keeps those unrenamed):
+#   singleton for M106, so tool 0 keeps those unrenamed; multi-extruder
+#   naming is hardwired to extruder<N> by Klipper — [extruder miniPink]
+#   is not a valid Klipper section):
 #
 #   [extruder]           -> [extruder<N>]
-#   [tmcXXXX extruder]   -> [tmcXXXX extruder<N>]
-#   [fan]                -> [fan_generic tool<N>_fan]   (type change!)
+#   [fan]                -> [fan_generic <namespace>_fan]   (type change!)
+#
+#   Bare singletons with no name part (input_shaper, firmware_retraction,
+#   ...) cannot be namespaced — they pass through unchanged; skip them via
+#   skip_sections if they collide across tools.
 #
 # Singletons that can't be safely renamed (resonance_tester, input_shaper,
 # shaketune) are skipped for tool_index >= 1 by default. Caller can override
@@ -57,6 +67,11 @@ DEFAULT_SINGLETON_SKIP = ('resonance_tester', 'input_shaper', 'shaketune')
 _TMC_HEADS = ('tmc2209', 'tmc2240', 'tmc2130', 'tmc5160')
 
 
+# Section heads whose "name" part is a REFERENCE to another section — they
+# must follow that section's rename instead of getting a namespace prefix.
+_REFERENCE_HEADS = _TMC_HEADS + ('verify_heater',)
+
+
 def _rename_section(orig, idx, mcu_from, mcu_to):
     parts = orig.split()
     head = parts[0]
@@ -66,30 +81,31 @@ def _rename_section(orig, idx, mcu_from, mcu_to):
     if head == 'mcu' and rest and rest[0] == mcu_from:
         return f"mcu {mcu_to}"
 
-    sfx = str(idx)
+    # Reference sections track their target's rename:
+    # [tmc2209 extruder] -> [tmc2209 extruder1], [verify_heater extruder]
+    # likewise; [tmc2209 manual_stepper foo] follows the renamed stepper.
+    if head in _REFERENCE_HEADS and rest:
+        target = _rename_section(' '.join(rest), idx, mcu_from, mcu_to)
+        return f"{head} {target}"
 
-    # Uniform per-tool prefix for named sections — applies to tool 0 too,
-    # so macros can address tool<N>_logo_rgb etc. for every tool alike.
-    if head == 'heater_fan' and rest:
-        return f"heater_fan tool{sfx}_{'_'.join(rest)}"
-    if head == 'neopixel' and rest:
-        return f"neopixel tool{sfx}_{'_'.join(rest)}"
-    if orig == 'adxl345':
-        return f"adxl345 tool{sfx}"
-    if head == 'adxl345' and rest:
-        return f"adxl345 tool{sfx}_{'_'.join(rest)}"
-
-    if idx == 0:
-        return orig
-
+    # Klipper hardwires these singletons: the primary [extruder] and the
+    # M106 [fan] belong to tool 0; extras are extruder<N> / fan_generic.
     if orig == 'extruder':
-        return f"extruder{sfx}"
-    if head in _TMC_HEADS and rest == ['extruder']:
-        return f"{head} extruder{sfx}"
+        return orig if idx == 0 else f"extruder{idx}"
     if orig == 'fan':
-        # [fan] is a Klipper singleton; promote to fan_generic for tools >= 1.
-        return f"fan_generic tool{sfx}_fan"
+        return orig if idx == 0 else f"fan_generic {mcu_to}_fan"
+    if orig == 'adxl345':
+        return f"adxl345 {mcu_to}"
 
+    # Generic rule, every tool index: ANY named section gets the NAMESPACE
+    # as prefix — the namespace doubles as the display name in Mainsail/
+    # Fluidd/KlipperScreen (namespace "miniPink" -> miniPink_logo_rgb,
+    # miniPink_hotend_fan, miniPink_filament_sensor, ...).
+    if rest:
+        return f"{head} {mcu_to}_{'_'.join(rest)}"
+
+    # Unhandled bare singleton ([input_shaper], [firmware_retraction], ...):
+    # cannot be namespaced — leave as-is; use skip_sections if it collides.
     return orig
 
 
@@ -280,7 +296,17 @@ class IncludeWith:
         filename = ' '.join(parts[2:])
 
         printer = config.get_printer()
-        tool_index = config.getint('tool_index', default=0, minval=0)
+        # tool_index derives from the namespace's trailing number
+        # ("tool1" -> 1) so copied tool files can't silently keep index 0.
+        tool_index = config.getint('tool_index', default=None, minval=0)
+        if tool_index is None:
+            m = re.search(r'(\d+)$', self.namespace)
+            if m is None:
+                raise config.error(
+                    f"include_with {self.namespace}: cannot derive "
+                    f"tool_index (namespace has no trailing number); "
+                    f"set tool_index explicitly")
+            tool_index = int(m.group(1))
         mcu_from = config.get('mcu_from', default=None)
 
         overrides_str = config.get('overrides', default=None)

@@ -134,6 +134,8 @@ class VortacManager:
             if obj.home_dock:
                 self.dock_occupancy.setdefault(obj.home_dock, obj.tool_id)
 
+        self._validate_tools()
+
         self.grabber = self.printer.lookup_object('vortac_grabber', None)
         if self.grabber is None:
             raise self.printer.config_error(
@@ -151,6 +153,38 @@ class VortacManager:
         logging.info(
             "vortac_manager: registered tools=%s, grabber=%s, qgl_state=%s",
             sorted(self.tools.keys()), bool(self.grabber), bool(self.qgl_state))
+
+    def _validate_tools(self):
+        """Cross-tool sanity checks. Klipper merges duplicate config
+        sections silently, so a copied-but-not-fully-renamed tool file
+        never errors on its own — it just produces one franken-tool or two
+        tools sharing an identity. Catch that here with a clear message."""
+        seen = {}
+        conflicts = []
+        for tid, tool in sorted(self.tools.items()):
+            for field, value in (
+                    ('tool_index', tool.tool_index),
+                    ('mcu_name', tool.mcu_name),
+                    ('canbus_uuid', tool.canbus_uuid or None),
+                    ('dock_sense_pin', tool.dock_sense_pin),
+                    ('grab_sense_pin', tool.grab_sense_pin)):
+                if value is None or value == '':
+                    continue
+                key = (field, value)
+                if key in seen:
+                    conflicts.append(
+                        f"{field}={value!r} shared by {seen[key]} and {tid}")
+                else:
+                    seen[key] = tid
+            if self.printer.lookup_object(f'mcu {tool.mcu_name}', None) is None:
+                conflicts.append(
+                    f"{tid}: mcu_name '{tool.mcu_name}' has no matching "
+                    f"[mcu {tool.mcu_name}] section")
+        if conflicts:
+            raise self.printer.config_error(
+                "vortac_manager: tool identity conflicts (usually a copied "
+                "tool file that was not fully renamed): "
+                + "; ".join(conflicts))
 
     # --------------------------------------------------------------------
     # Dock / tool detection

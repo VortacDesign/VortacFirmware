@@ -13,6 +13,14 @@
 # the dock-approach gcode template.
 
 
+import re
+
+
+def _trailing_int(name):
+    m = re.search(r'(\d+)$', name)
+    return int(m.group(1)) if m else None
+
+
 def _parse_dock_positions(config):
     """Parse params_<dock>_<axis> options into {dock_name: {x, y, z}}.
 
@@ -42,14 +50,24 @@ class VortacTool:
         parts = self.name.split()
         self.tool_id = parts[1] if len(parts) >= 2 else self.name
 
-        # Identity
-        self.tool_index = config.getint('tool_index', minval=0)
-        self.mcu_name = config.get('mcu_name')
+        # Identity. Convention over configuration: [vortac_tool T1] derives
+        # tool_index=1, mcu_name=tool1, home_dock=dock1. Explicit options
+        # override the convention where a build deviates from it.
+        default_index = _trailing_int(self.tool_id)
+        self.tool_index = config.getint(
+            'tool_index', default=default_index, minval=0)
+        if self.tool_index is None:
+            raise config.error(
+                f"[{self.name}]: tool id has no trailing number; "
+                f"set tool_index explicitly")
+        self.mcu_name = config.get(
+            'mcu_name', default=f"tool{self.tool_index}")
         self.canbus_uuid = config.get('canbus_uuid', default='').lower().strip()
         self.available = config.getboolean('available', True)
 
         # Tool-change config
-        self.home_dock = config.get('home_dock', default=None)
+        self.home_dock = config.get(
+            'home_dock', default=f"dock{self.tool_index}")
         self.dock_sense_pin = config.get('dock_sense_pin', default=None)
         self.grab_sense_pin = config.get('grab_sense_pin', default=None)
         self.dock_sense_state = None
