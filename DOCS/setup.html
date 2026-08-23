@@ -64,8 +64,8 @@ tool config:</p>
   <div class="fold-body">
     <p>The UUID is burned into the MCU, not assigned by you. When you add a second tool with the
     same PCB, only the tool name (the <code>[mcu &lt;name&gt;]</code> / <code>include_with</code>
-    namespace), the UUID and the <code>home_dock</code> override differ between the two tool
-    config files — the entire rest of the hardware definition comes from one shared template
+    namespace) and the UUID differ between the two tool config files — the entire rest of the
+    hardware definition comes from one shared template
     (see <a href="configuration.html#include-with">include_with</a>).</p>
   </div>
 </details>
@@ -139,11 +139,11 @@ configures <code>[vortac_manager]</code>. Start from the templates:</p>
 <pre><code>cd ~/printer_data/config/vortac_configs
 cp tools.example.cfg tools.cfg
 cp tools/tool0.example.cfg tools/myTool.cfg   # any name — it is NOT the tool number</code></pre>
-<p>In the tool file, set the board's <code>canbus_uuid</code> (from step 1) and the tool's
-physical dock (<code>vortac_tool TN.home_dock: dockX</code> in <code>overrides:</code>). The
-tool's <strong>number is its include position</strong> in <code>tools.cfg</code> (first include
+<p>In the tool file, set the board's <code>canbus_uuid</code> (from step 1). The tool's
+<strong>number is its include position</strong> in <code>tools.cfg</code> (first include
 = <code>T0</code>); its <strong>name</strong> is the <code>[mcu &lt;name&gt;]</code> /
-<code>include_with</code> namespace. Dock positions are calibrated at runtime and persisted via
+<code>include_with</code> namespace. The tool's <strong>dock is established at runtime</strong>
+by <code>VORTAC_DETECT</code>, and dock positions are calibrated at runtime and persisted via
 <code>SAVE_CONFIG</code> — nothing to write by hand. The full walk-through for the file contents
 — and for adding more tools — is in
 <a href="configuration.html#adding-a-tool">Configuration → Adding a tool</a>.</p>
@@ -154,8 +154,7 @@ tool's <strong>number is its include position</strong> in <code>tools.cfg</code>
   <span class="callout-title">The manager checks your work</span>
   <p>On startup, <code>vortac_manager</code> refuses to start — with a clear message — if two
   tools share a <code>tool_index</code>, <code>mcu_name</code>, <code>canbus_uuid</code> or sense
-  pin, if the tool indices are not contiguous 0..N-1, if an available tool lacks
-  <code>home_dock</code> or <code>tool_index</code>, or if a tool's <code>mcu_name</code> has no
+  pin, if the tool indices are not contiguous 0..N-1, or if a tool's <code>mcu_name</code> has no
   matching <code>[mcu …]</code> section. Fix exactly what it names.</p>
 </div>
 
@@ -173,6 +172,8 @@ the console reports e.g. <code>Reached 130.02° … in 1 move(s)</code>.</p>
 <pre><code>VORTAC_SENSE_STATUS       ; raw dock/grab sense pin states per tool
 VORTAC_DETECT             ; strobe-based dock occupancy + grabbed tool
 VORTAC_STATUS             ; current tool, dock map, QGL state</code></pre>
+<p><code>VORTAC_DETECT</code> also <strong>establishes the dock map</strong> tool changes rely
+on — run it before the first tool change (e.g. in <code>PRINT_START</code>).</p>
 
 <h3>First manual tool change (after dock positions are calibrated)</h3>
 <pre><code>VORTAC_LOAD TOOL=T0       ; fetch T0 from its dock (TOOL= also takes the name: TOOL=miniGrey)

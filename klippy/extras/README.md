@@ -122,18 +122,26 @@ per `tool_index` so one PCB-level config can be instantiated N times.
   explicit indices with auto-numbered includes is unsupported (the counter
   ignores explicit values).
 - **`[vortac_tool TN]` injection:** the template's `vortac_tool` placeholder
-  is renamed to `[vortac_tool <namespace>]` (name REPLACED, not prefixed),
-  and `tool_index`, `mcu_name` (= namespace), `canbus_uuid` (from the static
+  is renamed to `[vortac_tool <namespace>]` (PURE name, no index — this is
+  the persistence anchor), and `tool_index`, `mcu_name` (= namespace),
+  `display_name` (`<namespace><index>`, the dashboard prefix of the
+  injected hardware sections), `canbus_uuid` (from the static
   `[mcu <namespace>]` section) and `extruder_name` (the renamed extruder)
   are auto-injected. Template values and overrides win over the injection.
-  Set `home_dock` per tool via `overrides:` (`vortac_tool TN.home_dock:
-  dockX`). If SAVE_CONFIG's autosave block already created the section
+  `home_dock` is optional (docks come from `VORTAC_DETECT` at runtime); it
+  can be pinned via `overrides:` (`vortac_tool TN.home_dock: dockX`).
+  If SAVE_CONFIG's autosave block already created the section
   (persisted `params_*` dock positions), the injection MERGES into it —
   calibration data is preserved.
-- **Section rename rules.** EVERY named section gets the NAMESPACE as prefix,
-  for every tool index — the namespace doubles as the display name in
-  Mainsail/Fluidd/KlipperScreen (namespace `tool1` → `tool1_logo_rgb`,
-  namespace `miniPink` → `miniPink_logo_rgb`). Reference sections
+- **Section rename rules.** EVERY named section gets the DISPLAY prefix
+  `<namespace><tool_index>` — that is what Mainsail/Fluidd/KlipperScreen
+  show, and the index makes `extruder1` ↔ `miniGrey1_*` visually matchable
+  (`miniPink` + index 0 → `miniPink0_logo_rgb`; legacy digit-suffixed
+  namespaces like `tool1` stay as-is). Exceptions: `[mcu]` and
+  `[vortac_tool]` keep the pure namespace. The display prefix shifts with
+  order-based renumbering — safe, because the renamed hardware sections
+  never hold SAVE_CONFIG data; address them index-proof in macros via
+  `{tool.display_name}_…`. Reference sections
   (`tmcXXXX`, `verify_heater`) follow their target's rename. The Klipper
   singletons `[extruder]` and `[fan]` are only renamed for `tool_index ≥ 1`
   (tool 0 keeps the primary extruder and the M106 fan), and multi-extruder
@@ -142,12 +150,13 @@ per `tool_index` so one PCB-level config can be instantiated N times.
   | Original | Tool 0 (ns `tool0`) | Tool 1 (ns `miniGrey`) |
   |---|---|---|
   | `[mcu <from>]` | `[mcu tool0]` | `[mcu miniGrey]` |
-  | `[<head> name]` (generic) | `[<head> tool0_name]` | `[<head> miniGrey_name]` |
-  | `[adxl345 (name)]` | `[adxl345 tool0(_name)]` | `[adxl345 miniGrey(_name)]` |
+  | `[vortac_tool <any>]` | `[vortac_tool tool0]` | `[vortac_tool miniGrey]` |
+  | `[<head> name]` (generic) | `[<head> tool0_name]` | `[<head> miniGrey1_name]` |
+  | `[adxl345 (name)]` | `[adxl345 tool0(_name)]` | `[adxl345 miniGrey1(_name)]` |
   | `[extruder]` | `[extruder]` | `[extruder1]` |
   | `[tmcXXXX extruder]` | `[tmcXXXX extruder]` | `[tmcXXXX extruder1]` |
   | `[verify_heater extruder]` | `[verify_heater extruder]` | `[verify_heater extruder1]` |
-  | `[fan]` | `[fan]` | `[fan_generic miniGrey_fan]` |
+  | `[fan]` | `[fan]` | `[fan_generic miniGrey1_fan]` |
 
   The generic rule covers `neopixel`, `heater_fan`, `temperature_sensor`,
   `output_pin`, `filament_*_sensor`, `gcode_macro`, `manual_stepper`, … —
@@ -192,8 +201,9 @@ MCU pin chips before extras run.
   `extruder_name` from `include_with`; static `[vortac_tool T1]` sections
   derive them from the trailing number (`T1` → index 1, `tool1`,
   `extruder1`, `home_dock=dock1`). `home_dock` is NOT derived from the
-  (order-based, unstable) tool_index — injected tools must set it via
-  include_with overrides.
+  (order-based, unstable) tool_index and is optional — docks are
+  established at runtime by `VORTAC_DETECT`; a manual fallback can be
+  pinned via include_with overrides.
 - **Availability & ghosts:** `available:` defaults to `True` only when BOTH
   sense pins are configured. A leftover autosave-only section (a
   commented-out tool whose SAVE_CONFIG'd `params_*` dock positions remain in
@@ -224,8 +234,8 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   share a `tool_index`, `mcu_name`, `canbus_uuid`, or sense pin, if the
   non-ghost tools' indices are not contiguous 0..N-1 (Klipper's
   extruder-naming contract; holds by construction with order-based
-  numbering), if an available tool lacks `home_dock` or `tool_index`, or if
-  a tool's `mcu_name` has no matching `[mcu …]` section. Klipper itself
+  numbering), if an available tool lacks `tool_index`, or if a tool's
+  `mcu_name` has no matching `[mcu …]` section. Klipper itself
   merges duplicate config sections silently (last value wins), so a
   copied-but-not-fully-renamed tool file never errors on its own — this
   guard catches the detectable leftovers.
@@ -260,7 +270,14 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   tool whose cached `dock_sense_pin` reads LOW. Every LED's original RGBW value
   is restored afterward. The grabbed tool is detected from `grab_sense_pin`.
   Detection aborts if any tool already reads dock LOW while all dock Tool_id
-  channels are off.
+  channels are off. Detection also ESTABLISHES the dock map used by tool
+  changes: a grabbed tool is assigned the first free dock with calibrated
+  positions for it (a previous choice — fetch origin or manual `home_dock` —
+  is kept while still free and calibrated; a warning is printed when no
+  free calibrated dock exists). Park-dock resolution on tool change:
+  detection map → fetch origin → optional `home_dock`; before the first
+  detection, a tool change without `home_dock` errors with
+  "run VORTAC_DETECT".
 - **Dock calibration context:** `VORTAC_SELECT_DOCK DOCK=dockN` runs detection
   and stores the detected dock/tool pair. `VORTAC_DOCK_CAL_SAVE` saves the
   current hooked/engage XYZ to that selected tool/dock and fails if no tool was

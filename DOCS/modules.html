@@ -94,12 +94,17 @@ already be present in normal Klipper config (<code>[mcu &lt;name&gt;]</code> plu
 chips before extras run.</p>
 <ul>
   <li><strong>Identity:</strong> injected sections get <code>tool_index</code>,
-      <code>mcu_name</code> and <code>extruder_name</code> from <code>include_with</code>; static
+      <code>mcu_name</code>, <code>display_name</code>
+      (<code>&lt;namespace&gt;&lt;index&gt;</code> — the dashboard prefix of the injected hardware
+      sections, also exposed via <code>get_status</code>; address hardware index-proof in macros
+      via <code>{tool.display_name}_logo_rgb</code>) and <code>extruder_name</code> from
+      <code>include_with</code>; static
       <code>[vortac_tool T1]</code> sections derive them from the trailing number
       (<code>T1</code> → index 1, <code>tool1</code>, <code>extruder1</code>,
       <code>home_dock=dock1</code>). <code>home_dock</code> is <strong>not</strong> derived from
-      the (order-based, unstable) <code>tool_index</code> — injected tools must set it via
-      include_with overrides (<code>vortac_tool TN.home_dock: dockX</code>).</li>
+      the (order-based, unstable) <code>tool_index</code> and is <strong>optional</strong> —
+      docks are established at runtime by <code>VORTAC_DETECT</code>; a manual fallback can be
+      pinned via include_with overrides (<code>vortac_tool TN.home_dock: dockX</code>).</li>
   <li><strong>Availability &amp; ghosts:</strong> <code>available:</code> defaults to
       <code>True</code> only when <em>both</em> sense pins are configured. A leftover
       autosave-only section (a commented-out tool whose SAVE_CONFIG'd <code>params_*</code> dock
@@ -122,16 +127,16 @@ chips before extras run.</p>
 <code>[vortac_tool *]</code> sections (only those with <code>available=True</code>; ghosts are
 skipped), the grabber (required), and <code>[vortac_qgl_state]</code> (optional), then registers
 a <code>T&lt;tool_index&gt;</code> command for every available tool — the command comes from the
-INDEX, tool ids are display names like <code>miniGrey</code>. <code>TOOL=</code> parameters
-accept the tool name (case-insensitive), <code>T&lt;n&gt;</code>, or a bare index.</p>
+INDEX, tool ids are names like <code>miniGrey</code>. <code>TOOL=</code> parameters
+accept the tool name (case-insensitive), <code>T&lt;n&gt;</code>, or a bare index.
+<code>VORTAC_STATUS</code> lists tools as <code>&lt;name&gt; (T&lt;index&gt;)</code>.</p>
 
 <h3>Identity validation</h3>
 <p>Startup fails with a clear message if two tools share a <code>tool_index</code>,
 <code>mcu_name</code>, <code>canbus_uuid</code>, or sense pin, if the non-ghost tools' indices
 are not contiguous 0..N-1 (Klipper's extruder-naming contract; holds by construction with
-order-based numbering), if an available tool lacks <code>home_dock</code> or
-<code>tool_index</code>, or if a tool's <code>mcu_name</code> has no matching
-<code>[mcu …]</code> section. Klipper itself merges duplicate config sections silently (last
+order-based numbering), if an available tool lacks <code>tool_index</code>, or if a tool's
+<code>mcu_name</code> has no matching <code>[mcu …]</code> section. Klipper itself merges duplicate config sections silently (last
 value wins), so a copied-but-not-fully-renamed tool file never errors on its own — this guard
 catches the detectable leftovers.</p>
 
@@ -188,6 +193,17 @@ tool). <code>VORTAC_DETECT</code>:</p>
 <p>The grabbed tool is detected from <code>grab_sense_pin</code>. Detection <strong>aborts</strong>
 if any tool already reads dock LOW while all dock Tool_id channels are off (that would make the
 mapping ambiguous — see <a href="troubleshooting.html#detect-aborts">Troubleshooting</a>).</p>
+<p><strong>Docks are established at runtime</strong> by this detection — <code>home_dock</code>
+is only an optional manual fallback. A <em>grabbed</em> tool is assigned the first free dock that
+has calibrated positions for it (a previous choice — fetch origin or manual
+<code>home_dock</code> — is kept if it is still free and calibrated); if no free calibrated dock
+exists, a warning is printed: <code>VORTAC_UNLOAD</code>/tool change will fail until a dock is
+calibrated for it or a dock is freed. The manager also remembers the dock a tool was fetched from
+and parks it back there — the park-dock resolution chain is
+<em>detection map → fetch origin → optional <code>home_dock</code></em>. A tool change before any
+<code>VORTAC_DETECT</code>, for a tool without <code>home_dock</code>, fails with
+"no dock known … — run <code>VORTAC_DETECT</code> (or set <code>home_dock</code> on the tool)" —
+run detection before the first tool change (e.g. in <code>PRINT_START</code>).</p>
 
 <h3>Dock calibration context</h3>
 <p><code>VORTAC_SELECT_DOCK DOCK=dockN</code> runs detection and stores the detected dock/tool
@@ -228,14 +244,29 @@ behavior (rename table, overrides, skip lists, pretty names) is documented in
       <code>vortac_tool</code> section fall back to the namespace's trailing number
       (<code>tool1</code> → 1, else the option is required). Mixing explicit indices with
       auto-numbered includes is unsupported (the counter ignores explicit values).</li>
+  <li><strong>Display-prefix renaming:</strong> every named section gets the DISPLAY prefix
+      <code>&lt;namespace&gt;&lt;tool_index&gt;</code> (<code>[neopixel logo_rgb]</code> →
+      <code>[neopixel miniGrey1_logo_rgb]</code>; <code>miniPink</code> + index 0 →
+      <code>miniPink0_logo_rgb</code>) — the index makes <code>extruder1</code> ↔
+      <code>miniGrey1_*</code> visually matchable in Mainsail/Fluidd. Legacy digit-suffixed
+      namespaces (<code>tool1</code>) stay as-is. Exceptions: <code>[mcu]</code> and
+      <code>[vortac_tool]</code> keep the pure namespace. The display prefix shifts with
+      order-based renumbering — safe, because the renamed hardware sections never hold
+      SAVE_CONFIG data; address them index-proof in macros via
+      <code>{tool.display_name}_…</code>. Full rename table in
+      <a href="configuration.html#include-with">Configuration</a>.</li>
   <li><strong><code>[vortac_tool TN]</code> injection:</strong> the template's
       <code>vortac_tool</code> placeholder is renamed to
-      <code>[vortac_tool &lt;namespace&gt;]</code> (name REPLACED, not prefixed), and
-      <code>tool_index</code>, <code>mcu_name</code> (= namespace), <code>canbus_uuid</code>
+      <code>[vortac_tool &lt;namespace&gt;]</code> (PURE name, no index — this is the persistence
+      anchor for SAVE_CONFIG'd dock positions), and <code>tool_index</code>,
+      <code>mcu_name</code> (= namespace), <code>display_name</code>
+      (<code>&lt;namespace&gt;&lt;index&gt;</code>), <code>canbus_uuid</code>
       (from the static <code>[mcu &lt;namespace&gt;]</code> section) and
       <code>extruder_name</code> (the renamed extruder) are auto-injected. Template values and
-      overrides win over the injection. Set <code>home_dock</code> per tool via
-      <code>overrides:</code>. If SAVE_CONFIG's autosave block already created the section
+      overrides win over the injection. <code>home_dock</code> is optional (docks come from
+      <code>VORTAC_DETECT</code> at runtime); it can be pinned via <code>overrides:</code>
+      (<code>vortac_tool TN.home_dock: dockX</code>). If SAVE_CONFIG's autosave block already
+      created the section
       (persisted <code>params_*</code> dock positions), the injection MERGES into it —
       calibration data is preserved.</li>
   <li><strong>Value rewrite:</strong> any <code>&lt;from&gt;:</code> pin token in option values

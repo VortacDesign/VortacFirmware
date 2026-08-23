@@ -70,6 +70,8 @@ class VortacManager:
         self.tools = {}             # tool_id -> VortacTool
         self.current_tool = None    # VortacTool or None
         self.dock_occupancy = {}    # dock_name -> tool_id or None
+        self.park_dock = {}         # tool_id -> dock to return the held
+                                    # tool to (set on fetch / by detection)
         self.dock_detection_valid = False
         self.calibration_dock = None
         self.calibration_tool = None
@@ -194,11 +196,10 @@ class VortacManager:
                 conflicts.append(
                     f"{tid}: available but has no tool_index (ghost "
                     f"section marked available?)")
-            if not tool.home_dock:
-                conflicts.append(
-                    f"{tid}: available but home_dock is not set — set it "
-                    f"via include_with overrides "
-                    f"(vortac_tool TN.home_dock: dockX)")
+            # home_dock is optional: without it, the first VORTAC_DETECT
+            # establishes each tool's dock (grabbed tool -> first free
+            # calibrated dock); tool changes before that error out with a
+            # "run VORTAC_DETECT" message.
             for field, value in (
                     ('tool_index', tool.tool_index),
                     ('mcu_name', tool.mcu_name),
@@ -418,6 +419,7 @@ class VortacManager:
             self.dock_detection_valid = True
             if len(grabbed_ids) == 1:
                 self.current_tool = self.tools[grabbed_ids[0]]
+                self._assign_park_dock(self.current_tool, detected, gcmd)
             elif len(grabbed_ids) == 0:
                 self.current_tool = None
 
@@ -435,6 +437,44 @@ class VortacManager:
         finally:
             for i in range(self.dock_count):
                 self._set_dock_led_color(i, original_colors[i])
+
+    def _assign_park_dock(self, tool, detected, gcmd):
+        """Detection found `tool` in the grabber. Decide where it will be
+        parked: keep a previous choice (fetch origin or manual home_dock)
+        if that dock is still free, otherwise take the first free dock
+        that has calibrated positions for this tool. Warn if none exists —
+        parking will fail until a dock is calibrated or freed."""
+        tid = tool.tool_id
+        existing = self.park_dock.get(tid) or tool.home_dock
+        if (existing and existing in detected
+                and detected[existing] is None
+                and tool.has_dock_pos(existing)):
+            self.park_dock[tid] = existing
+            return
+        for dock in sorted(detected, key=self._parse_dock_sort_key):
+            if detected[dock] is None and tool.has_dock_pos(dock):
+                self.park_dock[tid] = dock
+                if gcmd is not None:
+                    gcmd.respond_info(
+                        f"Vortac: grabbed tool {tid} will be parked at "
+                        f"{dock} (first free calibrated dock)")
+                return
+        self.park_dock.pop(tid, None)
+        msg = (f"Vortac warning: grabbed tool {tid} has no free dock with "
+               f"calibrated positions — VORTAC_UNLOAD/tool change will "
+               f"fail until a dock is calibrated for it "
+               f"(VORTAC_DOCK_SAVE_POS) or a dock is freed")
+        if gcmd is not None:
+            gcmd.respond_info(msg)
+        else:
+            logging.warning(msg)
+
+    @staticmethod
+    def _parse_dock_sort_key(dock_name):
+        try:
+            return int(dock_name[4:])
+        except (ValueError, IndexError):
+            return 1 << 30
 
     def _respond_detection(self, gcmd, detected, grabbed_ids, missing,
                            ambiguous, debug_lines=None):
@@ -490,20 +530,33 @@ class VortacManager:
         if self.qgl_state is not None:
             gcode.run_script_from_command('VORTAC_GANTRY_FLAT')
 
-        # 3. Park the held tool (if any) at its current dock
+        # 3. Park the held tool (if any). Dock resolution: detection map ->
+        # "where I fetched it from" -> optional manual home_dock.
         if self.current_tool is not None:
-            dock = self._dock_holding(self.current_tool.tool_id) \
-                   or self.current_tool.home_dock
+            tid = self.current_tool.tool_id
+            dock = (self._dock_holding(tid) or self.park_dock.get(tid)
+                    or self.current_tool.home_dock)
+            if dock is None:
+                raise self.printer.command_error(
+                    f"Vortac: no dock known to park {tid} at — run "
+                    f"VORTAC_DETECT (or set home_dock on the tool)")
             self._park_at_dock(self.current_tool, dock, gcmd)
-            self.dock_occupancy[dock] = self.current_tool.tool_id
+            self.dock_occupancy[dock] = tid
+            self.park_dock.pop(tid, None)
             # Parked: if the fetch below fails, we are holding nothing.
             self.current_tool = None
 
         # 4. Pick up the target tool from its current dock
         if target is not None:
             dock = self._dock_holding(target.tool_id) or target.home_dock
+            if dock is None:
+                raise self.printer.command_error(
+                    f"Vortac: no dock known for {target.tool_id} — run "
+                    f"VORTAC_DETECT (or set home_dock on the tool)")
             self._fetch_from_dock(target, dock, gcmd)
             self.dock_occupancy[dock] = None
+            # Remember the origin so the tool returns to the same dock.
+            self.park_dock[target.tool_id] = dock
 
         self.current_tool = target
 
@@ -768,8 +821,10 @@ class VortacManager:
     def cmd_VORTAC_STATUS(self, gcmd):
         cur = self.current_tool.tool_id if self.current_tool else 'None'
         qgl = self.qgl_state.state if self.qgl_state else 'n/a'
-        tools_line = (', '.join(sorted(self.tools.keys()))
-                      if self.tools else '(none registered)')
+        tools_line = (', '.join(
+            f"{tid} (T{tool.tool_index})"
+            for tid, tool in sorted(self.tools.items()))
+            if self.tools else '(none registered)')
         occ = ', '.join(
             f"{d}={tid or 'empty'}"
             for d, tid in sorted(self.dock_occupancy.items()))

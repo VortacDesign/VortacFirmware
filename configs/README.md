@@ -41,8 +41,11 @@ configs/
 ## Tool naming & numbering — the conventions
 
 **The tool's NAME is defined exactly once**: the `[mcu <name>]` section /
-`include_with` namespace (e.g. `miniGrey`). It is also the display name
-dashboards show (`miniGrey_logo_rgb`, `miniGrey_hotend_fan`, …).
+`include_with` namespace (e.g. `miniGrey`). Dashboards show the DISPLAY
+prefix `<name><index>` (`miniGrey1_logo_rgb`, `miniGrey1_hotend_fan`, …) so
+`extruder1` is visually matchable to `miniGrey1_*`. The pure name stays the
+persistence key: `[mcu miniGrey]` and `[vortac_tool miniGrey]` never carry
+the index, so saved dock calibration survives renumbering.
 
 **The tool's NUMBER comes from the include ORDER in `tools.cfg`**: the first
 (uncommented) tool include is `T0`, the next `T1`, and so on. The first tool
@@ -50,10 +53,14 @@ always owns Klipper's primary `[extruder]` and `[fan]` (hardwired by Klipper
 for `M104`/`M106`), so commenting a broken tool out simply renumbers the rest
 — Klipper never sees `[extruder1]` without `[extruder]`.
 
-**The tool's DOCK is physical and never renumbers**: set `home_dock`
-explicitly per tool via the `overrides:` block (`vortac_tool TN.home_dock:
-dockX`). Saved dock positions are keyed by tool name, so they survive
-renumbering too — and a commented-out tool's calibration survives in
+**The tool's DOCK is established at runtime by `VORTAC_DETECT`**: docked
+tools are located via the strobe map, and a grabbed tool is assigned the
+first free dock that has calibrated positions for it (a warning is printed
+if none exists). Run `VORTAC_DETECT` before the first tool change; a manual
+fallback can optionally be pinned per tool via the `overrides:` block
+(`vortac_tool TN.home_dock: dockX`). Saved dock positions are keyed by tool
+name, so they survive renumbering — and a commented-out tool's calibration
+survives in
 `printer.cfg`'s autosave block as a harmless ghost `[vortac_tool <name>]`
 section (loaded as `available: False`) until the tool returns.
 
@@ -71,16 +78,16 @@ every tool change.
    (or start from `tools/tool0.example.cfg`).
 3. **Rename the namespace**: `[mcu myTool]` + `[include_with myTool …]` —
    those two headers are the only places the name appears.
-4. **Set the new `canbus_uuid`** under `[mcu myTool]` and the tool's physical
-   dock in `overrides:` (`vortac_tool TN.home_dock: dockX`).
+4. **Set the new `canbus_uuid`** under `[mcu myTool]`.
 5. **Add `[include tools/myTool.cfg]` to `tools.cfg`** — its position in the
    include list is its tool number. Make sure `dock_count` covers the dock.
 6. **Restart Klipper**. `vortac_manager` refuses to start (with a clear
    message) on duplicated `mcu_name`/`canbus_uuid`/sense pins,
-   non-contiguous tool indices, a missing `home_dock`, or an `mcu_name`
-   without a matching `[mcu …]` section — fix what it names.
+   non-contiguous tool indices, or an `mcu_name` without a matching
+   `[mcu …]` section — fix what it names.
 7. **Verify**: `VORTAC_STATUS` lists both tools; `VORTAC_DETECT DEBUG=1`
-   shows each tool flip only on its own dock's strobe.
+   shows each tool flip only on its own dock's strobe (detection also
+   establishes the dock map used by tool changes).
 8. **Calibrate the dock position** (next section), then `SAVE_CONFIG`.
 
 Why the `[mcu <name>]` section stays in the tool file: Klipper registers MCU
@@ -88,18 +95,20 @@ pin chips before extras like `include_with` run — it cannot be injected.
 
 `include_with` reads the PCB template once per tool, swaps the MCU namespace,
 rewrites every `EBBCan:` pin reference, prefixes named sections with the
-namespace (`[neopixel logo_rgb]` → `[neopixel miniGrey_logo_rgb]` — so LEDs
-are addressable per tool: `SET_LED LED=miniGrey_logo_rgb …`), renames the
+display prefix (`[neopixel logo_rgb]` → `[neopixel miniGrey1_logo_rgb]` — so
+LEDs are addressable per tool: `SET_LED LED=miniGrey1_logo_rgb …`, or
+index-proof in macros via `{tool.display_name}_logo_rgb`), renames the
 Klipper singletons for index ≥ 1 (`[extruder]` → `[extruder1]`, `[fan]` →
-`[fan_generic miniGrey_fan]`), and turns `[vortac_tool TN]` into
-`[vortac_tool miniGrey]`.
+`[fan_generic miniGrey1_fan]`), and turns `[vortac_tool TN]` into
+`[vortac_tool miniGrey]` (pure name — the persistence anchor).
 
 Only `extruder`/`extruder1` stay index-based (hardwired by Klipper), and the
 `T0`/`T1` commands plus `dock0`/`dock1` names are index-based too (slicers
 emit `T<n>`; docks map to LED chain indices). Manager commands accept either
 form: `VORTAC_LOAD TOOL=miniGrey` and `VORTAC_LOAD TOOL=T1` both work. Macros
-can address per-tool hardware uniformly via the tool's `mcu_name`, e.g. in
-`tool_activate_gcode`: `SET_LED LED={tool.mcu_name}_logo_rgb …`. The template
+can address per-tool hardware uniformly via the tool's `display_name`, e.g.
+in `tool_activate_gcode`: `SET_LED LED={tool.display_name}_logo_rgb …`. The
+template
 `[mcu EBBCan]` is skipped with `skip_sections:` because each tool file owns
 its real `[mcu <name>]`.
 
@@ -171,6 +180,7 @@ Typical print start (no tool held yet):
 G28                  # top-home -> flat
 QUAD_GANTRY_LEVEL    # no tool! -> tilted
 BED_MESH_CALIBRATE   # still no tool
+VORTAC_DETECT        # establish the dock map (required before first change)
 T0                   # manager: FLAT -> fetch -> TILT, applies offsets
 # print
 ```

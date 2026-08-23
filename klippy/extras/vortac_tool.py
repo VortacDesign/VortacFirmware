@@ -89,6 +89,18 @@ class VortacTool:
             default_extruder = f"extruder{self.tool_index}"
         self.extruder_name = config.get(
             'extruder_name', default=default_extruder)
+        # Dashboard prefix of this tool's hardware sections
+        # (<name><index>, e.g. miniGrey1 -> miniGrey1_logo_rgb). Injected
+        # by include_with; derived here as fallback for static sections.
+        # NOT the persistence key — that stays the pure section name.
+        if self.mcu_name and re.search(r'\d$', self.mcu_name):
+            default_display = self.mcu_name
+        elif self.mcu_name and self.tool_index is not None:
+            default_display = f"{self.mcu_name}{self.tool_index}"
+        else:
+            default_display = self.mcu_name or self.tool_id
+        self.display_name = config.get(
+            'display_name', default=default_display)
 
         # Tool-change config. home_dock is intentionally NOT derived from
         # tool_index — order-based numbering makes the index unstable while
@@ -193,6 +205,7 @@ class VortacTool:
             'mcu_name': self.mcu_name,
             'canbus_uuid': self.canbus_uuid,
             'extruder_name': self.extruder_name,
+            'display_name': self.display_name,
             'available': self.available,
             'home_dock': self.home_dock,
             'gcode_offset_x': self.gcode_offset_x,

@@ -41,23 +41,32 @@ per-tool overrides, and the gantry/probing workflow.</p>
 <ul>
   <li><strong>Pin rewrite</strong> — every <code>EBBCan:</code> pin reference becomes
       <code>&lt;namespace&gt;:</code> (e.g. <code>miniGrey:</code>).</li>
-  <li><strong>Section prefixing</strong> — every <em>named</em> section gets the namespace as a
-      prefix: <code>[neopixel logo_rgb]</code> → <code>[neopixel miniGrey_logo_rgb]</code>. The
-      namespace doubles as the display name in Mainsail/Fluidd/KlipperScreen, and LEDs become
-      addressable per tool: <code>SET_LED LED=miniGrey_logo_rgb …</code>.</li>
+  <li><strong>Section prefixing</strong> — every <em>named</em> section gets the DISPLAY prefix
+      <code>&lt;namespace&gt;&lt;tool_index&gt;</code>: <code>[neopixel logo_rgb]</code> →
+      <code>[neopixel miniGrey1_logo_rgb]</code>. That is what
+      Mainsail/Fluidd/KlipperScreen show, and the index makes <code>extruder1</code> ↔
+      <code>miniGrey1_*</code> visually matchable. LEDs become addressable per tool:
+      <code>SET_LED LED=miniGrey1_logo_rgb …</code> — or index-proof in macros via
+      <code>{tool.display_name}_logo_rgb</code>. Legacy digit-suffixed namespaces
+      (<code>tool0</code>, <code>tool1</code>) stay as-is (no double index). Exceptions:
+      <code>[mcu &lt;name&gt;]</code> and <code>[vortac_tool &lt;name&gt;]</code> keep the
+      <em>pure</em> namespace.</li>
   <li><strong>Singleton renaming</strong> for <code>tool_index ≥ 1</code> —
       <code>[extruder]</code> → <code>[extruder1]</code>, <code>[fan]</code> →
-      <code>[fan_generic miniGrey_fan]</code>. Tool 0 keeps the primary extruder and the M106 fan.
+      <code>[fan_generic miniGrey1_fan]</code>. Tool 0 keeps the primary extruder and the M106 fan.
       Reference sections (<code>tmcXXXX</code>, <code>verify_heater</code>) follow their target's
       rename, and whole-string section refs in values (<code>heater: extruder</code> →
       <code>heater: extruder1</code>) are fixed up too.</li>
   <li><strong><code>[vortac_tool TN]</code> injection</strong> — the template's
       <code>[vortac_tool TN]</code> placeholder (it carries the sense pins) becomes
-      <code>[vortac_tool &lt;namespace&gt;]</code>, and <code>tool_index</code>,
-      <code>mcu_name</code>, <code>canbus_uuid</code> (from the static <code>[mcu]</code> section)
-      and <code>extruder_name</code> (the renamed extruder: <code>extruder</code> for index 0,
-      <code>extruderN</code> otherwise) are auto-injected. Only <code>home_dock</code> is set per
-      tool, via <code>overrides:</code>.</li>
+      <code>[vortac_tool &lt;namespace&gt;]</code> (PURE name, no index — the persistence anchor
+      for SAVE_CONFIG'd dock positions), and <code>tool_index</code>, <code>mcu_name</code>,
+      <code>display_name</code> (<code>&lt;namespace&gt;&lt;index&gt;</code>, the dashboard prefix
+      of the injected hardware sections), <code>canbus_uuid</code> (from the static
+      <code>[mcu]</code> section) and <code>extruder_name</code> (the renamed extruder:
+      <code>extruder</code> for index 0, <code>extruderN</code> otherwise) are auto-injected. <code>home_dock</code> is optional
+      (docks come from <code>VORTAC_DETECT</code> at runtime); it can be pinned via
+      <code>overrides:</code> (<code>vortac_tool TN.home_dock: dockX</code>).</li>
 </ul>
 
 <div class="table-wrap">
@@ -65,12 +74,13 @@ per-tool overrides, and the gantry/probing workflow.</p>
 <thead><tr><th>Original (template)</th><th>Tool 0 (ns <code>tool0</code>)</th><th>Tool 1 (ns <code>miniGrey</code>)</th></tr></thead>
 <tbody>
 <tr><td><code>[mcu EBBCan]</code></td><td><code>[mcu tool0]</code></td><td><code>[mcu miniGrey]</code></td></tr>
-<tr><td><code>[&lt;head&gt; name]</code> (generic)</td><td><code>[&lt;head&gt; tool0_name]</code></td><td><code>[&lt;head&gt; miniGrey_name]</code></td></tr>
-<tr><td><code>[adxl345 (name)]</code></td><td><code>[adxl345 tool0(_name)]</code></td><td><code>[adxl345 miniGrey(_name)]</code></td></tr>
+<tr><td><code>[vortac_tool &lt;any&gt;]</code></td><td><code>[vortac_tool tool0]</code></td><td><code>[vortac_tool miniGrey]</code></td></tr>
+<tr><td><code>[&lt;head&gt; name]</code> (generic)</td><td><code>[&lt;head&gt; tool0_name]</code></td><td><code>[&lt;head&gt; miniGrey1_name]</code></td></tr>
+<tr><td><code>[adxl345 (name)]</code></td><td><code>[adxl345 tool0(_name)]</code></td><td><code>[adxl345 miniGrey1(_name)]</code></td></tr>
 <tr><td><code>[extruder]</code></td><td><code>[extruder]</code></td><td><code>[extruder1]</code></td></tr>
 <tr><td><code>[tmcXXXX extruder]</code></td><td><code>[tmcXXXX extruder]</code></td><td><code>[tmcXXXX extruder1]</code></td></tr>
 <tr><td><code>[verify_heater extruder]</code></td><td><code>[verify_heater extruder]</code></td><td><code>[verify_heater extruder1]</code></td></tr>
-<tr><td><code>[fan]</code></td><td><code>[fan]</code></td><td><code>[fan_generic miniGrey_fan]</code></td></tr>
+<tr><td><code>[fan]</code></td><td><code>[fan]</code></td><td><code>[fan_generic miniGrey1_fan]</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -103,18 +113,24 @@ per-tool overrides, and the gantry/probing workflow.</p>
 <p>Three conventions link everything:</p>
 <ul>
   <li><strong>The tool's NAME is defined exactly once</strong> — the <code>[mcu &lt;name&gt;]</code>
-      section / <code>include_with</code> namespace (e.g. <code>miniGrey</code>). It doubles as the
-      display name dashboards show (<code>miniGrey_logo_rgb</code>, …).</li>
+      section / <code>include_with</code> namespace (e.g. <code>miniGrey</code>). Dashboards show
+      the DISPLAY prefix <code>&lt;name&gt;&lt;index&gt;</code> (<code>miniGrey1_logo_rgb</code>,
+      <code>miniGrey1_hotend_fan</code>, …) so <code>extruder1</code> is visually matchable to
+      <code>miniGrey1_*</code>; the pure name stays the persistence key
+      (<code>[mcu miniGrey]</code>, <code>[vortac_tool miniGrey]</code>).</li>
   <li><strong>The tool's NUMBER comes from the include ORDER in <code>tools.cfg</code></strong> —
       the first (uncommented) tool include is <code>T0</code>, the next <code>T1</code>, and so on.
       The first tool always owns Klipper's primary <code>[extruder]</code> and <code>[fan]</code>
       (hardwired by Klipper for <code>M104</code>/<code>M106</code>), so commenting a broken tool
       out simply renumbers the rest — Klipper never sees <code>[extruder1]</code> without
       <code>[extruder]</code>.</li>
-  <li><strong>The tool's DOCK is physical and never renumbers</strong> — set
-      <code>home_dock</code> explicitly per tool via the <code>overrides:</code> block
+  <li><strong>The tool's DOCK is established at runtime by <code>VORTAC_DETECT</code></strong> —
+      docked tools are located via the strobe map, and a grabbed tool is assigned the first free
+      dock that has calibrated positions for it (a warning is printed if none exists). Run
+      <code>VORTAC_DETECT</code> before the first tool change; a manual fallback can optionally
+      be pinned per tool via the <code>overrides:</code> block
       (<code>vortac_tool TN.home_dock: dockX</code>). Saved dock positions are keyed by tool name,
-      so they survive renumbering too — and a commented-out tool's calibration survives in
+      so they survive renumbering — and a commented-out tool's calibration survives in
       <code>printer.cfg</code>'s autosave block as a harmless ghost
       <code>[vortac_tool &lt;name&gt;]</code> section (loaded as <code>available: False</code>)
       until the tool returns.</li>
@@ -140,9 +156,9 @@ per-tool overrides, and the gantry/probing workflow.</p>
     those two headers are the only places the name appears.</span></span>
   </label>
   <label class="check"><input type="checkbox" data-ck="setuuid">
-    <span class="check-text"><span class="check-title">Set the new canbus_uuid and the physical dock</span>
-    <span class="check-sub"><code>canbus_uuid</code> under <code>[mcu myTool]</code>;
-    <code>vortac_tool TN.home_dock: dockX</code> in <code>overrides:</code>.</span></span>
+    <span class="check-text"><span class="check-title">Set the new canbus_uuid</span>
+    <span class="check-sub">Under <code>[mcu myTool]</code>. The tool's dock is established at
+    runtime by <code>VORTAC_DETECT</code> — nothing to configure.</span></span>
   </label>
   <label class="check"><input type="checkbox" data-ck="include">
     <span class="check-text"><span class="check-title">Register the tool</span>
@@ -152,13 +168,14 @@ per-tool overrides, and the gantry/probing workflow.</p>
   </label>
   <label class="check"><input type="checkbox" data-ck="restart">
     <span class="check-text"><span class="check-title">Restart Klipper</span>
-    <span class="check-sub">The manager refuses to start on duplicated identities,
-    non-contiguous tool indices, or a missing <code>home_dock</code> — fix what it names.</span></span>
+    <span class="check-sub">The manager refuses to start on duplicated identities or
+    non-contiguous tool indices — fix what it names.</span></span>
   </label>
   <label class="check"><input type="checkbox" data-ck="verify">
     <span class="check-text"><span class="check-title">Verify</span>
     <span class="check-sub"><code>VORTAC_STATUS</code> lists both tools;
-    <code>VORTAC_DETECT DEBUG=1</code> shows each tool flip only on its own dock's strobe.</span></span>
+    <code>VORTAC_DETECT DEBUG=1</code> shows each tool flip only on its own dock's strobe
+    (detection also establishes the dock map used by tool changes).</span></span>
   </label>
   <label class="check"><input type="checkbox" data-ck="dockcal">
     <span class="check-text"><span class="check-title">Calibrate the dock position, then SAVE_CONFIG</span>
@@ -177,20 +194,25 @@ per-tool overrides, and the gantry/probing workflow.</p>
 </div>
 
 <h2 id="pretty-names">Tool names, numbers and what stays index-based</h2>
-<p>The namespace is the display name dashboards show — name the tool after the physical tool
-(<code>miniPink</code>, <code>miniGrey</code>, …) and dashboards show
-<code>miniPink_logo_rgb</code>, <code>miniPink_hotend_fan</code>, etc. Nothing else needs to be
-set: <code>tool_index</code> comes from the include order in <code>tools.cfg</code>, and
-<code>mcu_name</code>/<code>canbus_uuid</code>/<code>extruder_name</code> are auto-injected into
-the tool's <code>[vortac_tool &lt;name&gt;]</code> section.</p>
+<p>Name the tool after the physical tool (<code>miniPink</code>, <code>miniGrey</code>, …) —
+dashboards show the DISPLAY prefix <code>&lt;name&gt;&lt;index&gt;</code>
+(<code>miniPink0_logo_rgb</code>, <code>miniGrey1_hotend_fan</code>, etc.), so
+<code>extruder1</code> is visually matchable to <code>miniGrey1_*</code>. Nothing else needs to
+be set: <code>tool_index</code> comes from the include order in <code>tools.cfg</code>, and
+<code>mcu_name</code>/<code>display_name</code>/<code>canbus_uuid</code>/<code>extruder_name</code>
+are auto-injected into the tool's <code>[vortac_tool &lt;name&gt;]</code> section. The display
+prefix <em>shifts</em> when tools are renumbered (commenting one out) — safe, because those
+injected hardware sections never hold SAVE_CONFIG data; the pure-name sections
+(<code>[mcu &lt;name&gt;]</code>, <code>[vortac_tool &lt;name&gt;]</code>) never carry the
+index.</p>
 <p>Only <code>extruder</code>/<code>extruder1</code> stay index-based (hardwired by Klipper), and
 the <code>T0</code>/<code>T1</code> commands plus <code>dock0</code>/<code>dock1</code> names are
 index-based too (slicers emit <code>T&lt;n&gt;</code>; docks map to LED chain indices). Manager
 commands accept either form: <code>VORTAC_LOAD TOOL=miniGrey</code> and
 <code>VORTAC_LOAD TOOL=T1</code> both work (<code>TOOL=</code> takes the tool name,
 case-insensitive, <code>T&lt;n&gt;</code>, or a bare index). Macros can address per-tool hardware
-uniformly via the tool's <code>mcu_name</code>, e.g. in <code>tool_activate_gcode</code>:
-<code>SET_LED LED={tool.mcu_name}_logo_rgb …</code>.</p>
+index-proof via the tool's <code>display_name</code>, e.g. in <code>tool_activate_gcode</code>:
+<code>SET_LED LED={tool.display_name}_logo_rgb …</code>.</p>
 
 <details class="fold">
   <summary>Legacy: static hand-written <code>[vortac_tool T0]</code> sections</summary>
@@ -212,7 +234,6 @@ uniformly via the tool's <code>mcu_name</code>, e.g. in <code>tool_activate_gcod
 skip_sections:
   mcu EBBCan
 overrides:
-  vortac_tool TN.home_dock: dock0
   extruder.sensor_type: MAX31865
   extruder.sensor_pin: EBBCan: PA4
   extruder.spi_bus: spi1
@@ -256,8 +277,12 @@ overrides:
 <pre><code>G28                  # top-home -> flat
 QUAD_GANTRY_LEVEL    # no tool! -> tilted
 BED_MESH_CALIBRATE   # still no tool
+VORTAC_DETECT        # establish the dock map before the first tool change
 T0                   # manager: FLAT -> fetch -> TILT, applies offsets
 # print</code></pre>
+<p>A tool change before any <code>VORTAC_DETECT</code>, for a tool without a pinned
+<code>home_dock</code>, fails with a clear error ("no dock known … — run
+<code>VORTAC_DETECT</code>") — so run detection in your <code>PRINT_START</code>.</p>
 <p>If Z was re-homed mid-session while a tool is held: <code>VORTAC_UNLOAD</code>, then
 <code>QUAD_GANTRY_LEVEL</code>, then pick the tool back up.</p>
 

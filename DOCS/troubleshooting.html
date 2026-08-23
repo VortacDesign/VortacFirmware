@@ -69,8 +69,7 @@ fix.</p>
     occurrence. With the current conventions the name only appears in <strong>two</strong>
     headers — <code>[mcu &lt;name&gt;]</code> and <code>[include_with &lt;name&gt; …]</code> —
     everything else (sense pins, <code>[vortac_tool &lt;name&gt;]</code>,
-    <code>extruder_name</code>) is injected from the PCB template. Also check the
-    <code>home_dock</code> override still points at the right physical dock.
+    <code>extruder_name</code>) is injected from the PCB template.
     <code>vortac_manager</code> refuses to start on the conflicts it can detect (duplicate
     index/MCU/UUID/sense pins) — fix what it names.</p>
   </div>
@@ -203,6 +202,34 @@ fix.</p>
           <code>[vortac_manager]</code>.</li>
       <li>Run <code>VORTAC_DETECT DEBUG=1</code> for per-strobe detail.</li>
     </ul>
+  </div>
+</details>
+
+<details class="fold" id="no-dock-known">
+  <summary>Tool change fails: <code>no dock known … — run VORTAC_DETECT</code></summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> docks are established at runtime by <code>VORTAC_DETECT</code>
+    (<code>home_dock</code> is only an optional manual fallback), and no detection has run yet —
+    the manager has no dock to fetch the tool from or park it at.</p>
+    <p><strong>Fix:</strong> run <code>VORTAC_DETECT</code> before the first tool change — put it
+    in your <code>PRINT_START</code>. Alternatively, pin a manual fallback on the tool via
+    include_with overrides (<code>vortac_tool TN.home_dock: dockX</code>).</p>
+  </div>
+</details>
+
+<details class="fold" id="no-free-calibrated-dock">
+  <summary>Warning after <code>VORTAC_DETECT</code>: grabbed tool has no free dock with calibrated positions</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> a grabbed tool is assigned the first <em>free</em> dock that has
+    <em>calibrated</em> positions for it (a previous choice — fetch origin or manual
+    <code>home_dock</code> — is kept if still free and calibrated). If every calibrated dock is
+    occupied, or no dock was ever calibrated for this tool, detection warns:
+    <code>VORTAC_UNLOAD</code> / tool changes will fail until a dock is calibrated for it or a
+    dock is freed.</p>
+    <p><strong>Fix:</strong> calibrate a dock position for the tool
+    (<a href="calibration.html#dock-positions">Calibration → Dock positions</a>, or the manual
+    <code>VORTAC_DOCK_SAVE_POS</code> fallback), or free an already-calibrated dock, then re-run
+    <code>VORTAC_DETECT</code>.</p>
   </div>
 </details>
 

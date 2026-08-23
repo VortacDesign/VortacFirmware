@@ -23,7 +23,7 @@ the overview table down.</p>
 <thead><tr><th>Command</th><th>Module</th><th>Purpose</th></tr></thead>
 <tbody>
 <tr><td class="cmd"><code>T0</code>, <code>T1</code>, …</td><td>manager</td><td>full tool change (registered dynamically from each available tool's <code>tool_index</code>)</td></tr>
-<tr><td class="cmd"><code>VORTAC_STATUS</code></td><td>manager</td><td>report current tool, dock map, QGL state</td></tr>
+<tr><td class="cmd"><code>VORTAC_STATUS</code></td><td>manager</td><td>report current tool, dock map, QGL state (tools listed as <code>&lt;name&gt; (T&lt;index&gt;)</code>)</td></tr>
 <tr><td class="cmd"><code>VORTAC_DETECT</code></td><td>manager</td><td>strobe dock Tool_id channels and update the dock map</td></tr>
 <tr><td class="cmd"><code>VORTAC_SELECT_DOCK DOCK=dockN</code></td><td>manager</td><td>detect/select a dock and its tool for calibration</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_CAL_STATUS</code></td><td>manager</td><td>report selected calibration dock/tool</td></tr>
@@ -121,9 +121,15 @@ you use cw/ccw modes.</p>
       index — <code>TOOL=miniGrey</code> and <code>TOOL=T1</code> both work.</li>
   <li>The <code>T&lt;n&gt;</code> commands are registered from each tool's
       <code>tool_index</code>, which comes from the include order in <code>tools.cfg</code> —
-      tool ids are display names like <code>miniGrey</code>.</li>
-  <li><code>VORTAC_DETECT</code> accepts <code>DEBUG=1</code> for verbose per-strobe output —
-      useful when bringing up a new tool.</li>
+      tool ids are names like <code>miniGrey</code>; dashboards show the display prefix
+      <code>&lt;name&gt;&lt;index&gt;</code> (<code>miniGrey1_logo_rgb</code>, …).</li>
+  <li><code>VORTAC_DETECT</code> <strong>establishes the dock map tool changes rely on</strong> —
+      run it before the first tool change (e.g. in <code>PRINT_START</code>). Docked tools come
+      from the strobe map; a grabbed tool is assigned the first free dock with calibrated
+      positions for it. A tool is parked back at the dock it was fetched from (resolution chain:
+      detection map → fetch origin → optional <code>home_dock</code>). It accepts
+      <code>DEBUG=1</code> for verbose per-strobe output — useful when bringing up a new
+      tool.</li>
   <li><code>VORTAC_DOCK_CAL_SAVE</code> refuses while the gantry is <code>tilted</code> or when
       no dock/tool was selected via <code>VORTAC_SELECT_DOCK</code>.</li>
   <li>All probe-based commands (<code>QUAD_GANTRY_LEVEL</code>, <code>BED_MESH_CALIBRATE</code>,

@@ -41,19 +41,24 @@
 #
 # Section-rename rules:
 #
-#   Any tool_index — EVERY named section gets the NAMESPACE as prefix, which
-#   is also what dashboards display (namespace "tool1" -> tool1_logo_rgb,
-#   namespace "miniPink" -> miniPink_logo_rgb):
+#   Any tool_index — EVERY named section gets the DISPLAY prefix
+#   <namespace><tool_index>, which is what dashboards show; the index makes
+#   extruder1 <-> miniGrey1_* visually matchable (namespace "miniPink" +
+#   index 0 -> miniPink0_logo_rgb). Namespaces already ending in a digit
+#   (legacy "tool1") stay as-is. Exceptions: [mcu] and [vortac_tool] keep
+#   the PURE namespace — the vortac_tool section is the persistence anchor
+#   for SAVE_CONFIG'd dock positions and must not shift with renumbering.
 #
 #   [mcu <mcu_from>]     -> [mcu <namespace>]
 #   [vortac_tool <any>]  -> [vortac_tool <namespace>]     (name REPLACED, not
 #                            prefixed — the namespace IS the tool's logical
-#                            name; tool_index, mcu_name, canbus_uuid and
-#                            extruder_name are auto-injected, see below)
-#   [<head> name]        -> [<head> <namespace>_name]     (generic rule:
+#                            name; tool_index, mcu_name, display_name,
+#                            canbus_uuid and extruder_name are
+#                            auto-injected, see below)
+#   [<head> name]        -> [<head> <ns><idx>_name]       (generic rule:
 #                            neopixel, heater_fan, temperature_sensor,
 #                            output_pin, filament_*_sensor, gcode_macro, ...)
-#   [adxl345]            -> [adxl345 <namespace>]
+#   [adxl345]            -> [adxl345 <ns><idx>]
 #   [tmcXXXX <target>]   -> follows <target>'s rename
 #   [verify_heater <t>]  -> follows <t>'s rename
 #
@@ -88,19 +93,34 @@ _TMC_HEADS = ('tmc2209', 'tmc2240', 'tmc2130', 'tmc5160')
 _REFERENCE_HEADS = _TMC_HEADS + ('verify_heater',)
 
 
+def _display_prefix(namespace, idx):
+    """Dashboard prefix for injected hardware sections: <name><index>
+    (miniGrey + 1 -> miniGrey1), so extruder1 visually groups with
+    miniGrey1_* in Mainsail/Fluidd. Namespaces that already end in a digit
+    (legacy tool0/tool1 style) carry their number and stay as-is. The
+    prefix SHIFTS with order-based renumbering — safe, because the renamed
+    hardware sections are runtime-injected and never hold SAVE_CONFIG
+    data; persistence stays keyed to [vortac_tool <name>] (pure name)."""
+    if re.search(r'\d$', namespace):
+        return namespace
+    return f"{namespace}{idx}"
+
+
 def _rename_section(orig, idx, mcu_from, mcu_to):
     parts = orig.split()
     head = parts[0]
     rest = parts[1:]
+    disp = _display_prefix(mcu_to, idx)
 
     # MCU swap is index-independent — that IS the namespace remap.
     if head == 'mcu' and rest and rest[0] == mcu_from:
         return f"mcu {mcu_to}"
 
     # The template's [vortac_tool <placeholder>] becomes THE logical tool
-    # section of this instantiation: the namespace replaces the placeholder
-    # name entirely (the generic prefix rule would yield "miniGrey_TN",
-    # which is not a usable tool name).
+    # section of this instantiation: the PURE namespace replaces the
+    # placeholder name (no index suffix — this section is the persistence
+    # anchor for SAVE_CONFIG'd dock positions and must not shift with
+    # renumbering).
     if head == 'vortac_tool':
         return f"vortac_tool {mcu_to}"
 
@@ -116,16 +136,17 @@ def _rename_section(orig, idx, mcu_from, mcu_to):
     if orig == 'extruder':
         return orig if idx == 0 else f"extruder{idx}"
     if orig == 'fan':
-        return orig if idx == 0 else f"fan_generic {mcu_to}_fan"
+        return orig if idx == 0 else f"fan_generic {disp}_fan"
     if orig == 'adxl345':
-        return f"adxl345 {mcu_to}"
+        return f"adxl345 {disp}"
 
-    # Generic rule, every tool index: ANY named section gets the NAMESPACE
-    # as prefix — the namespace doubles as the display name in Mainsail/
-    # Fluidd/KlipperScreen (namespace "miniPink" -> miniPink_logo_rgb,
-    # miniPink_hotend_fan, miniPink_filament_sensor, ...).
+    # Generic rule, every tool index: ANY named section gets the DISPLAY
+    # prefix (<name><index>) — that is what Mainsail/Fluidd/KlipperScreen
+    # show, and the index makes extruder1 <-> miniGrey1_* visually
+    # matchable ("miniGrey"+1 -> miniGrey1_logo_rgb, miniGrey1_hotend_fan,
+    # miniGrey1_filament_sensor, ...).
     if rest:
-        return f"{head} {mcu_to}_{'_'.join(rest)}"
+        return f"{head} {disp}_{'_'.join(rest)}"
 
     # Unhandled bare singleton ([input_shaper], [firmware_retraction], ...):
     # cannot be namespaced — leave as-is; use skip_sections if it collides.
@@ -346,6 +367,10 @@ def include_with_remap(printer, parent_config, filepath, namespace,
         if orig_sect.split()[0] == 'vortac_tool':
             new_items.setdefault('tool_index', str(tool_index))
             new_items.setdefault('mcu_name', namespace)
+            # Dashboard prefix of this tool's injected hardware sections —
+            # macros address them via {tool.display_name}_logo_rgb etc.
+            new_items.setdefault(
+                'display_name', _display_prefix(namespace, tool_index))
             pc = parent_config.fileconfig
             mcu_sect = f"mcu {namespace}"
             if ('canbus_uuid' not in new_items

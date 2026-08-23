@@ -91,8 +91,9 @@ include ORDER in `tools.cfg` (first include is T0); the tool's NAME is the
 1. Copy a tool file → `tools/<yourToolName>.cfg`
 2. Rename the namespace in the two headers (`[mcu <name>]`,
    `[include_with <name> …]`)
-3. Set the board's `canbus_uuid` (from step 1) and the tool's physical dock
-   (`overrides:` → `vortac_tool TN.home_dock: dock<N>`)
+3. Set the board's `canbus_uuid` (from step 1) — docks are established at
+   runtime by `VORTAC_DETECT` (optional manual fallback:
+   `overrides:` → `vortac_tool TN.home_dock: dock<N>`)
 4. Add `[include tools/<yourToolName>.cfg]` to `tools.cfg` — its position in
    the include list is its tool number
 5. Dock positions are calibrated later at runtime and persisted via
