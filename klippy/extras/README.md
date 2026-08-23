@@ -205,8 +205,16 @@ with `available=True`), the grabber (required), and `[vortac_qgl_state]`
   `tool_deactivate_gcode` → `VORTAC_GANTRY_FLAT` → `_park_at_dock(current)`
   → `_fetch_from_dock(target)` → `VORTAC_GANTRY_TILT` → `SET_GCODE_OFFSET`
   → `tool_activate_gcode`.
+- **Probe guard:** at `klippy:connect` the manager wraps the `[probe]`
+  object's entry points (`start_probe_session` / `run_probe`), so EVERY
+  probe-based operation — `QUAD_GANTRY_LEVEL`, `BED_MESH_CALIBRATE`,
+  `PROBE`, `PROBE_ACCURACY`, `PROBE_CALIBRATE`, … — refuses while a tool
+  is held (logical `current_tool` OR any tool's `grab_sense` reading
+  grabbed). Reason: the probe touch point sits above the nozzle tip when
+  a tool is grabbed, so the nozzle would hit the bed before the probe
+  triggers. Park the tool (`VORTAC_UNLOAD`) before probing.
 - **Dock motion** is hardcoded (constants at top of file):
-  `DOCK_Y_SAFE = 50.0`, `DOCK_Z_CLEARANCE = 4.4`, `DOCK_APPROACH_F = 2000`,
+  `DOCK_Y_SAFE = 50.0`, `DOCK_Z_CLEARANCE = 4.5`, `DOCK_APPROACH_F = 2000`,
   `DOCK_SLIDE_F = 500`. Edit there for global geometry tweaks; per-tool
   tweaks belong in `tool_activate_gcode` / `tool_deactivate_gcode`. Saved dock
   positions are the hooked/engage position; load uses saved Z then lifts to

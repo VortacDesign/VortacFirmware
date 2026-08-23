@@ -140,6 +140,37 @@ MCU shutdown).
 - **Per-tool offsets** → `gcode_offset_x/y/z` on `[vortac_tool Tn]`; manager
   applies them via `SET_GCODE_OFFSET` on every tool change.
 
+## Homing, QGL & probing — the gantry workflow
+
+The 4-Z gantry has two valid states (tracked by `[vortac_qgl_state]`):
+**flat** (top-home/frame reference — dock geometry valid) and **tilted**
+(bed reference — print geometry valid). Rules:
+
+- **Z homing** (against the top/frame) resets the state to `flat` and clears
+  the stored QGL deltas — after any fresh Z home, QGL must be re-run before
+  printing.
+- **All probing requires NO tool held.** The probe touch point sits above the
+  nozzle tip whenever a tool is grabbed, so the nozzle would hit the bed
+  before the probe triggers. `vortac_manager` enforces this at the probe
+  object itself: `QUAD_GANTRY_LEVEL`, `BED_MESH_CALIBRATE`, `PROBE`,
+  `PROBE_ACCURACY`, … all refuse while a tool is held (logical state or
+  `grab_sense`). Park the tool first: `VORTAC_UNLOAD`.
+- **Tool changes handle FLAT/TILT automatically**: the manager flattens the
+  gantry for the dock motion and re-tilts afterwards — no re-probing needed.
+
+Typical print start (no tool held yet):
+
+```
+G28                  # top-home -> flat
+QUAD_GANTRY_LEVEL    # no tool! -> tilted
+BED_MESH_CALIBRATE   # still no tool
+T0                   # manager: FLAT -> fetch -> TILT, applies offsets
+# print
+```
+
+If Z was re-homed mid-session while a tool is held: `VORTAC_UNLOAD`, then
+`QUAD_GANTRY_LEVEL`, then pick the tool back up.
+
 ## Calibrating a dock position
 
 ```
@@ -180,7 +211,11 @@ SAVE_CONFIG
 | `VORTAC_SET_CURRENT_TOOL TOOL=Tn` | manager | set logical current tool without movement |
 | `VORTAC_SET_CURRENT_TOOL CLEAR=1` | manager | clear logical current tool |
 | `VORTAC_DOCK_SAVE_POS TOOL=Tn DOCK=name` | manager | save current hooked/engage XYZ as tool's pos for `name` |
-| `VORTAC_GANTRY_FLAT/TILT/STATUS` | qgl_state | toggle gantry between frame- and bed-flat |
+| `VORTAC_GANTRY_FLAT` / `VORTAC_GANTRY_TILT` | qgl_state | toggle gantry between frame- and bed-flat |
+| `VORTAC_QGL_STATUS` | qgl_state | report gantry state and stored QGL deltas |
+| `VORTAC_SENSE_STATUS` | manager | raw cached dock/grab sense pin states per tool |
+| `VORTAC_SENSE_MONITOR [DURATION=s]` | manager | poll sense states live, report transitions |
+| `VORTAC_DOCK_STROBE DOCK=dockN VALUE=0..1` | manager | manually set one dock strobe channel (debug) |
 | `VORTAC_CALIBRATE [DIR=cw\|ccw\|both]` | grabber | populate AS5047D LUT (default: both directions, reports backlash) |
 | `VORTAC_SET_ZERO` | grabber | set zero offset to current angle |
 | `VORTAC_MOVE TARGET=deg [MODE=shortest\|cw\|ccw]` | grabber | closed-loop angle move |

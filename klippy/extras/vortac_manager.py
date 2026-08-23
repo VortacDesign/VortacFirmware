@@ -143,6 +143,8 @@ class VortacManager:
 
         self.qgl_state = self.printer.lookup_object('vortac_qgl_state', None)
 
+        self._install_probe_guard()
+
         for tool_id, tool in self.tools.items():
             # Default-arg trick to capture tool_id per-iteration in the closure.
             gcode.register_command(
@@ -185,6 +187,48 @@ class VortacManager:
                 "vortac_manager: tool identity conflicts (usually a copied "
                 "tool file that was not fully renamed): "
                 + "; ".join(conflicts))
+
+    # --------------------------------------------------------------------
+    # Probe guard
+    # --------------------------------------------------------------------
+
+    def _install_probe_guard(self):
+        """Refuse every probing operation while a tool is held. The probe
+        touch point sits ABOVE the nozzle tip whenever a tool is grabbed,
+        so any probing move (QUAD_GANTRY_LEVEL, BED_MESH_CALIBRATE, PROBE,
+        PROBE_ACCURACY, ...) would drive the nozzle into the bed before the
+        probe can trigger. All of those paths enter the probe object via
+        start_probe_session (current Klipper) or run_probe (older Klipper),
+        so wrapping both catches everything probe-based."""
+        probe = self.printer.lookup_object('probe', None)
+        if probe is None:
+            return
+        for attr in ('start_probe_session', 'run_probe'):
+            original = getattr(probe, attr, None)
+            if original is None:
+                continue
+
+            def guarded(gcmd, _original=original):
+                self._ensure_no_tool_for_probing()
+                return _original(gcmd)
+
+            setattr(probe, attr, guarded)
+        logging.info("vortac_manager: probe guard installed "
+                     "(probing refused while a tool is held)")
+
+    def _ensure_no_tool_for_probing(self):
+        held = self.current_tool.tool_id if self.current_tool else None
+        grabbed = [tid for tid, tool in sorted(self.tools.items())
+                   if tool.is_grabbed()]
+        if held is None and not grabbed:
+            return
+        what = held or ', '.join(grabbed)
+        raise self.printer.command_error(
+            f"Vortac: probing refused — tool {what} is "
+            f"{'held' if held else 'reported grabbed by grab_sense'}. "
+            f"The probe touch point sits above the nozzle while a tool is "
+            f"grabbed; the nozzle would hit the bed first. Park the tool "
+            f"(VORTAC_UNLOAD) before QGL/bed mesh/probing.")
 
     # --------------------------------------------------------------------
     # Dock / tool detection
