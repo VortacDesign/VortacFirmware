@@ -205,6 +205,24 @@ fix.</p>
   </div>
 </details>
 
+<details class="fold" id="sense-channel-off">
+  <summary>Unhook aborts with <code>dock contact … did not return</code> / dock reads HIGH although the tool sits fine</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> <code>dock_sense</code> is <em>actively pulled low by the dock's
+    green LED channel</em> — with green off, the pad always reads HIGH regardless of pogo
+    contact, and every unhook check misinterprets that as lost contact. Typical trigger: a
+    manual <code>SET_LED</code> (or an LED effect) switched the dock's green channel off
+    between detection and the load.</p>
+    <p><strong>Check:</strong> <code>VORTAC_SENSE_STATUS</code> now reports the per-dock sense
+    channel state (<code>Dock sense channels (G+B)</code>) and warns when any dock has them
+    off. Blue mirrors green, so a dark blue status LED at the dock is the visual giveaway.</p>
+    <p><strong>Fix:</strong> the manager re-asserts G+B on all docks at
+    <code>klippy:ready</code>, before every tool change, and after every
+    <code>VORTAC_DETECT</code> — so on current firmware this recovers automatically. Manually:
+    <code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=1</code>.</p>
+  </div>
+</details>
+
 <details class="fold" id="no-dock-known">
   <summary>Tool change fails: <code>no dock known … — run VORTAC_DETECT</code></summary>
   <div class="fold-body">
