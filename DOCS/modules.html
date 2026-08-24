@@ -131,6 +131,22 @@ INDEX, tool ids are names like <code>miniGrey</code>. <code>TOOL=</code> paramet
 accept the tool name (case-insensitive), <code>T&lt;n&gt;</code>, or a bare index.
 <code>VORTAC_STATUS</code> lists tools as <code>&lt;name&gt; (T&lt;index&gt;)</code>.</p>
 
+<h3>Config options</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>dock_count</code></td><td>(required)</td><td>number of docks (dock0…dockN-1, mapped to LED chain indices)</td></tr>
+<tr><td><code>argb_led</code></td><td>—</td><td>neopixel chain carrying the dock LEDs</td></tr>
+<tr><td><code>argb_channel</code></td><td>green</td><td>sense-pull channel (active-low pad)</td></tr>
+<tr><td><code>argb_status_channel</code></td><td>blue</td><td>status LED, mirrors the sense channel</td></tr>
+<tr><td><code>dock_strobe_time</code></td><td>0.10</td><td>seconds to wait after each strobe change</td></tr>
+<tr><td><code>auto_detect</code></td><td>True</td><td>run <code>VORTAC_DETECT</code> automatically after startup, so the dock map exists without a manual step</td></tr>
+<tr><td><code>auto_detect_delay</code></td><td>3.0</td><td>seconds after <code>klippy:ready</code> before the auto-detect runs (lets the tool boards deliver their first sense readings)</td></tr>
+</tbody>
+</table>
+</div>
+
 <h3>Identity validation</h3>
 <p>Startup fails with a clear message if two tools share a <code>tool_index</code>,
 <code>mcu_name</code>, <code>canbus_uuid</code>, or sense pin, if the non-ghost tools' indices

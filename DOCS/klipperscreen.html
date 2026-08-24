@@ -171,6 +171,10 @@ params: {"script":"VORTAC_DETECT"}</code></pre>
           <code>~/KlipperScreen/</code>.</li>
       <li>A section that is present but invisible is usually an <code>enable:</code> condition
           evaluating false — e.g. the extras are not loaded.</li>
+      <li><em>"Section headers have extra information after brackets"</em> — KlipperScreen's
+          validator also scans <strong>comment</strong> lines for <code>[…]</code> patterns.
+          A comment like <code># see [menu __main vortac]</code> breaks the whole config;
+          write section names in comments without brackets.</li>
       <li>Parse and Jinja errors land in <code>~/printer_data/logs/KlipperScreen.log</code>.</li>
     </ul>
   </div>
@@ -327,8 +331,12 @@ Every element maps to data that <code>get_status</code> already exports.</p>
   <li><strong>Tap logic is contextual:</strong> occupied tile → confirm → <code>T&lt;n&gt;</code>;
       the held tool's tile → confirm → <code>VORTAC_UNLOAD</code>; uncalibrated tile → confirm →
       <code>VORTAC_SELECT_DOCK DOCK=…</code> (calibration flow). One screen, no submenu digging.</li>
-  <li><strong>Action bar:</strong> the five global commands. Everything that moves the machine
-      confirms first; Console jumps to the stock console panel for command output.</li>
+  <li><strong>Action bar:</strong> a contextual primary button ("Park &lt;tool&gt;" while
+      holding, "Load &lt;tool&gt;" when the carriage is empty and exactly one docked tool
+      exists, otherwise it defers to the dock tiles) plus Detect, Engage, Disengage and
+      Save Dock. <em>Confirm policy:</em> Detect runs immediately (harmless — LEDs are
+      restored); everything that moves the machine or writes config confirms first.
+      Disengage keeps its confirm deliberately: disengaging mid-air drops the tool.</li>
   <li><strong>Calibration and grabber details stay in the menu</strong> (LUT sweep, set zero,
       QGL flat/tilt) — the panel is for daily operation, the menu for commissioning.</li>
 </ul>

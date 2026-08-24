@@ -81,6 +81,11 @@ class VortacManager:
             'argb_status_channel', default='blue').lower()
         self.dock_strobe_time = config.getfloat(
             'dock_strobe_time', default=0.10, above=0.0)
+        # Run VORTAC_DETECT automatically once klippy is ready, so the dock
+        # map exists right after every (re)start without a manual step.
+        self.auto_detect = config.getboolean('auto_detect', default=True)
+        self.auto_detect_delay = config.getfloat(
+            'auto_detect_delay', default=3.0, minval=0.0)
 
         # gcode_macro is needed by [vortac_tool Tn]'s activate/deactivate
         # templates; load it eagerly so the order doesn't matter.
@@ -297,6 +302,29 @@ class VortacManager:
             logging.warning(
                 "vortac_manager: could not enable dock sense channels "
                 "at startup: %s", e)
+        if self.auto_detect:
+            # Deferred a few seconds so the tool boards' button callbacks
+            # have delivered their first sense readings. Runs through the
+            # gcode queue (same pattern as [delayed_gcode]) so output lands
+            # in the console and a failure cannot take klippy down.
+            reactor = self.printer.get_reactor()
+            reactor.register_callback(
+                self._auto_detect_cb,
+                reactor.monotonic() + self.auto_detect_delay)
+
+    def _auto_detect_cb(self, eventtime):
+        gcode = self.printer.lookup_object('gcode')
+        try:
+            gcode.run_script("VORTAC_DETECT")
+        except Exception as e:
+            logging.warning("vortac_manager: startup auto-detect failed: %s",
+                            e)
+            try:
+                gcode.respond_info(
+                    f"Vortac: startup auto-detect failed ({e}). "
+                    "Run VORTAC_DETECT manually.")
+            except Exception:
+                pass
 
     # --------------------------------------------------------------------
     # Dock / tool detection

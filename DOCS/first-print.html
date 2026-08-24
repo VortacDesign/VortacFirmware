@@ -88,7 +88,9 @@ held</strong>. Everything probe-based has to happen with an empty carriage, befo
 <pre><code>G28                       # home -> gantry flat
 QUAD_GANTRY_LEVEL         # no tool held -> gantry tilted (print geometry)
 BED_MESH_CALIBRATE        # or: BED_MESH_PROFILE LOAD=default
-VORTAC_DETECT             # dock map (RAM only — gone after every restart)
+VORTAC_DETECT             # dock map — runs automatically ~3 s after startup
+                          # (auto_detect, default on); keep it here as a cheap
+                          # guarantee in case the auto run was interrupted
 T0                        # manager: FLAT -> fetch -> TILT -> offsets -> activate
 # print</code></pre>
 

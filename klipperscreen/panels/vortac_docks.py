@@ -88,12 +88,15 @@ class Panel(ScreenPanel):
         # --- action bar ----------------------------------------------------
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
                           spacing=8, homogeneous=True)
+        # Contextual: "Park <tool>" while holding, "Load <tool>" when the
+        # carriage is empty and exactly one docked tool exists; otherwise it
+        # points at the dock tiles. Label follows the live state.
+        self.btn_primary = Gtk.Button(label="Park / Load")
+        self.btn_primary.set_can_focus(False)
+        self.btn_primary.connect("clicked", self._primary_clicked)
+        actions.add(self.btn_primary)
         actions.add(self._action_button(
-            "home", "Park Tool",
-            "Park the held tool at its dock?", "VORTAC_UNLOAD"))
-        actions.add(self._action_button(
-            "refresh", "Detect",
-            "Strobe the docks and rebuild the dock map?", "VORTAC_DETECT"))
+            "refresh", "Detect", None, "VORTAC_DETECT"))
         actions.add(self._action_button(
             "extrude", "Engage",
             "Rotate the grabber to the engage position?", "VORTAC_ENGAGE"))
@@ -207,6 +210,8 @@ class Panel(ScreenPanel):
         else:
             self.lbl_holding.set_markup("Carriage <b>empty</b>")
 
+        self._update_primary_button(held)
+
         qgl = self.manager.get("qgl_state") or self.qgl.get("state")
         if qgl == "tilted":
             self.lbl_gantry.set_markup(
@@ -225,6 +230,40 @@ class Panel(ScreenPanel):
             self.lbl_detect.set_markup(
                 "Detection: <span foreground='#e8b45a'>stale — run Detect"
                 "</span>")
+
+    def _loadable_tools(self):
+        occupancy = self.manager.get("dock_occupancy") or {}
+        return sorted({t for t in occupancy.values() if t})
+
+    def _update_primary_button(self, held):
+        if held:
+            self.btn_primary.set_label("Park %s" % held)
+            self.btn_primary.set_sensitive(True)
+            return
+        loadable = self._loadable_tools()
+        if len(loadable) == 1:
+            self.btn_primary.set_label("Load %s" % loadable[0])
+            self.btn_primary.set_sensitive(True)
+        elif loadable:
+            self.btn_primary.set_label("Load: tap a dock")
+            self.btn_primary.set_sensitive(False)
+        else:
+            self.btn_primary.set_label("No tool detected")
+            self.btn_primary.set_sensitive(False)
+
+    def _primary_clicked(self, widget):
+        held = self.manager.get("current_tool")
+        if held:
+            self._confirm_script(
+                widget, "Park %s at its dock?" % held, "VORTAC_UNLOAD")
+            return
+        loadable = self._loadable_tools()
+        if len(loadable) == 1:
+            tid = loadable[0]
+            idx = (self.tool_status.get(tid) or {}).get("tool_index")
+            if idx is not None:
+                self._confirm_script(
+                    widget, "Load %s (T%s)?" % (tid, idx), "T%s" % idx)
 
     def _dock_names(self):
         occupancy = self.manager.get("dock_occupancy") or {}
@@ -266,6 +305,7 @@ class Panel(ScreenPanel):
             box.add(tool)
             box.add(sense)
             btn = Gtk.Button(hexpand=True, vexpand=True)
+            btn.set_can_focus(False)
             btn.add(box)
             btn.get_style_context().add_class("vortac-dock")
             btn.connect("clicked", self._tile_clicked, dock)
@@ -305,10 +345,11 @@ class Panel(ScreenPanel):
             tile["tool"].set_markup(
                 "<b><span foreground='%s'>%s</span></b><small>%s</small>"
                 % (color, GLib.markup_escape_text(str(tool_id)), tn))
+            hint = "tap: change" if held else "tap: load"
             tile["sense"].set_markup(
-                "<small>dock %s   grab %s</small>"
+                "<small>dock %s   grab %s   %s</small>"
                 % (self._sense_char(st.get("dock_sense_state")),
-                   self._sense_char(st.get("grab_sense_state"))))
+                   self._sense_char(st.get("grab_sense_state")), hint))
         elif reserved_for:
             # the held tool's return dock — occupancy is None while carried
             ctx.add_class("vortac-dock-held")
@@ -342,8 +383,16 @@ class Panel(ScreenPanel):
             btn = self._gtk.Button(icon, label, "color1")
         except Exception:
             btn = Gtk.Button(label=label)
-        btn.connect("clicked", self._confirm_script, confirm_text, script)
+        btn.set_can_focus(False)
+        if confirm_text is None:
+            btn.connect("clicked", self._run_script, script)
+        else:
+            btn.connect("clicked", self._confirm_script, confirm_text, script)
         return btn
+
+    def _run_script(self, widget, script):
+        self._screen._send_action(
+            widget, "printer.gcode.script", {"script": script})
 
     def _confirm_script(self, widget, text, script):
         self._screen._confirm_send_action(
