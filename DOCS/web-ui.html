@@ -35,6 +35,11 @@ So the Vortac UI is a normal web page that lives next to Mainsail:</p>
 KlipperScreen panel</a> — dock tiles (tap to load/change/park/select), contextual Park/Load
 button, Detect, Engage/Disengage, Save Dock, all with confirm dialogs. Multiple browsers can be
 open at once, independent of the touchscreen.</p>
+<p>Dock supply is mirrored here too (see <a href="modules.html#dock-power">Dock power</a>): a bolt
+next to each dock name, lit while the dock feeds its tool board, and a <em>Power: n/m</em> chip in
+the header. A dock that holds a tool while its supply is off turns red and reads
+<code>NO POWER</code> — tap it to switch the supply back on. Switching a dock <em>off</em> is
+never offered from a UI: it costs an MCU and thus a klippy shutdown.</p>
 
 <h2 id="setup">Setup — step by step</h2>
 
@@ -61,7 +66,7 @@ open at once, independent of the touchscreen.</p>
   </label>
   <label class="check"><input type="checkbox" data-ck="iframe">
     <span class="check-text"><span class="check-title">4 — Embed into Mainsail</span>
-    <span class="check-sub">Settings → Webcams → add webcam, service <em>iFrame</em>,
+    <span class="check-sub">Settings → Webcams → add webcam, service <em>HTML Iframe</em>,
     URL <code>http://&lt;pi&gt;:7130/</code>.</span></span>
   </label>
 </div>
@@ -82,9 +87,16 @@ are already there — only the <code>*://*:7130</code> line is new (match the po
 <code>VORTAC_UI_PORT</code> if you changed it).</p>
 
 <h3 id="mainsail">Step 4 in detail: the Mainsail card</h3>
+<div class="callout warn">
+  <span class="callout-title">Requires a current Mainsail</span>
+  <p>Older Mainsail releases don't have the <em>HTML Iframe</em> service yet — their service
+  list still shows <em>IP Camera</em> in that spot. If <em>HTML Iframe</em> is missing from the
+  dropdown, update Mainsail via the Update Manager and reload the browser (clear cache).</p>
+</div>
 <ol>
   <li>Mainsail → <strong>Settings (gear) → Webcams → Add webcam</strong>.</li>
-  <li>Name: <code>Vortac</code>. Service: <strong>iFrame</strong>. URL:
+  <li>Name: <code>Vortac</code>. Service: <strong>HTML Iframe</strong> (leave the snapshot URL
+      empty — it is not used by this type). URL:
       <code>http://&lt;pi&gt;:7130/</code> (use the same hostname/IP you use for Mainsail —
       the page auto-connects to Moonraker on that same host).</li>
   <li>Save. The card appears wherever webcams show; arrange it on the dashboard via

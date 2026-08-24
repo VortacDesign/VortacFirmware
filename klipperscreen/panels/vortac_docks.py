@@ -24,6 +24,16 @@
 # object-subscription set, so the panel survives KlipperScreen updates that
 # reshuffle subscriptions. Sense semantics (see vortac_tool.py): False =
 # active-low pin asserted (docked / grabbed), True = idle, None = no reading.
+#
+# Dock supply (vortac_manager's dock_power): shown as a bolt glyph in each
+# tile's header row, lit while the dock feeds its tool board. The 1 Hz poll
+# only reliably shows the STEADY state — the handover window during a tool
+# change lasts a second or two and will usually be missed, by design. What
+# matters is the combination "dock holds a tool AND supply off": that strands
+# the tool board (WS2812 keep their state across a klipper restart, so the
+# board would be missing at the next mcu identify), so it gets a red tile and
+# a tap action to switch the supply back on. Switching a dock OFF is never
+# offered here — it costs an mcu and thus a klipper shutdown.
 
 import logging
 import os
@@ -49,6 +59,7 @@ button.vortac-dock-held     { border-color: #f0764f; }
 button.vortac-dock-empty    { border-color: #4a5568; }
 button.vortac-dock-unknown  { border-color: #a06a1f; }
 button.vortac-dock-uncal    { border-color: #c9a75a; }
+button.vortac-dock-fault    { border-color: #e5484d; border-width: 3px; }
 """
 
 
@@ -246,12 +257,31 @@ class Panel(ScreenPanel):
             self.lbl_gantry.set_label("Gantry: –")
 
         if self.manager.get("dock_detection_valid"):
-            self.lbl_detect.set_markup(
-                "Detection: <span foreground='#7fd6a0'>OK</span>")
+            detect = "Detection: <span foreground='#7fd6a0'>OK</span>"
         else:
-            self.lbl_detect.set_markup(
-                "Detection: <span foreground='#e8b45a'>stale — run Detect"
-                "</span>")
+            detect = ("Detection: <span foreground='#e8b45a'>stale — run "
+                      "Detect</span>")
+        # Dock power is only reported when the manager actually manages it,
+        # so an older manager on the pi simply shows nothing extra here.
+        power = self.manager.get("dock_power") or {}
+        if power:
+            live = sum(1 for on in power.values() if on)
+            if self._power_faults():
+                detect += (" · <span foreground='#e5484d'><b>Power: "
+                           "check dock</b></span>")
+            else:
+                detect += " · Power: %d/%d" % (live, len(power))
+        self.lbl_detect.set_markup(detect)
+
+    def _power_faults(self):
+        """Docks that hold a tool but are switched off. That combination
+        strands the tool board: WS2812 keep their state across a klipper
+        restart, so the board would be missing from the CAN bus at the next
+        mcu identify and klipper would refuse to start."""
+        power = self.manager.get("dock_power") or {}
+        occupancy = self.manager.get("dock_occupancy") or {}
+        return sorted(d for d, on in power.items()
+                      if not on and occupancy.get(d))
 
     def _dock_calibrated(self, dock, tool_id):
         # A dock counts as calibrated for a tool once all three axes of its
@@ -337,14 +367,20 @@ class Panel(ScreenPanel):
         self.tiles = {}
         cols = min(MAX_COLS, max(1, len(docks)))
         for i, dock in enumerate(docks):
-            name = Gtk.Label(halign=Gtk.Align.START)
+            name = Gtk.Label(halign=Gtk.Align.START, hexpand=True)
+            power = Gtk.Label(halign=Gtk.Align.END)
             tool = Gtk.Label(halign=Gtk.Align.START)
             sense = Gtk.Label(halign=Gtk.Align.START)
             hint = Gtk.Label(halign=Gtk.Align.START)
             for lbl in (name, tool, sense, hint):
                 lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            # Dock name left, supply glyph right — the border colour stays
+            # reserved for occupancy, which is an orthogonal dimension.
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            top.add(name)
+            top.pack_end(power, False, False, 0)
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            box.add(name)
+            box.add(top)
             box.add(tool)
             box.add(sense)
             box.pack_end(hint, False, False, 0)
@@ -354,7 +390,7 @@ class Panel(ScreenPanel):
             btn.get_style_context().add_class("vortac-dock")
             btn.connect("clicked", self._tile_clicked, dock)
             self.grid.attach(btn, i % cols, i // cols, 1, 1)
-            self.tiles[dock] = {"btn": btn, "name": name,
+            self.tiles[dock] = {"btn": btn, "name": name, "power": power,
                                 "tool": tool, "sense": sense, "hint": hint}
         self.grid.show_all()
 
@@ -367,6 +403,18 @@ class Panel(ScreenPanel):
             return "○"
         return "–"
 
+    def _power_markup(self, dock):
+        """Supply glyph for one dock: lit bolt = the dock feeds its tool
+        board, dimmed = contacts dead. Empty string when the manager does not
+        manage the supply at all (mode off, or an older manager on the pi),
+        so the tile silently degrades instead of lying."""
+        power = self.manager.get("dock_power") or {}
+        if dock not in power:
+            return ""
+        if power[dock]:
+            return "<small><span foreground='#7fd6a0'>⚡</span></small>"
+        return "<small><span foreground='#4a5568'>⚡</span></small>"
+
     def _update_tile(self, dock, tool_id, held, reserved_for=None):
         tile = self.tiles.get(dock)
         if tile is None:
@@ -375,11 +423,28 @@ class Panel(ScreenPanel):
         ctx = tile["btn"].get_style_context()
         for cls in ("vortac-dock-occupied", "vortac-dock-held",
                     "vortac-dock-empty", "vortac-dock-unknown",
-                    "vortac-dock-uncal"):
+                    "vortac-dock-uncal", "vortac-dock-fault"):
             ctx.remove_class(cls)
 
         tile["name"].set_markup(
             "<small>%s</small>" % GLib.markup_escape_text(dock.upper()))
+        tile["power"].set_markup(self._power_markup(dock))
+
+        # A dock holding a tool with its supply off strands that tool board:
+        # the LED keeps its state across a klipper restart, so the board would
+        # be missing at the next mcu identify. Loud, and tappable to fix.
+        if dock in self._power_faults():
+            ctx.add_class("vortac-dock-fault")
+            tile["tool"].set_markup(
+                "<b><span foreground='#e5484d'>%s</span></b> "
+                "<small>· NO POWER</small>"
+                % GLib.markup_escape_text(str(tool_id or "?")))
+            tile["sense"].set_markup(
+                "<small>dock %s   grab %s</small>"
+                % (self._sense_char(st.get("dock_sense_state")),
+                   self._sense_char(st.get("grab_sense_state"))))
+            tile["hint"].set_markup("<small>tap: switch power on</small>")
+            return
 
         if tool_id:
             idx = st.get("tool_index")
@@ -485,6 +550,17 @@ class Panel(ScreenPanel):
         tool_id = occupancy.get(dock)
         held = self.manager.get("current_tool")
         park_map = self.manager.get("park_dock") or {}
+        if dock in self._power_faults():
+            # Only ever offer switching a dock ON from here. Switching an
+            # occupied dock OFF drops its board off the CAN bus and takes
+            # klipper down — that stays in the console behind FORCE=1.
+            self._confirm_script(
+                widget,
+                "%s holds %s but its supply is switched off — that board "
+                "will be missing after the next restart.\nSwitch the dock "
+                "supply back on?" % (dock, tool_id or "a tool"),
+                "VORTAC_DOCK_POWER DOCK=%s VALUE=1" % dock)
+            return
         if held and park_map.get(held) == dock and not tool_id:
             self._confirm_script(
                 widget, "Park %s at %s?" % (held, dock), "VORTAC_UNLOAD")

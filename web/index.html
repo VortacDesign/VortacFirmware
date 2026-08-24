@@ -69,6 +69,12 @@
   .dock.empty .tname { color: #4a5568; font-weight: 600; font-style: italic; }
   .dock.unknown { border-color: var(--amber-b); }
   .dock.unknown .tname { color: var(--amber); }
+  /* dock holds a tool but its supply is off — strands the tool board */
+  .dock.nopower { border-color: #e5484d; border-width: 2px; }
+  .dock.nopower .tname { color: #e5484d; }
+  .dock .bolt { font-size: 11px; margin-left: 4px; }
+  .dock .bolt.on { color: var(--green); }
+  .dock .bolt.off { color: #4a5568; }
   .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
     background: #3a4657; margin: 0 2px 1px 6px; }
   .dot.on { background: #5aa9e8; box-shadow: 0 0 5px #5aa9e8; }
@@ -111,6 +117,7 @@
   <span class="chip" id="chip-hold">Carriage: –</span>
   <span class="chip" id="chip-qgl">Gantry: –</span>
   <span class="chip" id="chip-detect">Detection: –</span>
+  <span class="chip" id="chip-power" hidden>Power: –</span>
   <span class="chip" id="conn">connecting…</span>
 </div>
 
@@ -283,12 +290,36 @@ document.getElementById("btn-primary").onclick = () => {
     confirmThen(`Load ${l[0]} (T${toolIndex(l[0])})?`, "T" + toolIndex(l[0]));
 };
 
+// Docks that hold a tool while their supply is switched off. WS2812 keep
+// their state across a klipper restart, so that board would be missing at the
+// next mcu identify and klipper would refuse to start.
+function powerFaults() {
+  const power = state.manager.dock_power || {};
+  const occ = state.manager.dock_occupancy || {};
+  return Object.keys(power).filter((d) => !power[d] && occ[d]);
+}
+
+// Supply glyph. Empty string when the manager does not manage the supply at
+// all, so the tile degrades silently instead of lying.
+function boltMarkup(dock) {
+  const power = state.manager.dock_power || {};
+  if (!(dock in power)) return "";
+  return `<span class="bolt ${power[dock] ? "on" : "off"}">⚡</span>`;
+}
+
 function tileClick(dock) {
   const occ = state.manager.dock_occupancy || {};
   const held = state.manager.current_tool;
   const parkMap = state.manager.park_dock || {};
   const tool = occ[dock];
-  if (held && parkMap[held] === dock && !tool) {
+  if (powerFaults().includes(dock)) {
+    // Only ever offer switching a dock ON here. Switching an occupied dock
+    // OFF drops its board off the CAN bus and takes klipper down — that
+    // stays in the console behind FORCE=1.
+    confirmThen(
+      `${dock} holds ${tool || "a tool"} but its supply is switched off — that board will be missing after the next restart.\nSwitch the dock supply back on?`,
+      "VORTAC_DOCK_POWER DOCK=" + dock + " VALUE=1");
+  } else if (held && parkMap[held] === dock && !tool) {
     confirmThen(`Park ${held} at ${dock}?`, "VORTAC_UNLOAD");
   } else if (tool) {
     const idx = toolIndex(tool);
@@ -346,6 +377,18 @@ function render() {
   const dchip = document.getElementById("chip-detect");
   dchip.textContent = m.dock_detection_valid ? "Detection: OK" : "Detection: stale — run Detect";
   dchip.className = "chip " + (m.dock_detection_valid ? "ok" : "warn");
+  const pchip = document.getElementById("chip-power");
+  const power = m.dock_power || {};
+  const faults = powerFaults();
+  if (!Object.keys(power).length) {
+    pchip.hidden = true;
+  } else {
+    pchip.hidden = false;
+    const live = Object.values(power).filter(Boolean).length;
+    pchip.textContent = faults.length
+      ? "Power: check dock" : `Power: ${live}/${Object.keys(power).length}`;
+    pchip.className = "chip " + (faults.length ? "warn" : "");
+  }
 
   // docks
   const wrap = document.getElementById("docks");
@@ -358,7 +401,12 @@ function render() {
       const tool = occ[dock];
       const st = state.toolStatus[tool || (parkMap[held] === dock ? held : "")] || {};
       let cls, body, hint;
-      if (tool) {
+      if (faults.includes(dock)) {
+        cls = "nopower";
+        body = `<span class="tname">${esc(tool || "?")}<small style="color:var(--muted)"> · NO POWER</small></span>
+                <span class="sense">dock${senseDot(st.dock_sense_state)} grab${senseDot(st.grab_sense_state, true)}</span>`;
+        hint = "tap: switch power on";
+      } else if (tool) {
         cls = tool === held ? "held" : "occupied";
         const idx = toolIndex(tool);
         body = `<span class="tname">${esc(tool)}<small style="color:var(--muted)">${idx != null ? " · T" + idx : ""}</small></span>
@@ -376,7 +424,7 @@ function render() {
         hint = "tap: select for calibration";
       }
       return `<button class="dock ${cls}" data-dock="${dock}" ${ready ? "" : "disabled"}>
-                <span class="dname">${esc(dock)}</span>${body}
+                <span class="dname">${esc(dock)}${boltMarkup(dock)}</span>${body}
                 <span class="hint">${hint}</span>
               </button>`;
     }).join("");

@@ -23,8 +23,8 @@ the overview table down.</p>
 <thead><tr><th>Command</th><th>Module</th><th>Purpose</th></tr></thead>
 <tbody>
 <tr><td class="cmd"><code>T0</code>, <code>T1</code>, …</td><td>manager</td><td>full tool change (registered dynamically from each available tool's <code>tool_index</code>)</td></tr>
-<tr><td class="cmd"><code>VORTAC_STATUS</code></td><td>manager</td><td>report current tool, dock map, QGL state (tools listed as <code>&lt;name&gt; (T&lt;index&gt;)</code>)</td></tr>
-<tr><td class="cmd"><code>VORTAC_DETECT</code></td><td>manager</td><td>strobe dock sense channels (G+B) and update the dock map</td></tr>
+<tr><td class="cmd"><code>VORTAC_STATUS</code></td><td>manager</td><td>report current tool, dock map, dock power, status-LED mode, QGL state (tools listed as <code>&lt;name&gt; (T&lt;index&gt;)</code>)</td></tr>
+<tr><td class="cmd"><code>VORTAC_DETECT</code></td><td>manager</td><td>strobe the dock sense pull and update the dock map</td></tr>
 <tr><td class="cmd"><code>VORTAC_SELECT_DOCK DOCK=dockN</code></td><td>manager</td><td>detect/select a dock and its tool for calibration</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_CAL_STATUS</code></td><td>manager</td><td>report selected calibration dock/tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_CAL_SAVE</code></td><td>manager</td><td>save current hooked/engage XYZ for the selected dock/tool</td></tr>
@@ -35,7 +35,10 @@ the overview table down.</p>
 <tr><td class="cmd"><code>VORTAC_DOCK_SAVE_POS TOOL=&lt;name&gt;|Tn DOCK=dockN</code></td><td>manager</td><td>save current hooked/engage XYZ as tool's position for the dock (requires gantry flat)</td></tr>
 <tr><td class="cmd"><code>VORTAC_SENSE_STATUS</code></td><td>manager</td><td>raw cached dock/grab sense pin states per tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_SENSE_MONITOR [DURATION=s]</code></td><td>manager</td><td>poll sense states live, report transitions</td></tr>
-<tr><td class="cmd"><code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=0..1</code></td><td>manager</td><td>manually set one dock's sense channels G+B (debug)</td></tr>
+<tr><td class="cmd"><code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=0..1</code></td><td>manager</td><td>manually set one dock's sense pull (debug)</td></tr>
+<tr><td class="cmd"><code>VORTAC_DOCK_POWER</code></td><td>manager</td><td>report the supply state of every dock</td></tr>
+<tr><td class="cmd"><code>VORTAC_DOCK_POWER DOCK=dockN VALUE=0|1 [ONLY=1] [FORCE=1]</code></td><td>manager</td><td>override one dock's supply; <code>ONLY=1</code> sets every other dock the opposite way (UUID isolation), <code>FORCE=1</code> is required to de-energize a dock that holds a tool <em>or whose occupancy is not trustworthy</em> (no detection yet, or an unresolved dock) &mdash; cutting a parked board's supply drops it off the CAN bus and shuts klippy down</td></tr>
+<tr><td class="cmd"><code>VORTAC_STATUS_LED [MODE=sense|power|detected]</code></td><td>manager</td><td>report or switch what the dock status LED shows (runtime only; <code>argb_status_mode</code> is the persistent setting)</td></tr>
 <tr><td class="cmd"><code>VORTAC_GANTRY_FLAT</code> / <code>VORTAC_GANTRY_TILT</code></td><td>qgl_state</td><td>toggle gantry between frame-flat and bed-flat</td></tr>
 <tr><td class="cmd"><code>VORTAC_QGL_STATUS</code></td><td>qgl_state</td><td>report gantry state and stored QGL deltas</td></tr>
 <tr><td class="cmd"><code>VORTAC_CALIBRATE [DIR=cw|ccw|both]</code></td><td>grabber</td><td>populate the AS5047D LUT (default: both directions, reports backlash)</td></tr>

@@ -552,7 +552,9 @@ the button falls back to a stock icon.</p>
   <li><strong>Header:</strong> held tool (<code>current_tool</code>, or "Carriage empty"),
       gantry state (<code>qgl_state</code> — green when TILTED, amber when FLAT during
       printing hours), and a detection-freshness chip (<code>dock_detection_valid</code>) that
-      turns amber after a restart until <code>VORTAC_DETECT</code> ran.</li>
+      turns amber after a restart until <code>VORTAC_DETECT</code> ran, followed by a
+      <em>Power: n/m</em> counter of energized docks (only when the manager actually manages the
+      dock supply, see <a href="modules.html#dock-power">Dock power</a>).</li>
   <li><strong>One tile per dock</strong> (grid grows with <code>dock_count</code>). Tile state
       from <code>dock_occupancy</code> + per-tool <code>dock_sense_state</code>/
       <code>grab_sense_state</code>:
@@ -560,7 +562,17 @@ the button falls back to a stock icon.</p>
       tool's origin dock, dashed = calibrated but empty, amber = no calibrated position yet.
       The two small dots mirror the raw sense pins — the live wiring truth, invaluable when a
       tile disagrees with reality. While a tool is carried, its return dock is marked
-      "on carriage" (from the manager's <code>park_dock</code> status export).</li>
+      "on carriage" (from the manager's <code>park_dock</code> status export). A bolt glyph in the
+      tile header shows the dock supply: lit = the dock feeds its tool board, dimmed = contacts
+      dead, absent = the manager does not manage the supply (so the tile degrades silently
+      against an older manager instead of lying).</li>
+  <li><strong>Red tile = <code>NO POWER</code>:</strong> the dock holds a tool while its supply is
+      off. That combination strands the tool board — the LED keeps its state across a klipper
+      restart, so the board would be missing at the next mcu identify — and it is the one power
+      state worth shouting about, so it overrides the normal tile rendering. Tapping it offers to
+      switch the supply back on. Switching a dock <em>off</em> is deliberately never offered here:
+      it costs an MCU and thus a klipper shutdown, and stays in the console behind
+      <code>FORCE=1</code>.</li>
   <li><strong>Tap logic is contextual:</strong> occupied + calibrated tile → confirm →
       <code>T&lt;n&gt;</code>; the held tool's tile → confirm → <code>VORTAC_UNLOAD</code>;
       occupied but <em>uncalibrated</em> tile (amber, "not calibrated" — the tool has no saved
@@ -587,8 +599,11 @@ the button falls back to a stock icon.</p>
   <p>The panel answers the three questions you actually walk to the printer with — <em>what is
   on the carriage, what is in which dock, is the state trustworthy</em> — without touching
   anything. Every action is one tap plus one confirm, with the confirm carrying the concrete
-  consequence ("Run a tool change to T0?"). Diagnostic truth (sense dots) sits directly on the
-  thing it describes instead of in a separate status page.</p>
+  consequence ("Run a tool change to T0?"). Diagnostic truth (sense dots, supply glyph) sits
+  directly on the thing it describes instead of in a separate status page.</p>
+  <p>One honest limitation: the panel polls at 1&nbsp;Hz, and the supply handover during a tool
+  change lasts a second or two — the glyph will usually miss it. It is a steady-state display by
+  design; what matters is whether a parked tool has power, not watching the switch happen.</p>
 </div>
 
 <h2 id="outlook">5 — Outlook: a real Vortac UI</h2>

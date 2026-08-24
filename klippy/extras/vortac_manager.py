@@ -18,11 +18,42 @@
 # VORTAC_DETECT uses ARGB strobe-by-subtraction to populate the dock
 # occupancy map at runtime instead of relying only on the home_dock bootstrap.
 #
-# Dock ARGB channel semantics: red = power feed (never touched), green =
-# pulls the dock_sense pad active low, blue = status LED mirroring green.
-# dock_sense readings are ONLY valid while a dock's green channel is on —
-# outside of the detection strobe, ALL docks keep G+B on, and every
-# sense-dependent operation re-asserts that first (_ensure_sense_active).
+# Dock ARGB channel roles (all three are driven from _apply_dock_leds):
+#   green = pulls the dock_sense pad active low. dock_sense readings are ONLY
+#           valid while this channel is on — outside of the detection strobe
+#           every dock keeps it on, and every sense-dependent operation
+#           re-asserts it first (_ensure_sense_active).
+#   red   = gates the tool board's supply through the dock pogos. INVERTED on
+#           Vortac hardware: red HIGH cuts the supply, red 0.0 = powered. That
+#           polarity is a hard requirement, not a preference — see below.
+#   blue  = status LED, driven by argb_status_mode (sense | power | detected).
+#
+# DARK POWER MANAGEMENT (dock_power_mode)
+# The pogo contact between tool board and dock is made and broken by the Y
+# slide at the dock — the spring-loaded dock board rides along through the
+# whole Z travel, so Z never opens it. Every supply switch therefore brackets
+# a Y move, never a Z move:
+#   park  : slide in (contact closes dead) -> verify dock_sense -> power ON
+#           -> checked Z drop -> disengage -> slide out
+#   fetch : slide in -> engage -> checked Z lift -> verify grab_sense
+#           -> power OFF -> slide out (contact opens dead)
+# In both cases the tool board is fed from the other side while the dock side
+# switches: the grabber carries it during fetch, the dock carries it after
+# park. There is never a moment where both feeds are down.
+#
+# HARD CONSTRAINT: dock_sense/grab_sense live on the TOOL mcu, and Klipper has
+# no notion of an optional mcu. A tool board that goes dark drops off the CAN
+# bus and takes klippy down with it. Hence:
+#   - only a dock POSITIVELY known to be empty is ever de-energized;
+#     anything uncertain stays live (_policy_power).
+#   - the unpowered state must be the LED's HIGH state (dock_power_invert),
+#     because klippy:mcu_identify runs BEFORE klippy:connect ever programs the
+#     neopixel — at startup the tool boards must already be alive, so "no LED
+#     data yet" has to mean "powered".
+#   - WS2812 latch their last value across a klippy RESTART, so RESTART and
+#     FIRMWARE_RESTART are wrapped to re-energize every dock first
+#     (_install_restart_guard). A full power cycle clears the latch and is the
+#     unconditional recovery path.
 
 import logging
 import re
@@ -70,17 +101,77 @@ class VortacManager:
 
         self.dock_count = config.getint('dock_count', minval=1)
         self.argb_led = config.get('argb_led', default=None)
-        # Dock ARGB channel semantics (per dock LED index):
-        #   red   = Sicherung/power feed for the tool board — NEVER touched
-        #   green = pulls the dock_sense pad active low (sense channel);
-        #           sense logic only works while this channel is ON
-        #   blue  = status LED, always switched in parallel with green so
-        #           the active sense logic is visible at the dock
+        # See the channel-role block at the top of this file.
         self.argb_channel = config.get('argb_channel', default='green').lower()
         self.argb_status_channel = config.get(
             'argb_status_channel', default='blue').lower()
+        # What the status LED shows:
+        #   sense    = mirrors the sense pull (strobes along with detection)
+        #   power    = lit while the dock feeds the tool board (inverse of red)
+        #   detected = full for a detected tool, dim for a confirmed empty
+        #              dock, off while the dock map is not trustworthy
+        self.argb_status_mode = config.getchoice(
+            'argb_status_mode',
+            {m: m for m in ('sense', 'power', 'detected')}, 'sense')
+        self.argb_status_dim = config.getfloat(
+            'argb_status_dim', default=0.15, minval=0.0, maxval=1.0)
         self.dock_strobe_time = config.getfloat(
             'dock_strobe_time', default=0.10, above=0.0)
+
+        # --- dock power (dark power management) -------------------------
+        #   off       = never touch the power channel
+        #   occupancy = de-energize docks positively known to be empty
+        #   handover  = additionally cut the supply before the fetch backout,
+        #               so the pogos separate dead (needs the grabber to feed
+        #               the held tool — verified at runtime, see
+        #               _power_off_before_backout)
+        self.dock_power_mode = config.getchoice(
+            'dock_power_mode',
+            {m: m for m in ('off', 'occupancy', 'handover')}, 'off')
+        self.dock_power_channel = config.get(
+            'dock_power_channel', default='red').lower()
+        # True (default, Vortac hardware): channel HIGH cuts the supply and
+        # 0.0 means powered. Do not flip this without reading the startup
+        # ordering note at the top of this file.
+        self.dock_power_invert = config.getboolean(
+            'dock_power_invert', default=True)
+        self.dock_power_settle = config.getfloat(
+            'dock_power_settle', default=0.25, minval=0.0)
+        # Channel names are only dereferenced at runtime (_channel_index),
+        # and the klippy:ready reconcile downgrades that failure to a log
+        # warning — validate here so a typo is a startup error instead of a
+        # printer that silently runs without sense/power management.
+        _channels = ('red', 'green', 'blue', 'white')
+        if self.argb_channel not in _channels:
+            raise config.error(
+                f"vortac_manager: unknown argb_channel "
+                f"'{self.argb_channel}' (expected one of "
+                f"{', '.join(_channels)})")
+        for _name, _value in (
+                ('argb_status_channel', self.argb_status_channel),
+                ('dock_power_channel', self.dock_power_channel)):
+            if _value not in _channels and _value not in ('', 'none'):
+                raise config.error(
+                    f"vortac_manager: unknown {_name} '{_value}' "
+                    f"(expected one of {', '.join(_channels)}, or none)")
+        if self.dock_power_mode != 'off' and (
+                not self.argb_led
+                or self.dock_power_channel in ('', 'none')):
+            raise config.error(
+                f"vortac_manager: dock_power_mode "
+                f"'{self.dock_power_mode}' needs argb_led and a "
+                f"dock_power_channel — without them no supply can actually "
+                f"be switched and the mode would silently do nothing")
+        if self.dock_power_channel not in ('', 'none'):
+            for name, other in (('argb_channel', self.argb_channel),
+                                ('argb_status_channel',
+                                 self.argb_status_channel)):
+                if self.dock_power_channel == other:
+                    raise config.error(
+                        f"vortac_manager: dock_power_channel "
+                        f"'{self.dock_power_channel}' collides with {name} — "
+                        f"the supply gate and the sense/status LED cannot "
+                        f"share one channel")
         # Run VORTAC_DETECT automatically once klippy is ready, so the dock
         # map exists right after every (re)start without a manual step.
         self.auto_detect = config.getboolean('auto_detect', default=True)
@@ -102,6 +193,21 @@ class VortacManager:
         self.calibration_tool = None
         self.grabber = None
         self.qgl_state = None
+        # Docks whose occupancy the last detection could not pin down
+        # (ambiguous, or some tool went unaccounted for). Never de-energized,
+        # and shown as "off" by the 'detected' status mode.
+        self.dock_uncertain = set()
+        # Tool sections klippy needs on the CAN bus but this module cannot
+        # track (unavailable, yet their [mcu ...] is included). Detection can
+        # never locate them, so no dock may ever be de-energized.
+        self.unmanaged_tools = []
+        # Transient supply overrides during a handover, dock -> bool. Takes
+        # precedence over the occupancy-derived policy.
+        self.dock_power_override = {}
+        # Set once if the dock's sense pull turns out to die with the dock
+        # supply — then dock_sense cannot be trusted while the dock is dead
+        # and the dead-break half of the handover is disabled.
+        self.sense_needs_dock_power = False
 
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command(
@@ -129,6 +235,14 @@ class VortacManager:
         gcode.register_command(
             'VORTAC_DOCK_STROBE', self.cmd_VORTAC_DOCK_STROBE,
             desc="Manually set one dock strobe channel for debugging")
+        gcode.register_command(
+            'VORTAC_DOCK_POWER', self.cmd_VORTAC_DOCK_POWER,
+            desc="Report or override the dock supply "
+                 "(DOCK=dockN VALUE=0|1 [ONLY=1] [FORCE=1])")
+        gcode.register_command(
+            'VORTAC_STATUS_LED', self.cmd_VORTAC_STATUS_LED,
+            desc="Switch what the dock status LED shows "
+                 "(MODE=sense|power|detected)")
         gcode.register_command(
             'VORTAC_SELECT_DOCK', self.cmd_VORTAC_SELECT_DOCK,
             desc="Detect/select a dock for calibration")
@@ -170,10 +284,34 @@ class VortacManager:
             if not getattr(obj, 'available', False):
                 logging.info(
                     "vortac_manager: skipping %s (not available)", name)
+                # An unavailable tool whose board is still on the bus is one
+                # klippy REQUIRES but this module can never account for:
+                # detection cannot see it, so its dock must never be
+                # de-energized. Distinguishing that from a harmless ghost (a
+                # commented-out tool file, whose [mcu ...] is gone too) needs
+                # two signals, because either one alone gets it wrong:
+                #   - a resolvable mcu_name proves the board is configured,
+                #     but a typo'd/absent mcu_name on a real disabled tool
+                #     would slip through;
+                #   - a canbus_uuid is only ever injected by include_with
+                #     from a live tool file, so it catches exactly that case,
+                #     while an old-scheme ghost ([vortac_tool T1]) has none
+                #     even though it does derive a default mcu_name.
+                mcu_name = getattr(obj, 'mcu_name', None)
+                has_mcu = bool(mcu_name) and self.printer.lookup_object(
+                    f'mcu {mcu_name}', None) is not None
+                if has_mcu or getattr(obj, 'canbus_uuid', ''):
+                    self.unmanaged_tools.append(obj.tool_id)
                 continue
             self.tools[obj.tool_id] = obj
             if obj.home_dock:
                 self.dock_occupancy.setdefault(obj.home_dock, obj.tool_id)
+
+        if self.unmanaged_tools:
+            logging.warning(
+                "vortac_manager: %s unavailable but their mcu is live — dock "
+                "power will stay on everywhere, since detection cannot tell "
+                "which dock holds them", ', '.join(self.unmanaged_tools))
 
         self._validate_tools(indexed_tools)
 
@@ -185,6 +323,7 @@ class VortacManager:
         self.qgl_state = self.printer.lookup_object('vortac_qgl_state', None)
 
         self._install_probe_guard()
+        self._install_restart_guard()
 
         for tool_id, tool in self.tools.items():
             # The gcode command is T<tool_index> (what slicers emit), NOT the
@@ -279,6 +418,52 @@ class VortacManager:
         logging.info("vortac_manager: probe guard installed "
                      "(probing refused while a tool is held)")
 
+    # --------------------------------------------------------------------
+    # Restart guard
+    # --------------------------------------------------------------------
+
+    def _install_restart_guard(self):
+        """Energize every dock before a klippy restart.
+
+        WS2812 hold their last latched value across a klippy or firmware
+        restart, so a dock left dead would still be dead during the next
+        klippy:mcu_identify — and its tool board would be missing from the
+        CAN bus before any Python code gets a chance to switch it back on.
+        Only a full power cycle clears the latch by itself, so the graceful
+        restart paths are wrapped here.
+
+        Limitation worth knowing: in a SHUTDOWN state this guard is a no-op.
+        SET_LED is not registered when_not_ready, so the write is refused and
+        _force_all_docks_powered swallows it (deliberately — recovering the
+        printer beats switching an LED). It therefore covers the graceful
+        restart, but not the case that produced the shutdown. There the only
+        recovery is the power cycle, which is safe by construction because
+        the unprogrammed LED state means "powered"."""
+        if self._power_index() is None:
+            return
+        gcode = self.printer.lookup_object('gcode')
+        for cmd in ('RESTART', 'FIRMWARE_RESTART'):
+            original = gcode.register_command(cmd, None)
+            if original is None:
+                continue
+
+            def guarded(gcmd, _original=original, _cmd=cmd):
+                # Must never block the restart itself: in a shutdown state
+                # SET_LED is refused, and getting the printer back up beats
+                # switching an LED. _force_all_docks_powered swallows that.
+                self._force_all_docks_powered(_cmd)
+                return _original(gcmd)
+
+            # when_not_ready=True is how Klipper registers these two — drop
+            # it and RESTART/FIRMWARE_RESTART would stop working after a
+            # shutdown, i.e. exactly when they are needed most.
+            gcode.register_command(
+                cmd, guarded, when_not_ready=True,
+                desc=f"{cmd} (Vortac: energizes all docks first so no tool "
+                     f"board is dark at the next mcu identify)")
+        logging.info("vortac_manager: restart guard installed "
+                     "(all docks energized before RESTART/FIRMWARE_RESTART)")
+
     def _ensure_no_tool_for_probing(self):
         held = self.current_tool.tool_id if self.current_tool else None
         grabbed = [tid for tid, tool in sorted(self.tools.items())
@@ -293,9 +478,47 @@ class VortacManager:
             f"grabbed; the nozzle would hit the bed first. Park the tool "
             f"(VORTAC_UNLOAD) before QGL/bed mesh/probing.")
 
+    def _check_led_channels(self):
+        """Warn if a configured channel is not physically transmitted.
+
+        Klipper stores all four components regardless of the chain's
+        color_order, but only transmits the ones the order names. A
+        dock_power_channel the chain never sends would leave the supply
+        permanently at its hardware default while this module, VORTAC_STATUS
+        and both dashboards all report a supply state that does not exist —
+        so it is worth naming out loud. Only a warning: color_order is
+        per-LED and the manager has no business refusing to start over a
+        cosmetic channel."""
+        if not self.argb_led:
+            return
+        led = (self.printer.lookup_object(f'neopixel {self.argb_led}', None)
+               or self.printer.lookup_object(self.argb_led, None))
+        order = getattr(led, 'color_order', None)
+        if not order:
+            return
+        for i in range(self.dock_count):
+            letters = order[i] if i < len(order) else order[-1]
+            for name, channel in (('argb_channel', self.argb_channel),
+                                  ('argb_status_channel',
+                                   self.argb_status_channel),
+                                  ('dock_power_channel',
+                                   self.dock_power_channel)):
+                if channel in ('', 'none'):
+                    continue
+                if channel[0].upper() not in letters.upper():
+                    logging.warning(
+                        "vortac_manager: %s '%s' is not in %s's color_order "
+                        "'%s' for %s — that channel is never transmitted, so "
+                        "it cannot switch anything", name, channel,
+                        self.argb_led, letters, self._dock_name(i))
+
     def _handle_ready(self):
-        # Defined baseline after every (re)start: sense logic active on all
-        # docks, regardless of the neopixel initial_* config values.
+        # Defined baseline after every (re)start: sense pull active on all
+        # docks, regardless of the neopixel initial_* config values. The
+        # supply stays untouched here — every tool board is alive by now
+        # (klippy:mcu_identify has passed) and nothing may be switched off
+        # before the auto-detect below has established which dock is empty.
+        self._check_led_channels()
         try:
             self._ensure_sense_active()
         except self.printer.command_error as e:
@@ -353,14 +576,30 @@ class VortacManager:
                 f"Unsupported ARGB channel '{name}'")
         return channels[name]
 
-    def _sense_channel_indices(self):
-        """Channel indices switched together for the sense logic: the
-        sense-pull channel (green) plus the status LED channel (blue)."""
-        idx = [self._channel_index(self.argb_channel)]
-        status = self._channel_index(self.argb_status_channel)
-        if status not in idx:
-            idx.append(status)
-        return idx
+    def _sense_index(self):
+        """Index of the sense-pull channel (green) — the only channel that
+        is electrically load-bearing for dock_sense."""
+        return self._channel_index(self.argb_channel)
+
+    def _status_index(self):
+        """Index of the status LED channel, or None when it is disabled or
+        shares the sense channel (then the sense value already drives it)."""
+        if self.argb_status_channel in ('', 'none'):
+            return None
+        idx = self._channel_index(self.argb_status_channel)
+        return None if idx == self._sense_index() else idx
+
+    def _power_index(self):
+        """Index of the supply gate channel, or None when dock power
+        management is disabled — then the channel is left untouched."""
+        if (self.dock_power_mode == 'off'
+                or self.dock_power_channel in ('', 'none')
+                or not self.argb_led):
+            # Without an LED chain nothing is actually switched, and claiming
+            # a managed supply would make VORTAC_STATUS and the dashboards
+            # report a state that does not exist.
+            return None
+        return self._channel_index(self.dock_power_channel)
 
     def _get_led_color_data(self):
         if not self.argb_led:
@@ -379,46 +618,263 @@ class VortacManager:
                 f"entries, need {self.dock_count}")
         return color_data
 
-    def _set_dock_led_color(self, dock_index, color):
-        red, green, blue, white = color
+    def _write_dock_colors(self, colors):
+        """Write {dock_index: rgbw} as one batch — TRANSMIT is set only on
+        the last entry, so a full reconcile pass refreshes the chain once."""
         gcode = self.printer.lookup_object('gcode')
-        gcode.run_script_from_command(
-            f"SET_LED LED={self.argb_led} INDEX={dock_index + 1} "
-            f"RED={red:.6f} GREEN={green:.6f} BLUE={blue:.6f} "
-            f"WHITE={white:.6f} SYNC=0 TRANSMIT=1")
+        items = sorted(colors.items())
+        for n, (dock_index, color) in enumerate(items):
+            red, green, blue, white = color
+            transmit = 1 if n == len(items) - 1 else 0
+            gcode.run_script_from_command(
+                f"SET_LED LED={self.argb_led} INDEX={dock_index + 1} "
+                f"RED={red:.6f} GREEN={green:.6f} BLUE={blue:.6f} "
+                f"WHITE={white:.6f} SYNC=0 TRANSMIT={transmit}")
+
+    def _set_dock_led_color(self, dock_index, color):
+        self._write_dock_colors({dock_index: color})
 
     def _with_strobe_channel(self, color, value):
-        """Return `color` with the sense channel AND the status channel set
-        to `value` — green (sense pull) and blue (status LED) are always
-        switched in parallel; red (power) is never touched."""
+        """Return `color` with the sense-pull channel set to `value` — plus
+        the status channel when it is configured to mirror the sense pull.
+        The supply gate is never touched here."""
         color = list(color)
-        for idx in self._sense_channel_indices():
-            color[idx] = float(value)
+        color[self._sense_index()] = float(value)
+        status = self._status_index()
+        if status is not None and self.argb_status_mode == 'sense':
+            color[status] = float(value)
         return tuple(color)
 
+    # --------------------------------------------------------------------
+    # Dock supply (dark power management)
+    # --------------------------------------------------------------------
+
+    def _power_value(self, on):
+        """LED value for the supply gate. Vortac docks cut the supply when
+        the channel is HIGH, so `dock_power_invert` maps powered -> 0.0."""
+        if self.dock_power_invert:
+            return 0.0 if on else 1.0
+        return 1.0 if on else 0.0
+
+    def _policy_power(self, dock_name):
+        """Where the supply of `dock_name` should be, derived from manager
+        state alone. Fail-safe by construction: only a dock POSITIVELY known
+        to be empty is de-energized, because a dark tool board means a lost
+        mcu and a klippy shutdown."""
+        if self._power_index() is None:
+            return True
+        if dock_name in self.dock_power_override:
+            return self.dock_power_override[dock_name]
+        if not self.dock_detection_valid:
+            return True
+        if dock_name in self.dock_uncertain:
+            return True
+        return self.dock_occupancy.get(dock_name) is not None
+
+    def _status_value(self, dock_name, sense_on, power_on):
+        if self.argb_status_mode == 'sense':
+            return 1.0 if sense_on else 0.0
+        if self.argb_status_mode == 'power':
+            return 1.0 if power_on else 0.0
+        # 'detected': full = tool found here, dim = confirmed empty,
+        # off = no trustworthy map for this dock.
+        if not self.dock_detection_valid or dock_name in self.dock_uncertain:
+            return 0.0
+        if self.dock_occupancy.get(dock_name) is not None:
+            return 1.0
+        return self.argb_status_dim
+
+    def _apply_dock_leds(self, sense=None, strobe=False):
+        """Reconcile every dock LED from manager state in one pass.
+
+        `sense` optionally overrides the sense-pull channel per dock index
+        (the detection strobe uses that); everything else is derived from
+        occupancy, the supply overrides and the configured modes. Channels
+        this module does not own are preserved as-is.
+
+        `strobe` makes the status LED mirror the sense pull regardless of
+        argb_status_mode, so a detection pass is always visible walking down
+        the docks instead of flickering a half-rebuilt occupancy map."""
+        if not self.argb_led:
+            return
+        sense = sense or {}
+        colors = self._get_led_color_data()
+        sense_idx = self._sense_index()
+        status_idx = self._status_index()
+        power_idx = self._power_index()
+        out = {}
+        for i in range(self.dock_count):
+            dock = self._dock_name(i)
+            sense_on = bool(sense.get(i, True))
+            power_on = self._policy_power(dock)
+            color = list(colors[i])
+            color[sense_idx] = 1.0 if sense_on else 0.0
+            if power_idx is not None:
+                color[power_idx] = self._power_value(power_on)
+            if status_idx is not None:
+                color[status_idx] = (
+                    (1.0 if sense_on else 0.0) if strobe
+                    else self._status_value(dock, sense_on, power_on))
+            out[i] = tuple(color)
+        self._write_dock_colors(out)
+
+    def _set_dock_power(self, dock_name, on, settle=True):
+        """Override the supply of one dock and push it to the LED. Energizing
+        waits `dock_power_settle` so the board is up before anything relies
+        on it — but only when this actually changed the state, so repeated
+        (idempotent) calls on the error paths do not stack up dwells."""
+        was_on = self._policy_power(dock_name)
+        self.dock_power_override[dock_name] = bool(on)
+        self._apply_dock_leds()
+        if on and not was_on and settle and self.dock_power_settle > 0.0:
+            reactor = self.printer.get_reactor()
+            reactor.pause(reactor.monotonic() + self.dock_power_settle)
+
+    def _release_dock_power(self, dock_name):
+        """Drop a transient override and fall back to the occupancy policy.
+
+        Reconciles unconditionally: callers run this right after changing
+        dock_occupancy, and the policy (plus the 'detected' status LED) has
+        to follow that change even when no override was in play."""
+        self.dock_power_override.pop(dock_name, None)
+        self._apply_dock_leds()
+
+    def _force_all_docks_powered(self, reason):
+        """Energize every dock and keep it that way. Used before a restart:
+        WS2812 latch across a klippy restart, and a dock left dead would
+        starve its tool board before klippy:mcu_identify can find it."""
+        if self._power_index() is None:
+            return
+        for i in range(self.dock_count):
+            self.dock_power_override[self._dock_name(i)] = True
+        try:
+            self._apply_dock_leds()
+        except Exception as e:
+            logging.warning("vortac_manager: could not energize docks "
+                            "before %s: %s", reason, e)
+            return
+        logging.info("vortac_manager: all docks energized before %s", reason)
+
+    def _dock_power_map(self):
+        return {self._dock_name(i): self._policy_power(self._dock_name(i))
+                for i in range(self.dock_count)}
+
+    def _report(self, gcmd, msg):
+        if gcmd is not None:
+            gcmd.respond_info(msg)
+        else:
+            logging.info(msg)
+
+    def _handover_enabled(self):
+        """Whether the dead-break half of the handover may run: it needs
+        handover mode, a supply gate, and a dock whose sense pull survives
+        losing that supply (see _power_off_before_backout)."""
+        return (self.dock_power_mode == 'handover'
+                and self._power_index() is not None
+                and not self.sense_needs_dock_power)
+
+    def _power_on_at_contact(self, tool, dock_name, gcmd):
+        """Park: energize the dock once the pogos are mated.
+
+        Called at the slid-in position, BEFORE the checked Z drop. The
+        spring-loaded dock board rides along through the whole Z travel, so
+        the pogos make and break contact on the Y slide only — which is why
+        contact is verified here, while the dock is still dead, and the
+        supply comes up before anything moves again.
+
+        The two readings around the switch also self-diagnose: if dock_sense
+        cannot see the mated contact while the dock is dead but can see it
+        once it is live, the dock's sense pull hangs off the switched supply.
+        That is recorded once and disables the dead-break on the fetch side,
+        where it would otherwise fake a clean release."""
+        if self._power_index() is None or self._policy_power(dock_name):
+            return
+        # SET_LED takes effect immediately, NOT in step with the move queue,
+        # so the slide-in must be finished before the supply comes up —
+        # otherwise the pogos would mate live. This wait is unconditional:
+        # a tool without sense readings has no is_docked() to wait on, but
+        # still has a queued G1.
+        self._wait_sense()
+        contact = tool.is_docked() if tool.sense_ready() else None
+        self._set_dock_power(dock_name, True)
+        if contact is None or contact:
+            return
+        self._wait_sense()
+        if tool.is_docked():
+            if not self.sense_needs_dock_power:
+                self.sense_needs_dock_power = True
+                self._report(
+                    gcmd,
+                    f"Vortac: {tool.tool_id} only reports dock contact at "
+                    f"{dock_name} once the dock is energized — the dock's "
+                    f"sense pull depends on the switched supply. Dead-break "
+                    f"disabled for this session; dock changes keep the "
+                    f"supply on while the pogos separate.")
+        else:
+            self._report(
+                gcmd,
+                f"Vortac warning: no dock contact for {tool.tool_id} at "
+                f"{dock_name} after sliding in — the checked drop below "
+                f"will retry, check dock calibration and pogo pins.")
+
+    def _power_off_before_backout(self, tool, dock_name, gcmd):
+        """Fetch: cut the dock supply after the checked lift and before the
+        Y backout, so the pogos separate dead. The grabber already carries
+        the tool, so the board keeps its supply from the other side.
+
+        Guard: the backout check reads a clean release from dock_sense going
+        HIGH. If the dock's sense pull died with the supply, dock_sense would
+        go HIGH right here — with the tool not having moved at all — and
+        every release check would silently pass. So verify dock_sense is
+        still LOW; if not, restore the supply and stay powered from now on."""
+        if not self._handover_enabled():
+            return
+        if self.dock_power_override.get(dock_name) is False:
+            return          # already cut earlier in this fetch
+        if not tool.sense_ready() or not tool.is_grabbed():
+            # Without confirmed grab there is no second feed to rely on.
+            return
+        # The caller drains the queue on every checked lift step, but make the
+        # invariant local: SET_LED is not synchronized with the move queue, so
+        # no supply switch may happen with motion still pending.
+        self._wait_sense()
+        self._set_dock_power(dock_name, False)
+        self._wait_sense()
+        if tool.is_docked():
+            return          # contact still reported — the cut is real
+        self._set_dock_power(dock_name, True)
+        self.sense_needs_dock_power = True
+        self._report(
+            gcmd,
+            f"Vortac: dock_sense for {tool.tool_id} went HIGH the moment "
+            f"{dock_name} was de-energized, while the tool had not moved — "
+            f"the dock's sense pull hangs off the switched supply, so the "
+            f"release check cannot be trusted without it. Supply restored, "
+            f"dead-break disabled for this session.")
+        self._wait_sense()
+
     def _sense_active_on_dock(self, color):
-        return all(color[idx] > 0.0 for idx in self._sense_channel_indices())
+        """Only the sense-pull channel is load-bearing here — the status LED
+        may legitimately be dark (see argb_status_mode)."""
+        return color[self._sense_index()] > 0.0
 
     def _ensure_sense_active(self, gcmd=None):
-        """Make sure every dock has the sense (green) and status (blue)
-        channels ON. The dock_sense logic only works while green pulls the
-        pad — manual LED changes could have switched it off in between, so
-        this is (re)asserted before every sense-dependent operation.
-        Returns True if anything had to be corrected."""
+        """Re-assert the full dock LED state: sense pull on everywhere, the
+        supply per policy, the status LED per mode. Runs before every
+        sense-dependent operation, so a manual SET_LED in between can
+        neither disable the sense logic nor strand a tool board.
+        Returns True if the sense pull had actually been off."""
         if not self.argb_led:
             return False
         colors = self._get_led_color_data()
-        fixed = []
-        for i in range(self.dock_count):
-            if not self._sense_active_on_dock(colors[i]):
-                self._set_dock_led_color(
-                    i, self._with_strobe_channel(colors[i], 1.0))
-                fixed.append(self._dock_name(i))
-        if not fixed:
+        off = [self._dock_name(i) for i in range(self.dock_count)
+               if not self._sense_active_on_dock(colors[i])]
+        self._apply_dock_leds()
+        if not off:
             return False
         self._dwell_for_sense()
-        msg = (f"Vortac: sense channels (G+B) were off on "
-               f"{', '.join(fixed)} — re-enabled before continuing")
+        msg = (f"Vortac: sense pull ({self.argb_channel}) was off on "
+               f"{', '.join(off)} — re-enabled before continuing")
         if gcmd is not None:
             gcmd.respond_info(msg)
         else:
@@ -454,19 +910,29 @@ class VortacManager:
     def _detect_tools(self, gcmd=None):
         debug = bool(gcmd and gcmd.get_int('DEBUG', 0, minval=0, maxval=1))
         debug_lines = []
-        original_colors = self._get_led_color_data()
-        # Detection baseline: sense (G) + status (B) channels off on all
-        # docks. Then each dock is strobed on in turn; the docked tool
-        # flips its dock_sense state. Red (power) stays untouched.
-        baseline_colors = [
-            self._with_strobe_channel(original_colors[i], 0.0)
-            for i in range(self.dock_count)
-        ]
-        detected = {self._dock_name(i): None for i in range(self.dock_count)}
+        # Detection energizes every dock and reads sense pins — neither is
+        # safe or meaningful with motion still queued (SET_LED takes effect
+        # immediately, not in step with the move queue). Raises before any
+        # state is touched, so an abort here leaves the previous map intact.
+        self.printer.lookup_object('toolhead').wait_moves()
+        all_docks = [self._dock_name(i) for i in range(self.dock_count)]
+        detected = {dock: None for dock in all_docks}
         ambiguous = {}
+        # Energize every dock for the whole pass, and drop any transient
+        # handover override. A dock left dead cannot report the tool sitting
+        # in it, so without this the detection would only ever confirm the
+        # occupancy map it started from.
+        self.dock_power_override = {dock: True for dock in all_docks}
+        # Treat every dock as unresolved until this pass says otherwise: an
+        # abort must not leave the previous map deciding what gets switched
+        # off in the finally below.
+        self.dock_uncertain = set(all_docks)
         try:
-            for i, color in enumerate(baseline_colors):
-                self._set_dock_led_color(i, color)
+            # Detection baseline: sense pull off on all docks. Then each dock
+            # is strobed on in turn; the docked tool flips its dock_sense.
+            self._apply_dock_leds(
+                sense={i: False for i in range(self.dock_count)},
+                strobe=True)
             self._dwell_for_sense()
             if debug:
                 debug_lines.append(
@@ -497,9 +963,10 @@ class VortacManager:
             ]
 
             for dock_index in range(self.dock_count):
-                strobe_color = self._with_strobe_channel(
-                    baseline_colors[dock_index], 1.0)
-                self._set_dock_led_color(dock_index, strobe_color)
+                self._apply_dock_leds(
+                    sense={i: (i == dock_index)
+                           for i in range(self.dock_count)},
+                    strobe=True)
                 self._dwell_for_sense()
                 dock_name = self._dock_name(dock_index)
                 if debug:
@@ -515,7 +982,9 @@ class VortacManager:
                 elif len(candidates) > 1:
                     ambiguous[dock_name] = candidates
 
-                self._set_dock_led_color(dock_index, baseline_colors[dock_index])
+                self._apply_dock_leds(
+                    sense={i: False for i in range(self.dock_count)},
+                    strobe=True)
                 self._dwell_for_sense()
 
             self.dock_occupancy = detected
@@ -524,7 +993,24 @@ class VortacManager:
                 self.current_tool = self.tools[grabbed_ids[0]]
                 self._assign_park_dock(self.current_tool, detected, gcmd)
             elif len(grabbed_ids) == 0:
-                self.current_tool = None
+                # A held tool without sense readings can never show up in
+                # grabbed_ids — clearing current_tool on that non-evidence
+                # would make the next change skip the park and drive the
+                # held tool into the target's dock.
+                if (self.current_tool is None
+                        or self.current_tool.sense_ready()):
+                    self.current_tool = None
+            else:
+                # The grabber holds at most one tool, so two grab_sense LOW
+                # at once means at least one reading is lying. current_tool
+                # is left alone, and the power decision below must not
+                # trust a map built on lying sense pins.
+                self._report(
+                    gcmd,
+                    f"Vortac warning: grab_sense reads LOW on "
+                    f"{', '.join(sorted(grabbed_ids))} at once — physically "
+                    f"impossible, check the grab sense wiring. Dock power "
+                    f"stays on everywhere.")
 
             found_ids = set(
                 tid for tid in detected.values() if tid is not None)
@@ -533,17 +1019,50 @@ class VortacManager:
                 tid for tid in sorted(self.tools.keys())
                 if tid not in found_ids and self.tools[tid].sense_ready()
             ]
+            # Which docks may be de-energized afterwards. Ambiguous docks are
+            # obviously untrustworthy; a tool this pass could not place makes
+            # EVERY dock suspect, because it may well be sitting in a dock
+            # that read empty precisely because its board was already dark.
+            #
+            # `missing` above is the user-facing list and deliberately only
+            # names tools that DO deliver sense readings. The power decision
+            # must be stricter: a tool with no readings at all (sense pins
+            # absent but available: True) can never be located, and neither
+            # can an unavailable tool whose mcu klippy still requires. Both
+            # are permanently unaccounted for, so they pin every dock on.
+            unaccountable = [
+                tid for tid in sorted(self.tools.keys())
+                if tid not in found_ids and not self.tools[tid].sense_ready()
+            ]
+            self.dock_uncertain = set(ambiguous)
+            # A lying grab_sense (several tools "grabbed" at once) can hide
+            # a parked tool from `missing` — it counts as found — so it
+            # taints every dock as well.
+            if (missing or unaccountable or self.unmanaged_tools
+                    or len(grabbed_ids) > 1):
+                self.dock_uncertain.update(all_docks)
+            if unaccountable or self.unmanaged_tools:
+                logging.info(
+                    "vortac_manager: dock power pinned on — cannot locate %s",
+                    ', '.join(unaccountable + self.unmanaged_tools))
             if gcmd is not None:
                 self._respond_detection(gcmd, detected, grabbed_ids,
                                         missing, ambiguous, debug_lines)
             return detected
         finally:
-            # Normal operating state after detection: sense logic active on
-            # ALL docks (G+B on), other channels as they were before.
-            for i in range(self.dock_count):
-                self._set_dock_led_color(
-                    i, self._with_strobe_channel(original_colors[i], 1.0))
-            self._dwell_for_sense()
+            # Normal operating state: sense pull on everywhere, supply back
+            # under the occupancy policy, status LED per mode. Never let a
+            # failure here replace the error from the try body — the baseline
+            # diagnostic is what the user needs to read.
+            self.dock_power_override = {}
+            try:
+                self._apply_dock_leds()
+                self._dwell_for_sense()
+            except Exception:
+                logging.exception(
+                    "vortac_manager: could not restore the dock LEDs after "
+                    "detection — the sense pull may still be off, which "
+                    "invalidates dock_sense until the next tool change")
 
     def _assign_park_dock(self, tool, detected, gcmd):
         """Detection found `tool` in the grabber. Decide where it will be
@@ -629,9 +1148,9 @@ class VortacManager:
         gcode = self.printer.lookup_object('gcode')
 
         # 0. Sense logic sanity: dock_sense only works while the dock's
-        # green channel pulls the pad low. Manual LED tinkering may have
-        # switched it off — re-assert G+B on all docks before any motion
-        # that relies on sense feedback.
+        # sense-pull channel holds the pad low. Manual LED tinkering may
+        # have switched it off — reconcile every dock LED (sense pull,
+        # supply, status) before any motion that relies on sense feedback.
         self._ensure_sense_active(gcmd)
 
         # 1. Deactivate current tool
@@ -653,8 +1172,36 @@ class VortacManager:
                 raise self.printer.command_error(
                     f"Vortac: no dock known to park {tid} at — run "
                     f"VORTAC_DETECT (or set home_dock on the tool)")
+            # park_dock/home_dock can be stale (a tool placed by hand, a
+            # detection between fetch and park). Driving a held tool into an
+            # occupied dock wrecks both tools, so refuse before moving.
+            occupant = self.dock_occupancy.get(dock)
+            if occupant is not None and occupant != tid:
+                raise self.printer.command_error(
+                    f"Vortac: refusing to park {tid} at {dock} — the dock map "
+                    f"says {occupant} is already sitting there. Run "
+                    f"VORTAC_DETECT to refresh the map, or free the dock.")
+            # The dock-map check above cannot catch the case where we believe
+            # we hold the very tool that is in fact still parked — after a
+            # VORTAC_SET_CURRENT_TOOL on a docked tool, occupant == tid and
+            # the park would drive the EMPTY grabber down onto it. dock_sense
+            # settles that: a tool on the carriage reads HIGH, so a positive
+            # LOW here is proof it never left its dock. Pin-less tools read
+            # None and are not covered.
+            if self.current_tool.is_docked():
+                raise self.printer.command_error(
+                    f"Vortac: refusing to park {tid} — dock_sense says it is "
+                    f"still sitting in a dock, so the grabber is not actually "
+                    f"holding it. Run VORTAC_DETECT to resync (the current "
+                    f"tool was probably set manually).")
             self._park_at_dock(self.current_tool, dock, gcmd)
             self.dock_occupancy[dock] = tid
+            # The dock now legitimately holds a tool, so the occupancy policy
+            # keeps it energized on its own — drop the park override. Order
+            # matters: releasing before the occupancy update would strand the
+            # board we just parked.
+            self.dock_uncertain.discard(dock)
+            self._release_dock_power(dock)
             self.park_dock.pop(tid, None)
             # Parked: if the fetch below fails, we are holding nothing.
             self.current_tool = None
@@ -666,8 +1213,46 @@ class VortacManager:
                 raise self.printer.command_error(
                     f"Vortac: no dock known for {target.tool_id} — run "
                     f"VORTAC_DETECT (or set home_dock on the tool)")
+            # Only the _dock_holding branch is evidence-based; the home_dock
+            # fallback is a guess. Never fetch from a dock the map assigns to
+            # a DIFFERENT tool — the clear-out below would erase that tool's
+            # only occupancy record and leave its dock de-energized.
+            occupant = self.dock_occupancy.get(dock)
+            if occupant is not None and occupant != target.tool_id:
+                raise self.printer.command_error(
+                    f"Vortac: refusing to fetch {target.tool_id} from {dock} "
+                    f"— the dock map says {occupant} is sitting there. Run "
+                    f"VORTAC_DETECT to refresh the map.")
+            # The grabber holds exactly one tool, and grab_sense outranks a
+            # cleared current_tool (VORTAC_SET_CURRENT_TOOL CLEAR=1, or a
+            # detection that could not see a sense-pin-less tool): fetching
+            # with a tool still on the carriage rams it into the target's
+            # dock. A legitimate swap never trips this — the park above
+            # verifies grab went HIGH before it returns.
+            grabbed = [tid for tid, t in sorted(self.tools.items())
+                       if t.is_grabbed()]
+            if grabbed:
+                raise self.printer.command_error(
+                    f"Vortac: refusing to fetch {target.tool_id} — "
+                    f"grab_sense says {', '.join(grabbed)} is still in the "
+                    f"grabber. Run VORTAC_DETECT (or park the held tool) "
+                    f"first.")
             self._fetch_from_dock(target, dock, gcmd)
             self.dock_occupancy[dock] = None
+            if target.sense_ready():
+                # Positively empty (release and grab were verified), so the
+                # policy de-energizes it by itself (the pogos are already
+                # separated at this point — nothing switches under load
+                # here, in handover mode the supply is off anyway).
+                self.dock_uncertain.discard(dock)
+            else:
+                # Blind fetch: nothing verified the tool actually left the
+                # dock — if the engage missed, its board is still sitting
+                # there, and de-energizing it would take klippy down. Keep
+                # the dock pinned on (detection can never resolve a
+                # sense-pin-less tool either).
+                self.dock_uncertain.add(dock)
+            self._release_dock_power(dock)
             # Remember the origin so the tool returns to the same dock.
             self.park_dock[target.tool_id] = dock
 
@@ -707,7 +1292,12 @@ class VortacManager:
         checked stepwise Z drop (mirror of the unhook verification — same
         step size and feedrate). dock_sense must be LOW at the hooked
         position before the grabber lets go; after backing out, the tool
-        must still read docked and no longer grabbed."""
+        must still read docked and no longer grabbed.
+
+        Dock supply: the dock is dead on arrival (it was empty), the pogos
+        mate on the Y slide below, and the supply comes up right after that
+        — before the Z drop, while the grabber still carries the tool. So
+        the contact closes dead and nothing is switched under load."""
         x = tool.get_dock_pos(dock_name, 'x')
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
@@ -719,11 +1309,13 @@ class VortacManager:
             f'G1 Y{y} F{DOCK_SLIDE_F}')
 
         if not tool.sense_ready():
-            # No sense feedback available — blind hook-in, but slow.
+            # No sense feedback available — blind hook-in, but slow. The
+            # supply still has to come up before the grabber lets go.
             if gcmd is not None:
                 gcmd.respond_info(
                     f"Vortac: {tool.tool_id} sense pins not ready, "
                     f"hooking in blind")
+            self._power_on_at_contact(tool, dock_name, gcmd)
             gcode.run_script_from_command(
                 f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
             self.grabber.disengage(gcmd=gcmd)
@@ -732,6 +1324,9 @@ class VortacManager:
             return
 
         self._ensure_sense_active(gcmd)
+        # Pogos are mated by the Y slide above: verify contact with the dock
+        # still dead, then energize before the checked drop starts.
+        self._power_on_at_contact(tool, dock_name, gcmd)
         for attempt in range(1, DOCK_UNHOOK_RETRIES + 1):
             result = self._try_hook(tool, z)
             if result == 'seated':
@@ -751,9 +1346,21 @@ class VortacManager:
             gcode.run_script_from_command(
                 f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_UNHOOK_LIFT_F}')
         else:
-            # Never seated — keep holding the tool, back out lifted.
+            # Never seated — keep holding the tool, back out lifted. The
+            # tool leaves with the grabber, so de-energize first and let the
+            # pogos separate dead; no board is stranded, the grabber feeds it.
+            # Wait first: SET_LED is not synchronized with the move queue.
+            self._wait_sense()
+            self._set_dock_power(dock_name, False)
             gcode.run_script_from_command(
                 f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+            # Hand the dock back to the occupancy policy once the tool is
+            # clear: a sticky False override would outlive this failure and
+            # strand any tool that later reaches this dock outside the
+            # manager (hand-placed, or a manual VORTAC_SET_CURRENT_TOOL
+            # sequence).
+            self._wait_sense()
+            self._release_dock_power(dock_name)
             raise self.printer.command_error(
                 f"Vortac: failed to seat {tool.tool_id} in {dock_name} "
                 f"after {DOCK_UNHOOK_RETRIES} attempts (no dock contact); "
@@ -801,7 +1408,14 @@ class VortacManager:
         """Fetch a docked tool: approach at saved hooked Z, slide in, engage
         the grabber, then unhook slowly with dock_sense verification and
         checked backward steps. On repeated unhook failure, reverse all
-        steps (re-seat, disengage, back out empty) and raise."""
+        steps (re-seat, disengage, back out empty) and raise.
+
+        Dock supply: live on arrival (the tool is parked and awake). It is
+        cut inside _try_unhook, after the checked lift and before the Y
+        backout that separates the pogos — by then the grabber carries the
+        tool and feeds it. Every failure exit re-energizes the dock, because
+        a tool left behind in a dead dock would be a lost mcu at the next
+        restart."""
         x = tool.get_dock_pos(dock_name, 'x')
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
@@ -813,7 +1427,11 @@ class VortacManager:
         self.grabber.engage(gcmd=gcmd)
 
         if not tool.sense_ready():
-            # No sense feedback available — blind unhook, but slow.
+            # No sense feedback available — blind unhook, but slow. No
+            # dead-break either: without dock_sense there is no way to tell
+            # a real release from a supply that just went away, so the pogos
+            # separate live here (the dock is de-energized afterwards, once
+            # the occupancy map says it is empty).
             if gcmd is not None:
                 gcmd.respond_info(
                     f"Vortac: {tool.tool_id} sense pins not ready, "
@@ -828,8 +1446,34 @@ class VortacManager:
                 f"Vortac warning: {tool.tool_id} grab_sense does not report "
                 f"grabbed after engage")
 
+        # Cleared only once the tool has actually left the dock. Anything
+        # else — lost grab, stuck hooks, a failed re-seat — means the tool
+        # may still be sitting in this dock, so the supply has to come back.
+        handed_off = False
+        try:
+            self._fetch_unhook_loop(tool, dock_name, y, z, gcmd)
+            handed_off = True
+        finally:
+            if not handed_off:
+                try:
+                    # Deliberately no wait_moves() here: this runs while an
+                    # exception is propagating, where the move queue may be in
+                    # an error state, and energizing a dock that may still
+                    # hold a board matters more than the arc-free window.
+                    self._set_dock_power(dock_name, True)
+                except Exception:
+                    # Never let the recovery attempt mask the real failure —
+                    # the original error is what the user has to read.
+                    logging.exception(
+                        "vortac_manager: could not re-energize %s after a "
+                        "failed fetch", dock_name)
+
+    def _fetch_unhook_loop(self, tool, dock_name, y, z, gcmd):
+        """Unhook retry loop of _fetch_from_dock. Returns normally once the
+        tool is out of the dock and confirmed grabbed; raises otherwise."""
+        gcode = self.printer.lookup_object('gcode')
         for attempt in range(1, DOCK_UNHOOK_RETRIES + 1):
-            result = self._try_unhook(tool, y, z, gcmd)
+            result = self._try_unhook(tool, dock_name, y, z, gcmd)
             if result == 'released':
                 gcode.run_script_from_command(
                     f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
@@ -879,7 +1523,14 @@ class VortacManager:
                 f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
 
         # All retries failed — reverse everything: tool stays in its dock,
-        # release the grabber and back out empty.
+        # release the grabber and back out empty. The supply has to be back
+        # BEFORE the grabber lets go: from that moment the dock is the tool
+        # board's only feed, and the caller's finally comes too late for that.
+        # Wait for the last re-seat move first — SET_LED is not synchronized
+        # with the move queue, so switching now would energize a contact that
+        # is still closing.
+        self._wait_sense()
+        self._set_dock_power(dock_name, True)
         self.grabber.disengage(gcmd=gcmd)
         gcode.run_script_from_command(
             f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
@@ -888,13 +1539,18 @@ class VortacManager:
             f"after {DOCK_UNHOOK_RETRIES} attempts; tool left in dock, "
             f"grabber disengaged")
 
-    def _try_unhook(self, tool, y, z, gcmd):
+    def _try_unhook(self, tool, dock_name, y, z, gcmd):
         """One unhook attempt from the hooked position.
 
         Stepwise slow lift, during which dock_sense must STAY LOW (the
         spring-loaded dock board rides along; losing pogo contact here
         means the tool is tilting on stuck hooks). Then checked backward
         steps, where dock_sense going HIGH is the clean release.
+
+        Between the two phases the dock supply is cut (handover mode): the
+        pogos only separate on the Y steps below, and by now the lift has
+        confirmed both a held tool and intact dock contact — the two
+        conditions that make it safe to hand the feed over to the grabber.
 
         Returns 'released', 'hooked' (dock still LOW after the checked
         backward steps), 'tilt' (dock contact lost during the lift; no Y
@@ -912,6 +1568,7 @@ class VortacManager:
                 return 'lost_grab'
             if not tool.is_docked():
                 return 'tilt'
+        self._power_off_before_backout(tool, dock_name, gcmd)
         cur_y = y
         for _ in range(DOCK_UNHOOK_CHECK_STEPS):
             cur_y += DOCK_UNHOOK_STEP
@@ -1022,12 +1679,25 @@ class VortacManager:
             for d, tid in sorted(self.dock_occupancy.items()))
         cal_tool = self.calibration_tool.tool_id if self.calibration_tool else 'None'
         cal_dock = self.calibration_dock or 'None'
+        if self._power_index() is None:
+            power_line = f"disabled ({self.dock_power_mode})"
+        else:
+            power_line = f"{self.dock_power_mode}: " + ', '.join(
+                f"{d}={'on' if on else 'OFF'}"
+                for d, on in sorted(self._dock_power_map().items()))
+            if self.dock_uncertain:
+                power_line += (f"  [held on: "
+                               f"{', '.join(sorted(self.dock_uncertain))}]")
+            if self.sense_needs_dock_power:
+                power_line += "  [dead-break disabled: sense needs dock power]"
         gcmd.respond_info(
             f"Vortac status:\n"
             f"  Current tool : {cur}\n"
             f"  Tools loaded : {tools_line}\n"
             f"  Dock map     : {occ or '(unknown)'}\n"
             f"  Detection    : {'valid' if self.dock_detection_valid else 'bootstrap'}\n"
+            f"  Dock power   : {power_line}\n"
+            f"  Status LED   : {self.argb_status_mode}\n"
             f"  Cal selected : {cal_dock} / {cal_tool}\n"
             f"  QGL state    : {qgl}")
 
@@ -1079,12 +1749,13 @@ class VortacManager:
                 f"{self._dock_name(i)}="
                 f"{'on' if self._sense_active_on_dock(colors[i]) else 'OFF'}"
                 for i in range(self.dock_count))
-            lines.append(f"  Dock sense channels (G+B): {states}")
+            lines.append(
+                f"  Dock sense pull ({self.argb_channel}): {states}")
             if any(not self._sense_active_on_dock(colors[i])
                    for i in range(self.dock_count)):
                 lines.append(
-                    "  WARNING: dock_sense is only valid while a dock's "
-                    "sense channels are on (green pulls the pad low)")
+                    f"  WARNING: dock_sense is only valid while a dock's "
+                    f"sense pull ({self.argb_channel}) holds the pad low")
         gcmd.respond_info('\n'.join(lines))
 
     def cmd_VORTAC_SENSE_MONITOR(self, gcmd):
@@ -1134,9 +1805,104 @@ class VortacManager:
         color = self._get_led_color_data()[dock_index]
         self._set_dock_led_color(
             dock_index, self._with_strobe_channel(color, value))
+        mirrored = ('' if self.argb_status_mode != 'sense'
+                    else f" (+{self.argb_status_channel}, mirroring)")
         gcmd.respond_info(
-            f"Set {dock} sense channels ({self.argb_channel}+"
-            f"{self.argb_status_channel}) to {value:.3f}")
+            f"Set {dock} sense pull ({self.argb_channel}){mirrored} "
+            f"to {value:.3f}")
+
+    def cmd_VORTAC_DOCK_POWER(self, gcmd):
+        """Report or override the dock supply.
+
+        VALUE=1 is always allowed. VALUE=0 on a dock that is believed to hold
+        a tool needs FORCE=1, because de-energizing it drops that tool board
+        off the CAN bus and takes klippy down — which is exactly what you
+        want for isolating a bus fault or for flashing one board (ONLY=1),
+        and never what you want by accident."""
+        if self._power_index() is None:
+            raise gcmd.error(
+                f"Vortac: dock power management is disabled "
+                f"(dock_power_mode: {self.dock_power_mode}, "
+                f"dock_power_channel: {self.dock_power_channel or 'none'})")
+        dock_arg = gcmd.get('DOCK', None)
+        value = gcmd.get_int('VALUE', None, minval=0, maxval=1)
+        only = gcmd.get_int('ONLY', 0, minval=0, maxval=1)
+        force = gcmd.get_int('FORCE', 0, minval=0, maxval=1)
+        if dock_arg is None and value is None:
+            state = ', '.join(
+                f"{d}={'on' if on else 'OFF'}"
+                for d, on in sorted(self._dock_power_map().items()))
+            gcmd.respond_info(
+                f"Vortac dock power ({self.dock_power_mode}, channel "
+                f"{self.dock_power_channel}"
+                f"{', inverted' if self.dock_power_invert else ''}):\n"
+                f"  {state}\n"
+                f"  Sense pull needs dock power: "
+                f"{'yes (dead-break disabled)' if self.sense_needs_dock_power else 'no'}")
+            return
+        if dock_arg is None:
+            raise gcmd.error("Missing DOCK=dockN")
+        dock = dock_arg.strip().lower()
+        self._parse_dock_index(dock, gcmd)
+        if value is None:
+            raise gcmd.error("Missing VALUE=0|1")
+
+        targets = {dock: bool(value)}
+        if only:
+            # Isolation mode: this dock as requested, every other dock the
+            # opposite way. Used to make canbus_query/flash_can unambiguous.
+            for i in range(self.dock_count):
+                other = self._dock_name(i)
+                if other != dock:
+                    targets[other] = not value
+        # "Believed empty" is only worth anything if the map is trustworthy:
+        # without a valid detection, or on a dock the last pass could not
+        # resolve, dock_occupancy may be a stale home_dock seed. Treat every
+        # such dock as possibly occupied rather than possibly empty.
+        risky = []
+        for d, on in sorted(targets.items()):
+            if on:
+                continue
+            if (self.dock_occupancy.get(d) is not None
+                    or not self.dock_detection_valid
+                    or d in self.dock_uncertain):
+                risky.append(d)
+        if risky and not force:
+            raise gcmd.error(
+                f"Vortac: refusing to de-energize {', '.join(risky)} — a tool "
+                f"is parked there, or the dock map is not trustworthy enough "
+                f"to say it is empty (run VORTAC_DETECT). Cutting the supply "
+                f"of a parked board drops it off the CAN bus and shuts klippy "
+                f"down. Add FORCE=1 if that is what you intend.")
+        # A manual command can arrive with moves still queued; never switch a
+        # supply while the toolhead is in motion near a dock.
+        self.printer.lookup_object('toolhead').wait_moves()
+        for d, on in sorted(targets.items()):
+            self._set_dock_power(d, on)
+        state = ', '.join(f"{d}={'on' if on else 'OFF'}"
+                          for d, on in sorted(targets.items()))
+        gcmd.respond_info(
+            f"Vortac dock power override: {state}. Overrides are dropped by "
+            f"the next VORTAC_DETECT; every dock is re-energized before a "
+            f"RESTART.")
+
+    def cmd_VORTAC_STATUS_LED(self, gcmd):
+        modes = ('sense', 'power', 'detected')
+        mode = gcmd.get('MODE', None)
+        if mode is None:
+            gcmd.respond_info(
+                f"Vortac status LED ({self.argb_status_channel}): "
+                f"{self.argb_status_mode} (available: {', '.join(modes)})")
+            return
+        mode = mode.strip().lower()
+        if mode not in modes:
+            raise gcmd.error(
+                f"Unknown MODE '{mode}' (expected {', '.join(modes)})")
+        self.argb_status_mode = mode
+        self._apply_dock_leds()
+        gcmd.respond_info(
+            f"Vortac status LED now shows: {mode}. Set argb_status_mode in "
+            f"[vortac_manager] to make this the default.")
 
     def cmd_VORTAC_SELECT_DOCK(self, gcmd):
         dock = gcmd.get('DOCK').strip().lower()
@@ -1204,6 +1970,14 @@ class VortacManager:
             'dock_occupancy': dict(self.dock_occupancy),
             'park_dock': dict(self.park_dock),
             'dock_detection_valid': self.dock_detection_valid,
+            'dock_uncertain': sorted(self.dock_uncertain),
+            # dock_power is {} when management is off, so a dashboard can
+            # tell "not managed" from "switched off".
+            'dock_power': (self._dock_power_map()
+                           if self._power_index() is not None else {}),
+            'dock_power_mode': self.dock_power_mode,
+            'argb_status_mode': self.argb_status_mode,
+            'sense_needs_dock_power': self.sense_needs_dock_power,
             'calibration_dock': self.calibration_dock,
             'calibration_tool': (self.calibration_tool.tool_id
                                  if self.calibration_tool else None),

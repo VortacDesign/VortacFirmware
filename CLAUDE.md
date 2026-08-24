@@ -57,7 +57,10 @@ Tool numbering is ORDER-BASED: templates that carry a `[vortac_tool TN]` placeho
 ### Configs (`configs/vortac_configs/`)
 
 Live-mounted into Klipper at runtime. Layout:
-- `mcu/octopus.cfg` — mainboard (steppers, bed, fans, neopixel docks).
+- `mcu/octopus.cfg` — mainboard (steppers, bed, fans, neopixel docks). `initial_RED: 0.0`
+  on `[neopixel dockController]` is load-bearing: red gates the parked tool boards' supply
+  and is inverted (HIGH = cut), and Klipper identifies every tool MCU before it ever
+  programs the LED — a non-zero value would starve the tool boards at startup.
 - `mcu/vortac.cfg` — grabber MCU (CAN UUID `70d72bfb79f1`), `[manual_stepper grabber]` + AS5047D wiring + `[vortac_grabber]` hardware settings and `[vortac_qgl_state]`.
 - `mcu/SB2209.cfg` — toolhead-board template (extruder, hotend fan, ADXL345, hotend ARGB). Generic MCU name `EBBCan`; intended to be loaded via `include_with` with per-tool namespacing.
 
@@ -70,6 +73,15 @@ Live-mounted into Klipper at runtime. Layout:
 - **Split** `vortac_grabber.py` into `vortac_grabber.py` (hardware only — angle sensor, stepper, calibration, plus a Python API: `engage()`, `disengage()`, `read_angle()`) and two new modules: `vortac_tool.py` (logical per-tool `[vortac_tool Tn]` sections) and `vortac_manager.py` (coordinator: `T0/T1/...`, dock state machine, `VORTAC_DETECT`).
 - **Enhance** `include_with.py` with MCU-name remapping in section headers *and* option values (not just `pin` keys), tool-index-based section auto-rename to dodge Klipper singleton collisions (`[extruder]` → `[extruder1]`, `[fan]` → `[fan_generic toolN_fan]`, etc.), config-value overrides, dynamic config-dir paths, and configurable section skipping.
 - **Tool detection** uses a **strobe-by-subtraction** scheme: every tool has two GPIO sense pins (`dock_sense_pin`, `grab_sense_pin`). Normal parked operation keeps dock Tool_id channels ON. Detection temporarily turns all dock Tool_id channels OFF, turns one dock ON at a time (~100 ms), polls all tools' `dock_sense`, and the one that flips identifies the dock. The grabber pulls `grab_sense` LOW on the held tool.
+- **Dock power (`dock_power_mode`)** gates each parked tool board's supply via the dock LED's
+  red channel so the pogo contacts make and break dead. The whole design follows from one
+  constraint: the sense pins live on the *tool's* MCU, and Klipper has no optional MCUs — a
+  dark tool board is a klippy shutdown. Hence: only a dock *positively* known to be empty is
+  ever de-energized, every failure path re-energizes, and `RESTART`/`FIRMWARE_RESTART` are
+  wrapped to power all docks first (WS2812 latch across a restart). The supply is switched
+  around the *Y* moves at the dock, never the Z moves — the spring-loaded dock board rides
+  along through the Z travel, so Y is where the contact actually opens and closes. See the
+  header comment in `vortac_manager.py` and `DOCS/modules.html#dock-power`.
 - **Section-renaming table** for the include_with rewriter is in the plan doc — consult it before adding new section types.
 
 The refactor is in progress on the development branch; check current git status before assuming which config files are staged or deployed.

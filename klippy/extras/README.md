@@ -244,12 +244,42 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   `VORTAC_LOAD TOOL=<name>|Tn`, `VORTAC_UNLOAD`, `VORTAC_SET_CURRENT_TOOL`,
   `VORTAC_DETECT`, `VORTAC_SELECT_DOCK DOCK=dockN`,
   `VORTAC_DOCK_CAL_STATUS`, `VORTAC_DOCK_CAL_SAVE`,
-  `VORTAC_DOCK_SAVE_POS TOOL=<name>|Tn DOCK=dockN`.
+  `VORTAC_DOCK_SAVE_POS TOOL=<name>|Tn DOCK=dockN`,
+  `VORTAC_DOCK_POWER [DOCK=dockN VALUE=0|1 [ONLY=1] [FORCE=1]]`,
+  `VORTAC_STATUS_LED [MODE=sense|power|detected]`.
 - **Tool change sequence** in `_change_to`:
   `tool_deactivate_gcode` → `VORTAC_GANTRY_FLAT` → `_park_at_dock(current)`
   → `_fetch_from_dock(target)` → `VORTAC_GANTRY_TILT` →
   `ACTIVATE_EXTRUDER EXTRUDER=<extruder_name>` → `SET_GCODE_OFFSET`
   → `tool_activate_gcode`.
+- **Dock power (`dock_power_mode`: off | occupancy | handover):** the dock
+  LED's red channel gates the parked tool board's supply, INVERTED (red HIGH
+  cuts it, 0.0 = powered). The supply is switched around the *Y* moves at the
+  dock, never the Z moves — the spring-loaded dock board rides along through
+  the Z travel, so Y is where the pogos actually open and close:
+  park slides in, verifies `dock_sense` with the dock still dead, then
+  energizes before the drop; fetch engages, lifts, verifies `grab_sense`,
+  then cuts before the backout. The board is always fed from the other side
+  while the dock switches.
+  Everything else follows from one constraint: the sense pins live on the
+  TOOL's mcu and Klipper has no optional mcus, so a dark board is a klippy
+  shutdown. Hence only a dock POSITIVELY known to be empty is de-energized
+  (`_policy_power`) — a tool with no sense readings at all, or an
+  unavailable tool whose `[mcu ...]` is still included, can never be
+  located and therefore pins EVERY dock on — every failure path
+  re-energizes, and
+  `RESTART`/`FIRMWARE_RESTART` are wrapped to power all docks first
+  (`_install_restart_guard` — WS2812 latch across a restart, and
+  `mcu_identify` runs before the LED is ever programmed). A full power cycle
+  clears the latch and is the unconditional recovery.
+  `_power_off_before_backout` probes whether `dock_sense` survives the cut;
+  if it does not, the release check would read a false "released", so the
+  supply is restored and the dead-break is disabled for the session
+  (`sense_needs_dock_power`).
+- **Status LED (`argb_status_mode`):** `sense` (mirrors the sense pull),
+  `power` (lit while the dock feeds its board), `detected` (full = tool
+  detected, `argb_status_dim` = confirmed empty, off = map not trustworthy).
+  A detection pass always mirrors the strobe regardless of mode.
 - **Probe guard:** at `klippy:connect` the manager wraps the `[probe]`
   object's entry points (`start_probe_session` / `run_probe`), so EVERY
   probe-based operation — `QUAD_GANTRY_LEVEL`, `BED_MESH_CALIBRATE`,

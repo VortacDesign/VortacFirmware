@@ -139,7 +139,13 @@ accept the tool name (case-insensitive), <code>T&lt;n&gt;</code>, or a bare inde
 <tr><td><code>dock_count</code></td><td>(required)</td><td>number of docks (dock0…dockN-1, mapped to LED chain indices)</td></tr>
 <tr><td><code>argb_led</code></td><td>—</td><td>neopixel chain carrying the dock LEDs</td></tr>
 <tr><td><code>argb_channel</code></td><td>green</td><td>sense-pull channel (active-low pad)</td></tr>
-<tr><td><code>argb_status_channel</code></td><td>blue</td><td>status LED, mirrors the sense channel</td></tr>
+<tr><td><code>argb_status_channel</code></td><td>blue</td><td>status LED channel (<code>none</code> disables it)</td></tr>
+<tr><td><code>argb_status_mode</code></td><td>sense</td><td>what the status LED shows: <code>sense</code> (mirrors the sense pull), <code>power</code> (lit while the dock feeds its tool board), <code>detected</code> (full = tool detected, dim = confirmed empty, off = map not trustworthy)</td></tr>
+<tr><td><code>argb_status_dim</code></td><td>0.15</td><td>brightness of the &ldquo;confirmed empty&rdquo; level in <code>detected</code> mode</td></tr>
+<tr><td><code>dock_power_mode</code></td><td>off</td><td><code>off</code> / <code>occupancy</code> / <code>handover</code> &mdash; see <a href="#dock-power">Dock power</a>; any mode except <code>off</code> requires <code>argb_led</code> and a <code>dock_power_channel</code> (startup error otherwise)</td></tr>
+<tr><td><code>dock_power_channel</code></td><td>red</td><td>channel gating the parked tool board's supply</td></tr>
+<tr><td><code>dock_power_invert</code></td><td>True</td><td>channel HIGH cuts the supply, 0.0 = powered (Vortac hardware; do not flip, see below)</td></tr>
+<tr><td><code>dock_power_settle</code></td><td>0.25</td><td>seconds to wait after energizing a dock before relying on the board</td></tr>
 <tr><td><code>dock_strobe_time</code></td><td>0.10</td><td>seconds to wait after each strobe change</td></tr>
 <tr><td><code>auto_detect</code></td><td>True</td><td>run <code>VORTAC_DETECT</code> automatically after startup, so the dock map exists without a manual step</td></tr>
 <tr><td><code>auto_detect_delay</code></td><td>3.0</td><td>seconds after <code>klippy:ready</code> before the auto-detect runs (lets the tool boards deliver their first sense readings)</td></tr>
@@ -157,7 +163,7 @@ value wins), so a copied-but-not-fully-renamed tool file never errors on its own
 catches the detectable leftovers.</p>
 
 <h3>Tool-change sequence (<code>_change_to</code>)</h3>
-<pre><code>_ensure_sense_active (all docks G+B on — sense logic valid)
+<pre><code>_ensure_sense_active (reconcile all dock LEDs: sense pull, supply, status)
 → tool_deactivate_gcode
 → VORTAC_GANTRY_FLAT
 → _park_at_dock(current)
@@ -207,38 +213,57 @@ a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
   <li><strong>Fetch (unhook):</strong> engage, then checked lift — <code>dock_sense</code> must
       STAY LOW (going HIGH mid-lift = tilt/bind → lower back, re-seat, retry) — then checked Y
       backout where <code>dock_sense</code> going HIGH is the clean release. <code>grab_sense</code>
-      HIGH at any checkpoint freezes motion (tool lost).</li>
-  <li><strong>Park (hook-in):</strong> slide in lifted, then checked drop from
-      Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> to the hooked Z — <code>dock_sense</code> must be
-      LOW (pogo contact) at the hooked position <em>before</em> the grabber disengages; no contact
-      → lift back up and retry (<code>DOCK_UNHOOK_RETRIES</code>), final failure backs out with the
-      tool still held. After disengage + backout, the tool must still read docked and no longer
-      grabbed. Tools without sense pins hook in blind (slow drop, no verification).</li>
+      HIGH at any checkpoint freezes motion (tool lost). Between the two phases the dock supply is
+      cut in <code>handover</code> mode: the lift has just confirmed both a held tool and intact
+      dock contact, which are exactly the two conditions that make handing the feed to the grabber
+      safe (<a href="#dock-power">Dock power</a>).</li>
+  <li><strong>Park (hook-in):</strong> slide in lifted — this is where the pogos mate, so
+      <code>dock_sense</code> is checked here with the dock still dead and the supply is switched
+      on before anything moves again — then the checked drop from
+      Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> to the hooked Z, where <code>dock_sense</code>
+      must be LOW <em>before</em> the grabber disengages; no contact
+      → lift back up and retry (<code>DOCK_UNHOOK_RETRIES</code>), final failure de-energizes the
+      dock and backs out with the tool still held. After disengage + backout, the tool must still
+      read docked and no longer grabbed. Tools without sense pins hook in blind (slow drop, no
+      verification, supply switched on unverified).</li>
 </ul>
 
 <h3 id="detection">Dock detection (strobe-by-subtraction)</h3>
 <p>Every tool has two GPIO sense pins: <code>dock_sense_pin</code> (dock Tool_id after opto
 logic) and <code>grab_sense_pin</code> (default HIGH; pulled LOW by the grabber on the held
 tool).</p>
-<p>Each dock's ARGB LED channels have fixed roles: <strong>red</strong> is the power feed for
-the parked tool board (the manager never touches it), <strong>green</strong> actively pulls the
-<code>dock_sense</code> pad low, and <strong>blue</strong> is a status LED that the manager
-always switches in parallel with green — a lit blue channel means the dock's sense logic is
-active. <code>dock_sense</code> readings are <em>only</em> valid while the dock's green channel
-is on; outside of the detection strobe, <strong>all docks keep G+B on</strong>. Every
-sense-dependent operation (tool change, <code>VORTAC_LOAD</code>/<code>VORTAC_UNLOAD</code>,
-calibration selection) first re-asserts G+B on all docks
-(<code>_ensure_sense_active</code>), so a manual <code>SET_LED</code> in between cannot silently
-disable the sense logic; the same state is asserted at <code>klippy:ready</code>.</p>
+<p>Each dock's ARGB LED channels have fixed roles: <strong>green</strong> actively pulls the
+<code>dock_sense</code> pad low, <strong>red</strong> gates the parked tool board's supply
+(<a href="#dock-power">Dock power</a>), and <strong>blue</strong> is a status LED whose content
+is selected by <code>argb_status_mode</code>. <code>dock_sense</code> readings are <em>only</em>
+valid while the dock's green channel is on; outside of the detection strobe, <strong>all docks
+keep the sense pull on</strong>. Every sense-dependent operation (tool change,
+<code>VORTAC_LOAD</code>/<code>VORTAC_UNLOAD</code>, calibration selection) first reconciles all
+three channels on every dock (<code>_ensure_sense_active</code> &rarr;
+<code>_apply_dock_leds</code>), so a manual <code>SET_LED</code> in between can neither silently
+disable the sense logic nor strand a tool board; the same state is asserted at
+<code>klippy:ready</code>.</p>
 <p><code>VORTAC_DETECT</code>:</p>
 <ol>
-  <li>Turns the sense (G) and status (B) channels off on <strong>all</strong> docks.</li>
-  <li>Strobes one dock's G+B channels on at a time
-      (<code>dock_strobe_time</code>, default 0.10&nbsp;s).</li>
+  <li>Energizes <strong>every</strong> dock for the whole pass and drops any transient supply
+      override &mdash; a dead dock cannot report the tool sitting in it, so without this the
+      detection would only ever confirm the map it started from.</li>
+  <li>Turns the sense pull off on <strong>all</strong> docks.</li>
+  <li>Strobes one dock's sense pull on at a time
+      (<code>dock_strobe_time</code>, default 0.10&nbsp;s). The status LED mirrors the strobe
+      during a detection pass regardless of <code>argb_status_mode</code>, so you can watch it
+      walk down the docks.</li>
   <li>Assigns the dock to any tool whose cached <code>dock_sense_pin</code> reads LOW.</li>
-  <li>Restores every dock to the normal operating state afterwards: G+B on, other channels
-      as they were before.</li>
+  <li>Restores the normal operating state afterwards: sense pull on everywhere, supply back
+      under the occupancy policy, status LED per mode.</li>
 </ol>
+<p>Docks the pass could not resolve &mdash; ambiguous ones, and <em>all</em> docks when some
+tool went unaccounted for &mdash; are recorded as uncertain and never de-energized. An
+unaccounted-for tool makes every dock suspect precisely because that tool may be sitting in a
+dock that read empty <em>because</em> its board was already dark. More than one tool reading
+grabbed at once has the same effect: physically impossible, so at least one
+<code>grab_sense</code> is lying, and a lying grab can hide a parked tool from the
+<code>Missing</code> list.</p>
 <p>The grabbed tool is detected from <code>grab_sense_pin</code>. Detection <strong>aborts</strong>
 if any tool already reads dock LOW while all dock Tool_id channels are off (that would make the
 mapping ambiguous — see <a href="troubleshooting.html#detect-aborts">Troubleshooting</a>).</p>
@@ -253,6 +278,109 @@ and parks it back there — the park-dock resolution chain is
 <code>VORTAC_DETECT</code>, for a tool without <code>home_dock</code>, fails with
 "no dock known … — run <code>VORTAC_DETECT</code> (or set <code>home_dock</code> on the tool)" —
 run detection before the first tool change (e.g. in <code>PRINT_START</code>).</p>
+
+<h3 id="dock-power">Dock power (dark power management)</h3>
+<p>The parked tool board is fed through the dock's pogo pins, gated by the dock LED's
+<strong>red</strong> channel. The channel is <strong>inverted</strong>: red HIGH cuts the
+supply, red&nbsp;<code>0.0</code> means powered.</p>
+
+<div class="callout danger">
+<p><strong>That polarity is mandatory, not a preference.</strong> Klipper sends
+<code>klippy:mcu_identify</code> — where every tool board must answer on the CAN bus — strictly
+<em>before</em> <code>klippy:connect</code>, which is when <code>neopixel.py</code> first
+transmits any colour. Nothing in Klipper can energize a dock before the tool boards are needed.
+If red HIGH meant &ldquo;powered&rdquo;, a cold boot would leave every dock dark and Klipper
+could never start. Keep <code>initial_RED: 0.0</code> in the <code>[neopixel]</code> section.</p>
+</div>
+
+<p>Because <code>dock_sense_pin</code> and <code>grab_sense_pin</code> live on the <em>tool's own
+MCU</em> and Klipper has no notion of an optional MCU, a tool board that goes dark drops off the
+bus and takes klippy down. Everything below follows from that single constraint.</p>
+
+<h4>Where the contact is made and broken</h4>
+<p>The pogo contact opens and closes on the <strong>Y slide</strong> at the dock, never on Z: the
+spring-loaded dock board rides along through the whole Z travel (that is exactly why
+<code>dock_sense</code> is expected to stay LOW during the checked lift). So every supply switch
+brackets a Y move, and the contacts never make or break under load:</p>
+<pre><code>park  : approach lifted -> slide in Y   (contact closes, dock DEAD)
+        -> verify dock_sense -> power ON
+        -> checked Z drop -> disengage -> slide out Y
+
+fetch : approach -> slide in Y -> engage
+        -> checked Z lift -> verify grab_sense
+        -> power OFF -> checked Y backout  (contact opens, dock DEAD)</code></pre>
+<p>In both directions the board is fed from the other side while the dock side switches: the
+grabber carries it during the fetch, the dock carries it after the park. There is never a moment
+where both feeds are down. The grabber-side contact is always made and broken live — it has no
+switch, and cannot get one.</p>
+
+<h4>Modes</h4>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Mode</th><th>Behaviour</th><th>Requires</th></tr></thead>
+<tbody>
+<tr><td><code>off</code></td><td>the supply channel is never touched</td><td>—</td></tr>
+<tr><td><code>occupancy</code></td><td>docks positively known to be empty are de-energized; the park side already switches at the contact check, the fetch side cuts only after the tool has left (so the pogos separate live)</td><td>nothing — cannot lose an MCU</td></tr>
+<tr><td><code>handover</code></td><td>additionally cuts the supply <em>before</em> the fetch backout, so the pogos separate dead</td><td>the grabber must feed the held tool</td></tr>
+</tbody>
+</table>
+</div>
+
+<h4>Fail-safe rules</h4>
+<ul>
+  <li><strong>Only a dock positively known to be empty is de-energized.</strong> No detection
+      yet, an ambiguous dock, a tool the pass could not place — anything uncertain stays live
+      (<code>_policy_power</code>). &ldquo;Could not place&rdquo; is deliberately stricter than
+      the <code>Missing</code> line <code>VORTAC_DETECT</code> prints: a tool that delivers
+      <em>no</em> sense readings at all (sense pins absent but <code>available: True</code>) and
+      an <em>unavailable</em> tool whose <code>[mcu&nbsp;…]</code> is still included can never be
+      located, so they pin <strong>every</strong> dock on for the whole session.</li>
+  <li><strong>Every failure exit of a fetch re-energizes the dock.</strong> Lost grab, stuck
+      hooks, a failed re-seat: the tool may still be in that dock. On the
+      retries-exhausted path the supply is restored <em>before</em> the grabber disengages,
+      because from that moment the dock is the board's only feed.</li>
+  <li><strong><code>RESTART</code> and <code>FIRMWARE_RESTART</code> are wrapped</strong> to
+      energize every dock first (<code>_install_restart_guard</code>). WS2812 latch their last
+      value across a klippy restart, so a dock left dead would still be dead at the next
+      <code>mcu_identify</code>. A full power cycle clears the latch and is the unconditional
+      recovery path.</li>
+  <li>The supply is left alone at <code>klippy:ready</code> — every board is alive by then, and
+      nothing may be switched off before the auto-detect has established which dock is empty.</li>
+</ul>
+
+<h4>Self-diagnosis: does the sense pull survive the cut?</h4>
+<p>The release criterion during the fetch backout is <code>dock_sense</code> going HIGH. If the
+dock's sense pull happened to be fed from the <em>switched</em> supply, cutting the supply would
+drive <code>dock_sense</code> HIGH immediately — with the tool not having moved at all — and
+every release check would silently pass. That is a <em>false positive</em>, worse than a
+failure.</p>
+<p>So <code>_power_off_before_backout</code> probes for exactly that: right after the cut, with
+the tool still seated, <code>dock_sense</code> <em>must</em> still read LOW. If it does not, the
+supply is restored, <code>sense_needs_dock_power</code> is latched for the session, the
+dead-break half of the handover is disabled, and a message says so.
+<code>_power_on_at_contact</code> makes the mirror-image observation on the park side (no contact
+while dead, contact once live). <code>VORTAC_STATUS</code> and
+<code>VORTAC_DOCK_POWER</code> report the flag.</p>
+
+<h4>Other things this buys you</h4>
+<ul>
+  <li><strong>Dead pads at an empty dock.</strong> Exposed 24&nbsp;V pads sit exactly where
+      filament scraps and swarf land.</li>
+  <li><strong>Unambiguous CAN UUID mapping.</strong> WS2812 latch, so
+      <code>VORTAC_DOCK_POWER DOCK=dockN VALUE=1 ONLY=1 FORCE=1</code>, then
+      <code>systemctl stop klipper</code>, then <code>canbus_query.py</code> — only the one
+      powered board answers, which makes <code>flash_can.py</code> safe to aim.</li>
+  <li><strong>Bus fault isolation</strong> while debugging a board that takes the whole bus
+      down.</li>
+</ul>
+
+<div class="callout warn">
+<p><strong>Not possible, for the record:</strong> staggering the power-up to soften PSU inrush
+(the LED is programmed after the boards are needed — hardware-only problem); switching docks off
+automatically on <code>M112</code> or a shutdown (a shut-down MCU accepts no
+<code>SET_LED</code>); and saving power by de-energizing parked tools during a print (it costs an
+MCU, and it would break pre-heating the next tool while it is parked).</p>
+</div>
 
 <h3>Dock calibration context</h3>
 <p><code>VORTAC_SELECT_DOCK DOCK=dockN</code> runs detection and stores the detected dock/tool

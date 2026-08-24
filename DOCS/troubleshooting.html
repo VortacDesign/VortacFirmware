@@ -232,13 +232,14 @@ fix.</p>
     contact, and every unhook check misinterprets that as lost contact. Typical trigger: a
     manual <code>SET_LED</code> (or an LED effect) switched the dock's green channel off
     between detection and the load.</p>
-    <p><strong>Check:</strong> <code>VORTAC_SENSE_STATUS</code> now reports the per-dock sense
-    channel state (<code>Dock sense channels (G+B)</code>) and warns when any dock has them
-    off. Blue mirrors green, so a dark blue status LED at the dock is the visual giveaway.</p>
-    <p><strong>Fix:</strong> the manager re-asserts G+B on all docks at
-    <code>klippy:ready</code>, before every tool change, and after every
-    <code>VORTAC_DETECT</code> — so on current firmware this recovers automatically. Manually:
-    <code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=1</code>.</p>
+    <p><strong>Check:</strong> <code>VORTAC_SENSE_STATUS</code> reports the per-dock sense pull
+    state (<code>Dock sense pull (green)</code>) and warns when any dock has it off. With
+    <code>argb_status_mode: sense</code> the blue status LED mirrors it, so a dark status LED at
+    the dock is the visual giveaway — in the other status modes blue says nothing about the sense
+    pull.</p>
+    <p><strong>Fix:</strong> the manager reconciles every dock LED at <code>klippy:ready</code>,
+    before every tool change, and after every <code>VORTAC_DETECT</code> — so on current firmware
+    this recovers automatically. Manually: <code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=1</code>.</p>
   </div>
 </details>
 
@@ -267,6 +268,116 @@ fix.</p>
     (<a href="calibration.html#dock-positions">Calibration → Dock positions</a>, or the manual
     <code>VORTAC_DOCK_SAVE_POS</code> fallback), or free an already-calibrated dock, then re-run
     <code>VORTAC_DETECT</code>.</p>
+  </div>
+</details>
+
+<details class="fold" id="change-refused">
+  <summary><code>refusing to park … / refusing to fetch …</code></summary>
+  <div class="fold-body">
+    <p>The tool change aborted <em>before moving</em> because the manager's state and the sense
+    pins disagree. Four distinct refusals, all of them cheap insurance against a collision:</p>
+    <ul>
+      <li><strong>&ldquo;the dock map says X is already sitting there&rdquo;</strong> — the park
+      destination is believed occupied by another tool. Driving the held tool in would wreck
+      both.</li>
+      <li><strong>&ldquo;the dock map says X is sitting there&rdquo;</strong> (on a fetch) — the
+      target's dock is assigned to a different tool, and completing the fetch would erase that
+      tool's only occupancy record and leave its dock de-energized.</li>
+      <li><strong>&ldquo;dock_sense says it is still sitting in a dock&rdquo;</strong> — the
+      manager thinks it holds a tool that is provably still parked, so the park would drive the
+      <em>empty</em> grabber down onto it. Almost always a
+      <code>VORTAC_SET_CURRENT_TOOL</code> that does not match reality.</li>
+      <li><strong>&ldquo;grab_sense says X is still in the grabber&rdquo;</strong> — a fetch was
+      requested with a tool still on the carriage (a cleared current tool, or a detection that
+      could not see a sense-pin-less tool). It would ram the held tool into the target's
+      dock.</li>
+    </ul>
+    <p><strong>Fix:</strong> <code>VORTAC_DETECT</code>. It rebuilds the map from the sense pins
+    and resyncs the held tool, which resolves all four. If a refusal survives detection, the
+    sense wiring disagrees with physical reality — start at
+    <code>VORTAC_SENSE_STATUS</code>.</p>
+  </div>
+</details>
+
+<h2 id="power-issues">Dock power</h2>
+
+<details class="fold" id="mcu-missing-after-change">
+  <summary>Klipper will not start: <code>Unable to connect</code> / MCU missing for one tool</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> that tool's dock is switched off and the tool is sitting in it, so
+    the board never comes up on the CAN bus. WS2812 keep their last value across a klippy
+    restart, so a dock left dead by an aborted tool change is still dead at the next
+    <code>mcu_identify</code> — and that happens <em>before</em> Klipper ever programs the dock
+    LED, so nothing in the firmware can rescue it.</p>
+    <p><strong>Fix:</strong> <strong>power-cycle the printer.</strong> That clears the LED latch,
+    and the unprogrammed state is &ldquo;powered&rdquo; by design
+    (<code>dock_power_invert</code>). Klipper then starts normally.</p>
+    <p><strong>Why it happened:</strong> normal operation cannot produce this state —
+    <code>RESTART</code> and <code>FIRMWARE_RESTART</code> are wrapped to energize every dock
+    first, and every failure path of a fetch restores the supply. Suspect a hard
+    <code>M112</code>/power loss mid-change, or a manual
+    <code>VORTAC_DOCK_POWER … VALUE=0 FORCE=1</code>. If it repeats without either, that is a
+    bug worth reporting.</p>
+    <div class="callout warn">
+    <p>Check <code>initial_RED: 0.0</code> in the <code>[neopixel]</code> dock section. A
+    non-zero value means &ldquo;supply cut&rdquo; on Vortac hardware and would starve every tool
+    board at startup.</p>
+    </div>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>A dock tile in KlipperScreen is red and says <code>NO POWER</code></summary>
+  <div class="fold-body">
+    <p><strong>Meaning:</strong> the manager believes that dock holds a tool while its supply is
+    switched off. Left alone, that board will be missing after the next restart (above).</p>
+    <p><strong>Fix:</strong> tap the tile and confirm, or run
+    <code>VORTAC_DOCK_POWER DOCK=dockN VALUE=1</code>. Then <code>VORTAC_DETECT</code> to get a
+    clean map. Switching a dock <em>off</em> is deliberately not offered from the touchscreen.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary><code>dead-break disabled: sense needs dock power</code></summary>
+  <div class="fold-body">
+    <p><strong>Meaning:</strong> the manager cut a dock's supply while the tool was still seated
+    and <code>dock_sense</code> immediately went HIGH, although nothing had moved. So this dock's
+    sense pull is fed from the <em>switched</em> supply rather than from the LED's sense channel
+    alone.</p>
+    <p><strong>Consequence:</strong> the release check during the fetch backout reads
+    &ldquo;<code>dock_sense</code> went HIGH&rdquo; as a clean release, which the supply cut would
+    fake on every attempt. The manager therefore restores the supply, latches
+    <code>sense_needs_dock_power</code> for the session and keeps the supply on while the pogos
+    separate — i.e. it silently falls back to <code>occupancy</code> behaviour. Tool changes keep
+    working; only the arc-free separation is lost.</p>
+    <p><strong>Fix:</strong> hardware — feed the dock's sense pull from the unswitched rail. Until
+    then, setting <code>dock_power_mode: occupancy</code> makes the fallback explicit instead of
+    re-discovering it on every restart.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Docks stay powered even though they are empty</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> by design. Only a dock <em>positively known</em> to be empty is
+    de-energized. Anything uncertain stays live: no detection has run yet, the dock was ambiguous
+    in the last pass, some tool could not be placed, or more than one tool read grabbed at once
+    (a lying <code>grab_sense</code> can hide a parked tool) — the last two cases hold
+    <em>all</em> docks on, because that tool may be sitting in a dock that read empty precisely
+    because its board was already dark.</p>
+    <p>Two configurations pin every dock on <em>permanently</em>, because detection can never
+    locate the tool in question:</p>
+    <ul>
+      <li>a tool with <code>available: True</code> but no sense pins (the degraded blind-unhook
+          mode) — it has no <code>dock_sense</code> to strobe;</li>
+      <li>a tool with <code>available: False</code> whose <code>[mcu&nbsp;…]</code> section is
+          still included — klippy needs that board on the bus, but this module never sees it.
+          <code>klippy.log</code> carries a warning naming it at startup.</li>
+    </ul>
+    <p><strong>Check:</strong> <code>VORTAC_STATUS</code> shows the dock power map and, in
+    brackets, which docks are being held on. Run <code>VORTAC_DETECT</code> and resolve the
+    <code>Missing</code> / <code>Ambiguous</code> / <code>Unknown sense</code> lines it
+    reports.</p>
   </div>
 </details>
 
