@@ -48,6 +48,7 @@ button.vortac-dock-occupied { border-color: #3d6ea5; }
 button.vortac-dock-held     { border-color: #f0764f; }
 button.vortac-dock-empty    { border-color: #4a5568; }
 button.vortac-dock-unknown  { border-color: #a06a1f; }
+button.vortac-dock-uncal    { border-color: #c9a75a; }
 """
 
 
@@ -252,9 +253,19 @@ class Panel(ScreenPanel):
                 "Detection: <span foreground='#e8b45a'>stale — run Detect"
                 "</span>")
 
+    def _dock_calibrated(self, dock, tool_id):
+        # A dock counts as calibrated for a tool once all three axes of its
+        # hooked position (params_<dock>_x|y|z) exist in the tool's status.
+        pos = ((self.tool_status.get(tool_id) or {})
+               .get("dock_positions") or {}).get(dock) or {}
+        return all(axis in pos for axis in ("x", "y", "z"))
+
     def _loadable_tools(self):
+        # Only tools whose dock has a calibrated hooked position — loading
+        # an uncalibrated one just errors out in the manager.
         occupancy = self.manager.get("dock_occupancy") or {}
-        return sorted({t for t in occupancy.values() if t})
+        return sorted({t for d, t in occupancy.items()
+                       if t and self._dock_calibrated(d, t)})
 
     def _load_pixbuf(self, svg_name, size=40):
         try:
@@ -363,7 +374,8 @@ class Panel(ScreenPanel):
         st = self.tool_status.get(tool_id or reserved_for) or {}
         ctx = tile["btn"].get_style_context()
         for cls in ("vortac-dock-occupied", "vortac-dock-held",
-                    "vortac-dock-empty", "vortac-dock-unknown"):
+                    "vortac-dock-empty", "vortac-dock-unknown",
+                    "vortac-dock-uncal"):
             ctx.remove_class(cls)
 
         tile["name"].set_markup(
@@ -372,19 +384,29 @@ class Panel(ScreenPanel):
         if tool_id:
             idx = st.get("tool_index")
             tn = " · T%s" % idx if idx is not None else ""
-            color = "#f0764f" if tool_id == held else "#8fc1f2"
-            ctx.add_class("vortac-dock-held" if tool_id == held
-                          else "vortac-dock-occupied")
+            calibrated = self._dock_calibrated(dock, tool_id)
+            if tool_id == held:
+                color, cls = "#f0764f", "vortac-dock-held"
+            elif calibrated:
+                color, cls = "#8fc1f2", "vortac-dock-occupied"
+            else:
+                # occupied but no hooked position saved for this dock —
+                # loading would fail; offer calibration instead
+                color, cls = "#c9a75a", "vortac-dock-uncal"
+            ctx.add_class(cls)
+            note = "" if calibrated else " · not calibrated"
             tile["tool"].set_markup(
-                "<b><span foreground='%s'>%s</span></b><small>%s</small>"
-                % (color, GLib.markup_escape_text(str(tool_id)), tn))
+                "<b><span foreground='%s'>%s</span></b><small>%s%s</small>"
+                % (color, GLib.markup_escape_text(str(tool_id)), tn, note))
             tile["sense"].set_markup(
                 "<small>dock %s   grab %s</small>"
                 % (self._sense_char(st.get("dock_sense_state")),
                    self._sense_char(st.get("grab_sense_state"))))
-            tile["hint"].set_markup(
-                "<small>%s</small>"
-                % ("tap: change" if held else "tap: load"))
+            if calibrated:
+                hint = "tap: change" if held else "tap: load"
+            else:
+                hint = "tap: select for calibration"
+            tile["hint"].set_markup("<small>%s</small>" % hint)
         elif reserved_for:
             # the held tool's return dock — occupancy is None while carried
             ctx.add_class("vortac-dock-held")
@@ -466,6 +488,16 @@ class Panel(ScreenPanel):
         if held and park_map.get(held) == dock and not tool_id:
             self._confirm_script(
                 widget, "Park %s at %s?" % (held, dock), "VORTAC_UNLOAD")
+        elif tool_id and not self._dock_calibrated(dock, tool_id):
+            # Loading would fail (no hooked position for this dock) — offer
+            # to select it as the calibration target instead.
+            self._confirm_script(
+                widget,
+                "%s in %s has no saved hooked position — select it as the "
+                "calibration target?\n(Then jog the toolhead into the hooked "
+                "position via the Move panel and press Save Dock.)"
+                % (tool_id, dock),
+                "VORTAC_SELECT_DOCK DOCK=%s" % dock)
         elif tool_id:
             idx = (self.tool_status.get(tool_id) or {}).get("tool_index")
             if idx is None:

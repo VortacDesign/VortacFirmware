@@ -284,9 +284,9 @@ Every element maps to data that <code>get_status</code> already exports.</p>
     </div>
     <div class="dock unknown">
       <span class="dname">dock3</span>
-      <span class="tname">not calibrated</span>
-      <span class="tsub">&nbsp;</span>
-      <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot"></span>grab</span></span>
+      <span class="tname">miniBlue</span>
+      <span class="tsub">T2 · not calibrated</span>
+      <span class="pins"><span><span class="dot on"></span>dock</span><span><span class="dot"></span>grab</span></span>
       <span class="hint">tap: select for calibration</span>
     </div>
   </div>
@@ -561,11 +561,17 @@ the button falls back to a stock icon.</p>
       The two small dots mirror the raw sense pins — the live wiring truth, invaluable when a
       tile disagrees with reality. While a tool is carried, its return dock is marked
       "on carriage" (from the manager's <code>park_dock</code> status export).</li>
-  <li><strong>Tap logic is contextual:</strong> occupied tile → confirm → <code>T&lt;n&gt;</code>;
-      the held tool's tile → confirm → <code>VORTAC_UNLOAD</code>; uncalibrated tile → confirm →
-      <code>VORTAC_SELECT_DOCK DOCK=…</code> (calibration flow). One screen, no submenu digging.</li>
+  <li><strong>Tap logic is contextual:</strong> occupied + calibrated tile → confirm →
+      <code>T&lt;n&gt;</code>; the held tool's tile → confirm → <code>VORTAC_UNLOAD</code>;
+      occupied but <em>uncalibrated</em> tile (amber, "not calibrated" — the tool has no saved
+      hooked position for this dock, so loading would fail) → confirm →
+      <code>VORTAC_SELECT_DOCK DOCK=…</code>, then jog to the hooked position via the Move
+      panel and press <em>Save Dock</em>; empty/unknown tile → confirm →
+      <code>VORTAC_SELECT_DOCK DOCK=…</code> as well. One screen, no submenu digging.</li>
   <li><strong>Action bar:</strong> a contextual primary button — park icon while a tool is
-      held, load icon when the carriage is empty and exactly one docked tool exists, greyed
+      held, load icon when the carriage is empty and exactly one docked tool with a
+      calibrated dock position exists (uncalibrated tools don't count — loading would
+      fail), greyed
       out otherwise (then the dock tiles are the way to load); icon plus a short generic
       label ("Park"/"Load") like the other buttons — the confirm dialog names the concrete
       tool — plus Detect, Engage, Disengage and
@@ -603,8 +609,9 @@ the button falls back to a stock icon.</p>
       KlipperScreen update may require small adaptations (only this panel fails, the rest of the
       UI keeps working — check <code>KlipperScreen.log</code>).</li>
 </ul>
-<p>Mainsail has no plugin/panel system, so a KlipperScreen menu or panel cannot be carried over —
-the macro layer (level 1) is the only part all UIs share.</p>
+<p>Mainsail has no plugin/panel system, so a KlipperScreen menu or panel cannot be carried over.
+The browser-side counterpart is the <a href="web-ui.html">Web UI</a> — the same panel as a web
+page, embeddable into the Mainsail dashboard via its iframe webcam type.</p>
 
 <div class="page-nav" data-auto></div>
 </div></main>

@@ -95,6 +95,13 @@ for imgdir in "$KSCREEN_DIR"/styles/*/images; do
   [[ -d "$imgdir" ]] && find "$imgdir" -maxdepth 1 -type l -lname "$REPO_DIR/klipperscreen/icons/*" -print -delete || true
 done
 
+# --- 5c) Remove the Vortac web UI nginx site ---
+rm -f /etc/nginx/sites-enabled/vortac-ui /etc/nginx/sites-available/vortac-ui \
+      /etc/nginx/conf.d/vortac-ui.conf
+if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+  systemctl reload nginx 2>/dev/null || true
+fi
+
 # --- 6) Remove empty mountpoint dir (optional) ---
 rmdir "$CONFIG_DST" 2>/dev/null || true
 

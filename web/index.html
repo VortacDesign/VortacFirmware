@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vortac</title>
+<!--
+  Vortac web UI — single self-contained page against the Moonraker API.
+
+  Designed to be embedded into Mainsail as an "iFrame" webcam card, but works
+  standalone in any browser too. It talks JSON-RPC over Moonraker's websocket
+  (default <this host>:7125; override with ?moonraker=host:port) and uses the
+  same status objects as the KlipperScreen panel:
+  vortac_manager / vortac_tool <name> / vortac_qgl_state.
+
+  Served by nginx from the repo's web/ directory (see install.sh).
+  See DOCS/web-ui.html for setup, CORS notes and troubleshooting.
+-->
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161e29; --panel2: #1c2531;
+    --border: #2f3b4b; --text: #dde3ea; --muted: #8b95a5;
+    --accent: #f0764f; --blue: #8fc1f2; --blue-b: #3d6ea5;
+    --green: #7fd6a0; --amber: #e8b45a; --amber-b: #a06a1f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; padding: 10px; gap: 10px;
+    user-select: none;
+  }
+  /* ---- header ---- */
+  #bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 0 auto; }
+  #brand { font-weight: 800; letter-spacing: .06em; color: var(--accent); font-size: 15px; }
+  .chip {
+    border-radius: 999px; padding: 3px 11px; font-size: 12px; font-weight: 600;
+    background: var(--panel2); border: 1px solid var(--border); white-space: nowrap;
+  }
+  .chip b { color: var(--accent); font-weight: 700; }
+  .chip.ok { border-color: #2f7d4f; color: var(--green); }
+  .chip.warn { border-color: var(--amber-b); color: var(--amber); }
+  .chip.err { border-color: #a04040; color: #e88; }
+  #conn { margin-left: auto; }
+  /* ---- dock grid ---- */
+  #docks {
+    flex: 1 1 auto; display: grid; gap: 10px; min-height: 120px;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  }
+  .dock {
+    border: 2px solid var(--border); border-radius: 12px; background: var(--panel);
+    padding: 10px 12px; display: flex; flex-direction: column; text-align: left;
+    color: var(--text); cursor: pointer; font: inherit; position: relative; min-height: 100px;
+  }
+  .dock:hover { filter: brightness(1.15); }
+  .dock .dname { font-size: 11px; color: var(--muted); font-weight: 700;
+    text-transform: uppercase; letter-spacing: .05em; }
+  .dock .tname { font-size: 16px; font-weight: 800; margin: auto 0; }
+  .dock .sense { font-size: 11px; color: var(--muted); }
+  .dock .hint { font-size: 10px; color: #5b6675; margin-top: 4px; }
+  .dock.occupied { border-color: var(--blue-b); }
+  .dock.occupied .tname { color: var(--blue); }
+  .dock.held { border-color: var(--accent); background: #241a15; }
+  .dock.held .tname { color: var(--accent); }
+  .dock.held::after { content: "on carriage"; position: absolute; top: 8px; right: 10px;
+    font-size: 10px; font-weight: 700; color: var(--accent); }
+  .dock.empty { border-style: dashed; }
+  .dock.empty .tname { color: #4a5568; font-weight: 600; font-style: italic; }
+  .dock.unknown { border-color: var(--amber-b); }
+  .dock.unknown .tname { color: var(--amber); }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: #3a4657; margin: 0 2px 1px 6px; }
+  .dot.on { background: #5aa9e8; box-shadow: 0 0 5px #5aa9e8; }
+  .dot.grab { background: var(--accent); box-shadow: 0 0 5px var(--accent); }
+  /* ---- actions ---- */
+  #actions { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; flex: 0 0 auto; }
+  .btn {
+    border-radius: 10px; background: var(--panel2); border: 1px solid var(--border);
+    color: var(--text); font: inherit; font-size: 12px; font-weight: 700;
+    padding: 8px 4px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--accent); }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #181818; }
+  .btn.primary:disabled { background: var(--panel2); color: var(--text); }
+  .btn svg { width: 24px; height: 24px; }
+  .btn.primary:not(:disabled) svg * { stroke: #181818; }
+  /* ---- modal ---- */
+  #modal { position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    display: none; align-items: center; justify-content: center; padding: 20px; }
+  #modal.open { display: flex; }
+  #modal .box { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 20px; max-width: 380px; width: 100%; }
+  #modal p { margin: 0 0 16px; font-size: 14px; line-height: 1.5; }
+  #modal .row { display: flex; gap: 10px; justify-content: flex-end; }
+  #modal button { border-radius: 8px; padding: 7px 18px; font: inherit; font-weight: 700;
+    cursor: pointer; border: 1px solid var(--border); background: var(--panel2); color: var(--text); }
+  #modal button.yes { background: var(--accent); border-color: var(--accent); color: #181818; }
+  /* ---- toast ---- */
+  #toast { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+    background: #351919; border: 1px solid #a04040; color: #f0b0b0; font-size: 12px;
+    border-radius: 8px; padding: 7px 14px; max-width: 90%; display: none; }
+</style>
+</head>
+<body>
+
+<div id="bar">
+  <span id="brand">VORTAC</span>
+  <span class="chip" id="chip-hold">Carriage: –</span>
+  <span class="chip" id="chip-qgl">Gantry: –</span>
+  <span class="chip" id="chip-detect">Detection: –</span>
+  <span class="chip" id="conn">connecting…</span>
+</div>
+
+<div id="docks"><button class="dock empty" disabled><span class="tname">waiting for status…</span></button></div>
+
+<div id="actions">
+  <button class="btn primary" id="btn-primary" disabled>
+    <svg id="ico-primary" viewBox="0 0 64 64" fill="none" stroke="#e8e8e8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></svg>
+    <span id="lbl-primary">Park</span>
+  </button>
+  <button class="btn" id="btn-detect">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#e8e8e8" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 11-3-6.7M21 3v6h-6"/></svg>
+    Detect
+  </button>
+  <button class="btn" id="btn-engage">
+    <svg viewBox="0 0 64 64" fill="none" stroke="#e8e8e8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <g transform="translate(30 33) rotate(-30)" opacity="0.45"><rect x="-16.5" y="-7" width="33" height="14" rx="7"/></g>
+      <g transform="translate(30 33) rotate(60)"><rect x="-16.5" y="-7" width="33" height="14" rx="7"/><circle cx="0" cy="0" r="4"/></g>
+      <path d="M56.9 29.8 A25 25 0 0 1 52.5 46.3"/><path d="M52.5 46.3 L57.8 43.6 M52.5 46.3 L53.2 40.3"/>
+    </svg>
+    Engage
+  </button>
+  <button class="btn" id="btn-disengage">
+    <svg viewBox="0 0 64 64" fill="none" stroke="#e8e8e8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <g transform="translate(30 33) rotate(60)" opacity="0.45"><rect x="-16.5" y="-7" width="33" height="14" rx="7"/></g>
+      <g transform="translate(30 33) rotate(-30)"><rect x="-16.5" y="-7" width="33" height="14" rx="7"/><circle cx="0" cy="0" r="4"/></g>
+      <path d="M52.5 46.3 A25 25 0 0 0 56.9 29.8"/><path d="M56.9 29.8 L54.6 35.3 M56.9 29.8 L60.2 34.8"/>
+    </svg>
+    Disengage
+  </button>
+  <button class="btn" id="btn-save">
+    <svg viewBox="0 0 64 64" fill="none" stroke="#e8e8e8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15 9 H41 L55 23 V49 Q55 55 49 55 H15 Q9 55 9 49 V15 Q9 9 15 9 Z"/>
+      <path d="M21 9 V20 Q21 23 24 23 H37 Q40 23 40 20 V9"/>
+      <path d="M18 55 V38 Q18 35 21 35 H43 Q46 35 46 38 V55"/>
+      <path d="M33.5 12 V19"/>
+    </svg>
+    Save Dock
+  </button>
+</div>
+
+<div id="modal"><div class="box"><p id="modal-text"></p>
+  <div class="row"><button id="modal-no">Cancel</button><button class="yes" id="modal-yes">OK</button></div>
+</div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+/* ---------------- connection ---------------- */
+
+const qs = new URLSearchParams(location.search);
+const apiHost = qs.get("moonraker") || (location.hostname + ":7125");
+const wsProto = location.protocol === "https:" ? "wss" : "ws";
+
+let ws = null, msgId = 0;
+const pending = {};
+
+const state = {
+  connected: false, klippyReady: false,
+  dockCount: 0, manager: {}, qgl: {}, toolStatus: {},
+  subscribedTools: "",
+};
+
+function connect() {
+  setConn("connecting…", "warn");
+  ws = new WebSocket(`${wsProto}://${apiHost}/websocket`);
+  ws.onopen = init;
+  ws.onclose = () => { state.connected = false; setConn("disconnected — retrying", "err"); setTimeout(connect, 3000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.id && pending[msg.id]) {
+      const p = pending[msg.id]; delete pending[msg.id];
+      msg.error ? p.rej(new Error(msg.error.message || "RPC error")) : p.res(msg.result);
+    } else if (msg.method === "notify_status_update") {
+      mergeStatus(msg.params[0]);
+    } else if (msg.method === "notify_klippy_ready") {
+      init();
+    } else if (msg.method === "notify_klippy_shutdown" || msg.method === "notify_klippy_disconnected") {
+      state.klippyReady = false; setConn("klipper not ready", "err"); render();
+    }
+  };
+}
+
+function rpc(method, params) {
+  return new Promise((res, rej) => {
+    if (!ws || ws.readyState !== 1) return rej(new Error("not connected"));
+    const id = ++msgId; pending[id] = { res, rej };
+    ws.send(JSON.stringify({ jsonrpc: "2.0", method, params: params || {}, id }));
+  });
+}
+
+async function init() {
+  try {
+    state.connected = true;
+    const info = await rpc("server.info");
+    if (info.klippy_state !== "ready") {
+      state.klippyReady = false;
+      setConn("klipper: " + info.klippy_state, "warn");
+      setTimeout(init, 2500);
+      return;
+    }
+    state.klippyReady = true;
+    setConn("connected", "ok");
+    const cfg = await rpc("printer.objects.query", { objects: { configfile: ["settings"] } });
+    const settings = cfg.status.configfile.settings || {};
+    state.dockCount = parseInt((settings.vortac_manager || {}).dock_count) || 0;
+    await subscribeAll();
+  } catch (e) { toast(e.message); setTimeout(init, 3000); }
+}
+
+async function subscribeAll() {
+  const objects = { vortac_manager: null, vortac_qgl_state: null };
+  for (const t of (state.manager.tools || [])) objects["vortac_tool " + t] = null;
+  state.subscribedTools = (state.manager.tools || []).join(",");
+  const r = await rpc("printer.objects.subscribe", { objects });
+  mergeStatus(r.status);
+}
+
+function mergeStatus(st) {
+  for (const [k, v] of Object.entries(st)) {
+    if (k === "vortac_manager") Object.assign(state.manager, v);
+    else if (k === "vortac_qgl_state") Object.assign(state.qgl, v);
+    else if (k.startsWith("vortac_tool ")) {
+      const id = k.slice(12);
+      state.toolStatus[id] = Object.assign(state.toolStatus[id] || {}, v);
+    }
+  }
+  // tools discovered after the first subscribe → extend the subscription once
+  const tools = (state.manager.tools || []).join(",");
+  if (tools && tools !== state.subscribedTools) subscribeAll().catch(() => {});
+  render();
+}
+
+/* ---------------- actions ---------------- */
+
+function gcode(script) {
+  rpc("printer.gcode.script", { script }).catch((e) => toast(e.message));
+}
+
+function confirmThen(text, script) {
+  const modal = document.getElementById("modal");
+  document.getElementById("modal-text").textContent = text;
+  modal.classList.add("open");
+  const yes = document.getElementById("modal-yes"), no = document.getElementById("modal-no");
+  const close = () => { modal.classList.remove("open"); yes.onclick = no.onclick = null; };
+  yes.onclick = () => { close(); gcode(script); };
+  no.onclick = close;
+}
+
+function loadableTools() {
+  const occ = state.manager.dock_occupancy || {};
+  return [...new Set(Object.values(occ).filter(Boolean))].sort();
+}
+const toolIndex = (t) => (state.toolStatus[t] || {}).tool_index;
+
+document.getElementById("btn-detect").onclick = () => gcode("VORTAC_DETECT");
+document.getElementById("btn-engage").onclick = () =>
+  confirmThen("Rotate the grabber to the engage position?", "VORTAC_ENGAGE");
+document.getElementById("btn-disengage").onclick = () =>
+  confirmThen("Rotate the grabber to the disengage position?", "VORTAC_DISENGAGE");
+document.getElementById("btn-save").onclick = () =>
+  confirmThen("Save the current XYZ as the selected dock's hooked position?", "VORTAC_DOCK_CAL_SAVE");
+document.getElementById("btn-primary").onclick = () => {
+  const held = state.manager.current_tool;
+  if (held) return confirmThen(`Park ${held} at its dock?`, "VORTAC_UNLOAD");
+  const l = loadableTools();
+  if (l.length === 1 && toolIndex(l[0]) != null)
+    confirmThen(`Load ${l[0]} (T${toolIndex(l[0])})?`, "T" + toolIndex(l[0]));
+};
+
+function tileClick(dock) {
+  const occ = state.manager.dock_occupancy || {};
+  const held = state.manager.current_tool;
+  const parkMap = state.manager.park_dock || {};
+  const tool = occ[dock];
+  if (held && parkMap[held] === dock && !tool) {
+    confirmThen(`Park ${held} at ${dock}?`, "VORTAC_UNLOAD");
+  } else if (tool) {
+    const idx = toolIndex(tool);
+    if (idx != null) confirmThen(`Tool change to ${tool} (T${idx})?`, "T" + idx);
+  } else {
+    confirmThen(`Select ${dock} for dock calibration?\n(Runs VORTAC_DETECT; the dock must hold a detectable tool.)`,
+                "VORTAC_SELECT_DOCK DOCK=" + dock);
+  }
+}
+
+/* ---------------- rendering ---------------- */
+
+const PARK_ICON = `<path d="M30.5 8.5 Q32 6 33.5 8.5 L40 20 Q41.5 23 38 23 H26 Q22.5 23 24 20 Z"/>
+  <path d="M32 28 V38 M32 38 L28 33.5 M32 38 L36 33.5"/>
+  <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>`;
+const LOAD_ICON = `<path d="M32 18 V8 M32 8 L28 12.5 M32 8 L36 12.5"/>
+  <path d="M30.5 26.5 Q32 24 33.5 26.5 L40 38 Q41.5 41 38 41 H26 Q22.5 41 24 38 Z"/>
+  <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>`;
+
+function senseDot(v, grab) {
+  const cls = v === false ? (grab ? "dot grab" : "dot on") : "dot";
+  return `<span class="${cls}"></span>`;
+}
+
+function setConn(text, cls) {
+  const el = document.getElementById("conn");
+  el.textContent = text; el.className = "chip " + (cls || "");
+}
+
+function toast(text) {
+  const el = document.getElementById("toast");
+  el.textContent = text; el.style.display = "block";
+  clearTimeout(el._t); el._t = setTimeout(() => (el.style.display = "none"), 5000);
+}
+
+function dockNames() {
+  const names = new Set(Object.keys(state.manager.dock_occupancy || {}));
+  for (let i = 0; i < state.dockCount; i++) names.add("dock" + i);
+  return [...names].sort((a, b) => a.length - b.length || (a < b ? -1 : 1));
+}
+
+function render() {
+  const m = state.manager;
+  const held = m.current_tool;
+
+  // header
+  const hold = document.getElementById("chip-hold");
+  hold.innerHTML = held
+    ? `Holding: <b>${esc(held)}${toolIndex(held) != null ? " (T" + toolIndex(held) + ")" : ""}</b>`
+    : "Carriage empty";
+  const qgl = m.qgl_state || state.qgl.state;
+  const qchip = document.getElementById("chip-qgl");
+  qchip.textContent = "Gantry: " + (qgl ? qgl.toUpperCase() : "–");
+  qchip.className = "chip " + (qgl === "tilted" ? "ok" : qgl ? "warn" : "");
+  const dchip = document.getElementById("chip-detect");
+  dchip.textContent = m.dock_detection_valid ? "Detection: OK" : "Detection: stale — run Detect";
+  dchip.className = "chip " + (m.dock_detection_valid ? "ok" : "warn");
+
+  // docks
+  const wrap = document.getElementById("docks");
+  const names = dockNames();
+  const occ = m.dock_occupancy || {};
+  const parkMap = m.park_dock || {};
+  const ready = state.klippyReady;
+  if (names.length) {
+    wrap.innerHTML = names.map((dock) => {
+      const tool = occ[dock];
+      const st = state.toolStatus[tool || (parkMap[held] === dock ? held : "")] || {};
+      let cls, body, hint;
+      if (tool) {
+        cls = tool === held ? "held" : "occupied";
+        const idx = toolIndex(tool);
+        body = `<span class="tname">${esc(tool)}<small style="color:var(--muted)">${idx != null ? " · T" + idx : ""}</small></span>
+                <span class="sense">dock${senseDot(st.dock_sense_state)} grab${senseDot(st.grab_sense_state, true)}</span>`;
+        hint = held ? "tap: change" : "tap: load";
+      } else if (held && parkMap[held] === dock) {
+        cls = "held";
+        body = `<span class="tname">${esc(held)}</span>
+                <span class="sense">grab${senseDot(st.grab_sense_state, true)}</span>`;
+        hint = "tap: park here";
+      } else {
+        const calibrated = Object.values(state.toolStatus).some((t) => dock in (t.dock_positions || {}));
+        cls = calibrated || m.dock_detection_valid ? "empty" : "unknown";
+        body = `<span class="tname">${cls === "empty" ? "empty" : "not calibrated"}</span><span class="sense"></span>`;
+        hint = "tap: select for calibration";
+      }
+      return `<button class="dock ${cls}" data-dock="${dock}" ${ready ? "" : "disabled"}>
+                <span class="dname">${esc(dock)}</span>${body}
+                <span class="hint">${hint}</span>
+              </button>`;
+    }).join("");
+    wrap.querySelectorAll(".dock").forEach((b) =>
+      (b.onclick = () => tileClick(b.dataset.dock)));
+  }
+
+  // primary button
+  const btn = document.getElementById("btn-primary");
+  const ico = document.getElementById("ico-primary");
+  const lbl = document.getElementById("lbl-primary");
+  const l = loadableTools();
+  if (held) { ico.innerHTML = PARK_ICON; lbl.textContent = "Park"; btn.disabled = !ready; }
+  else { ico.innerHTML = LOAD_ICON; lbl.textContent = "Load"; btn.disabled = !ready || l.length !== 1; }
+  for (const id of ["btn-detect", "btn-engage", "btn-disengage", "btn-save"])
+    document.getElementById(id).disabled = !ready;
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+render();
+connect();
+</script>
+</body>
+</html>

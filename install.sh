@@ -97,6 +97,36 @@ else
   echo "ℹ️  KlipperScreen not found at $KSCREEN_DIR — skipping panel links"
 fi
 
+# --- 1c) serve the Vortac web UI via nginx (only if nginx is installed) ---
+# Own server block on its own port — never touches the Mainsail site config.
+VORTAC_UI_PORT="${VORTAC_UI_PORT:-7130}"
+WEB_SRC="$REPO_DIR/web"
+if command -v nginx >/dev/null 2>&1 && [[ -d "$WEB_SRC" ]]; then
+  echo "🌐 Setting up nginx site for the Vortac web UI (port $VORTAC_UI_PORT)"
+  NGINX_SITE="server {
+    listen $VORTAC_UI_PORT;
+    listen [::]:$VORTAC_UI_PORT;
+    server_name _;
+    root $WEB_SRC;
+    index index.html;
+    location / { try_files \$uri \$uri/ =404; }
+}"
+  if [[ -d /etc/nginx/sites-available && -d /etc/nginx/sites-enabled ]]; then
+    echo "$NGINX_SITE" > /etc/nginx/sites-available/vortac-ui
+    ln -sfn /etc/nginx/sites-available/vortac-ui /etc/nginx/sites-enabled/vortac-ui
+  else
+    echo "$NGINX_SITE" > /etc/nginx/conf.d/vortac-ui.conf
+  fi
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx 2>/dev/null || true
+    echo "  → http://<pi>:$VORTAC_UI_PORT/"
+  else
+    echo "  ⚠️  nginx config test failed — site written but not reloaded (check: nginx -t)"
+  fi
+else
+  echo "ℹ️  nginx not found — skipping Vortac web UI site"
+fi
+
 # --- 2) bind-mount configs via systemd (persistent, no fstab) ---
 echo "🪢 Setting up systemd bind-mount for configs"
 # mountpoint must exist; source bleibt unangetastet

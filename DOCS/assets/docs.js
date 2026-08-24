@@ -12,6 +12,7 @@ const PAGES = [
   { file: "print-calibration.html", title: "Print Calibration" },
   { file: "first-print.html",     title: "First Print" },
   { file: "klipperscreen.html",   title: "KlipperScreen" },
+  { file: "web-ui.html",          title: "Web UI" },
   { file: "modules.html",         title: "Module Reference" },
   { file: "gcode.html",           title: "G-code Reference" },
   { file: "troubleshooting.html", title: "Troubleshooting" },
