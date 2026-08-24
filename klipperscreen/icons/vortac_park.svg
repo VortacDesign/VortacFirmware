@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Vortac park: tool plate lowering into the dock cradle. -->
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M30.5 8.5 Q32 6 33.5 8.5 L40 20 Q41.5 23 38 23 H26 Q22.5 23 24 20 Z"/>
+    <path d="M32 28 V38 M32 38 L28 33.5 M32 38 L36 33.5"/>
+    <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>
+  </g>
+</svg>

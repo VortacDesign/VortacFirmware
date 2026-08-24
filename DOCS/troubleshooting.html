@@ -56,6 +56,25 @@ fix.</p>
 
 <h2 id="config-issues">Configuration</h2>
 
+<details class="fold" id="mainsail-cfg">
+  <summary>Mainsail warns: <code>virtual_sdcard / pause_resume / gcode_macro pause … is not defined in config</code></summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> Mainsail's client config (<code>mainsail.cfg</code>) is not
+    included — it provides <code>virtual_sdcard</code>, <code>pause_resume</code>,
+    <code>display_status</code> and the <code>PAUSE</code>/<code>RESUME</code>/
+    <code>CANCEL_PRINT</code> macros.</p>
+    <p><strong>Fix:</strong> add <code>[include mainsail.cfg]</code> to
+    <code>printer.cfg</code> (see <code>configs/printer.example.cfg</code>). If
+    <code>~/printer_data/config/mainsail.cfg</code> does not exist, install it via the
+    <a href="https://github.com/mainsail-crew/mainsail-config">mainsail-config</a> repo with a
+    Moonraker <code>update_manager</code> entry, then restart Klipper.</p>
+    <p><strong>Toolchanger note:</strong> the client macros park the toolhead on pause/cancel —
+    no probing involved, so the probe guard does not interfere. If the default park corner
+    collides with a dock, set <code>variable_custom_park_x/y</code> in
+    <code>[gcode_macro _CLIENT_VARIABLE]</code>.</p>
+  </div>
+</details>
+
 <details class="fold" id="franken-tool">
   <summary>One "franken-tool": a board behaves as if it had the other tool's config</summary>
   <div class="fold-body">

@@ -273,7 +273,7 @@ Every element maps to data that <code>get_status</code> already exports.</p>
       <span class="tname">miniGrey</span>
       <span class="tsub">T1 · extruder1</span>
       <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot grab"></span>grab</span></span>
-      <span class="hint">grab ●   tap: park here</span>
+      <span class="hint">tap: park here</span>
     </div>
     <div class="dock empty">
       <span class="dname">dock2</span>
@@ -291,7 +291,14 @@ Every element maps to data that <code>get_status</code> already exports.</p>
     </div>
   </div>
   <div class="actions">
-    <div class="btn primary">Park miniGrey</div>
+    <div class="btn primary"><svg width="26" height="26" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M30.5 8.5 Q32 6 33.5 8.5 L40 20 Q41.5 23 38 23 H26 Q22.5 23 24 20 Z"/>
+    <path d="M32 28 V38 M32 38 L28 33.5 M32 38 L36 33.5"/>
+    <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>
+  </g>
+</svg> Park</div>
     <div class="btn"><svg width="24" height="24"
    xmlns:dc="http://purl.org/dc/elements/1.1/"
    xmlns:cc="http://creativecommons.org/ns#"
@@ -459,6 +466,28 @@ the button falls back to a stock icon.</p>
     <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   
   <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M30.5 8.5 Q32 6 33.5 8.5 L40 20 Q41.5 23 38 23 H26 Q22.5 23 24 20 Z"/>
+    <path d="M32 28 V38 M32 38 L28 33.5 M32 38 L36 33.5"/>
+    <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>
+  </g>
+</svg>
+    <figcaption>vortac_park.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M32 18 V8 M32 8 L28 12.5 M32 8 L36 12.5"/>
+    <path d="M30.5 26.5 Q32 24 33.5 26.5 L40 38 Q41.5 41 38 41 H26 Q22.5 41 24 38 Z"/>
+    <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>
+  </g>
+</svg>
+    <figcaption>vortac_load.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
     <path d="M15 9 H41 L55 23 V49 Q55 55 49 55 H15 Q9 55 9 49 V15 Q9 9 15 9 Z"/>
     <path d="M21 9 V20 Q21 23 24 23 H37 Q40 23 40 20 V9"/>
     <path d="M18 55 V38 Q18 35 21 35 H43 Q46 35 46 38 V55"/>
@@ -535,9 +564,11 @@ the button falls back to a stock icon.</p>
   <li><strong>Tap logic is contextual:</strong> occupied tile → confirm → <code>T&lt;n&gt;</code>;
       the held tool's tile → confirm → <code>VORTAC_UNLOAD</code>; uncalibrated tile → confirm →
       <code>VORTAC_SELECT_DOCK DOCK=…</code> (calibration flow). One screen, no submenu digging.</li>
-  <li><strong>Action bar:</strong> a contextual primary button ("Park &lt;tool&gt;" while
-      holding, "Load &lt;tool&gt;" when the carriage is empty and exactly one docked tool
-      exists, otherwise it defers to the dock tiles) plus Detect, Engage, Disengage and
+  <li><strong>Action bar:</strong> a contextual primary button — park icon while a tool is
+      held, load icon when the carriage is empty and exactly one docked tool exists, greyed
+      out otherwise (then the dock tiles are the way to load); icon plus a short generic
+      label ("Park"/"Load") like the other buttons — the confirm dialog names the concrete
+      tool — plus Detect, Engage, Disengage and
       Save Dock. <em>Confirm policy:</em> Detect runs immediately (harmless — LEDs are
       restored); everything that moves the machine or writes config confirms first.
       Disengage keeps its confirm deliberately: disengaging mid-air drops the tool.</li>
