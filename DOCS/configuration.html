@@ -290,8 +290,8 @@ T0                   # manager: FLAT -> fetch -> TILT, applies offsets
 <ul>
   <li><strong>XYZ approach/depart</strong> is hardcoded in <code>vortac_manager.py</code>
       (constants at the top of the file): <code>DOCK_Y_SAFE = 50.0</code>,
-      <code>DOCK_Z_CLEARANCE = 4.5</code>, <code>DOCK_APPROACH_F = 2000</code>,
-      <code>DOCK_SLIDE_F = 500</code>. Edit there for global geometry tweaks.</li>
+      <code>DOCK_Z_CLEARANCE = 5.0</code>, <code>DOCK_APPROACH_F = 2000</code>,
+      <code>DOCK_SLIDE_F = 400</code>. Edit there for global geometry tweaks.</li>
   <li><strong>Per-tool warm-up / cool-down</strong> → <code>tool_activate_gcode</code> /
       <code>tool_deactivate_gcode</code> on <code>[vortac_tool &lt;name&gt;]</code> (set via
       include_with overrides: <code>vortac_tool TN.tool_activate_gcode: …</code>) — those run on

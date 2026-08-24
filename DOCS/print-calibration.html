@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Calibration — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Print Calibration</h1>
+<p class="subtitle">Everything between a calibrated toolchanger and a machine that can actually
+print: gantry levelling, the Z reference, per-tool offsets, the bed mesh, and the per-tool
+extruder work.</p>
+
+<div class="callout">
+  <span class="callout-title">Prerequisite</span>
+  <p>The toolchanger side must be done first — grabber LUT, zero position and every dock position
+  from the <a href="calibration.html">Calibration</a> chapter. Everything on this page assumes
+  tool changes already work reliably, because several steps need a tool picked up and put back.</p>
+</div>
+
+<h2 id="order">The order matters</h2>
+<p>These calibrations depend on each other, so run them in this sequence. Anything probe-based
+requires <strong>no tool held</strong> — the manager enforces that (see
+<a href="modules.html#probe-guard">probe guard</a>).</p>
+
+<div class="diagram">
+<svg viewBox="0 0 760 250" role="img" aria-label="Print calibration order">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/>
+    </marker>
+  </defs>
+  <rect class="dbox" x="20"  y="30" width="150" height="58"/>
+  <text class="dlabel" x="95"  y="54" text-anchor="middle">1 — Home</text>
+  <text class="dsub"   x="95"  y="74" text-anchor="middle">G28 → gantry flat</text>
+
+  <rect class="dbox-hl" x="200" y="30" width="150" height="58"/>
+  <text class="dlabel" x="275" y="54" text-anchor="middle">2 — QGL</text>
+  <text class="dsub"   x="275" y="74" text-anchor="middle">no tool held</text>
+
+  <rect class="dbox" x="380" y="30" width="170" height="58"/>
+  <text class="dlabel" x="465" y="54" text-anchor="middle">3 — Z reference</text>
+  <text class="dsub"   x="465" y="74" text-anchor="middle">probe z_offset</text>
+
+  <rect class="dbox" x="580" y="30" width="160" height="58"/>
+  <text class="dlabel" x="660" y="54" text-anchor="middle">4 — Tool offsets</text>
+  <text class="dsub"   x="660" y="74" text-anchor="middle">Z first, then XY</text>
+
+  <rect class="dbox-hl" x="20"  y="150" width="150" height="58"/>
+  <text class="dlabel" x="95"  y="174" text-anchor="middle">5 — Bed mesh</text>
+  <text class="dsub"   x="95"  y="194" text-anchor="middle">no tool held</text>
+
+  <rect class="dbox" x="200" y="150" width="190" height="58"/>
+  <text class="dlabel" x="295" y="174" text-anchor="middle">6 — Extruder / PID</text>
+  <text class="dsub"   x="295" y="194" text-anchor="middle">per tool</text>
+
+  <rect class="dbox" x="420" y="150" width="200" height="58"/>
+  <text class="dlabel" x="520" y="174" text-anchor="middle">7 — Input shaper</text>
+  <text class="dsub"   x="520" y="194" text-anchor="middle">per tool, applied at change</text>
+
+  <path class="dline" d="M170 59 L200 59"/>
+  <path class="dline" d="M350 59 L380 59"/>
+  <path class="dline" d="M550 59 L580 59"/>
+  <path class="dline" d="M660 88 C660 120, 95 118, 95 150"/>
+  <path class="dline" d="M170 179 L200 179"/>
+  <path class="dline" d="M390 179 L420 179"/>
+</svg>
+</div>
+
+<div class="checklist">
+  <div class="checklist-head">
+    <h3>Print-calibration checklist</h3>
+    <button class="reset" type="button">Reset checklist</button>
+  </div>
+  <label class="check"><input type="checkbox" data-ck="qgl">
+    <span class="check-text"><span class="check-title">Quad gantry level converges</span>
+    <span class="check-sub">No tool held; within <code>retry_tolerance</code> in a few retries.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="zref">
+    <span class="check-text"><span class="check-title">Z reference established</span>
+    <span class="check-sub">Probe <code>z_offset</code> set so Z0 is the bed for the reference tool.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="toolz">
+    <span class="check-text"><span class="check-title">Per-tool Z offsets</span>
+    <span class="check-sub"><code>gcode_offset_z</code> for every tool except the reference tool.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="toolxy">
+    <span class="check-text"><span class="check-title">Per-tool XY offsets</span>
+    <span class="check-sub"><code>gcode_offset_x/y</code> from a two-tool test print.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="mesh">
+    <span class="check-text"><span class="check-title">Bed mesh profile saved</span>
+    <span class="check-sub"><code>BED_MESH_CALIBRATE PROFILE=default</code> + <code>SAVE_CONFIG</code>.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="extruder">
+    <span class="check-text"><span class="check-title">Per-tool extruder: rotation_distance + PID</span>
+    <span class="check-sub">Every tool separately; bed PID once.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="shaper">
+    <span class="check-text"><span class="check-title">Per-tool input shaper</span>
+    <span class="check-sub">Measured per tool, applied via <code>tool_activate_gcode</code>.</span></span>
+  </label>
+</div>
+
+<h2 id="homing">1 — Homing and the two gantry states</h2>
+<p>All four Z drivers run sensorless (StallGuard <code>diag_pin</code> +
+<code>driver_SGTHRS</code> on <code>stepper_z</code>…<code>stepper_z3</code>), homing upwards
+into the frame. That is what makes the <em>flat</em> state meaningful: after a Z home the gantry
+is parallel to the <strong>frame</strong>, which is the geometry the dock positions were
+calibrated in.</p>
+<ul>
+  <li><code>G28</code> → gantry <strong>flat</strong>, stored QGL deltas cleared
+      (<code>[vortac_qgl_state]</code> resets on <code>homing:home_rails_end</code> of any
+      <code>stepper_z*</code>).</li>
+  <li><code>QUAD_GANTRY_LEVEL</code> → gantry <strong>tilted</strong> (parallel to the
+      <em>bed</em>) — this is print geometry.</li>
+  <li>Check any time with <code>VORTAC_QGL_STATUS</code>.</li>
+</ul>
+<div class="callout warn">
+  <span class="callout-title">The state lives in RAM only</span>
+  <p>A power cycle, a Klipper restart (<code>SAVE_CONFIG</code> restarts!), or a fresh Z home
+  invalidates the tilt: the deltas are gone and the state is <code>flat</code> again. After every
+  one of those, <strong>QGL must be re-run before printing</strong>.</p>
+</div>
+
+<h2 id="qgl">2 — Quad gantry level</h2>
+<p>Run it with <strong>no tool held</strong>:</p>
+<pre><code>VORTAC_UNLOAD          # if a tool is still on the carriage
+G28
+QUAD_GANTRY_LEVEL
+VORTAC_QGL_STATUS      # should now report tilted, with four stored deltas</code></pre>
+<p>The tracked configuration in <code>mcu/octopus.cfg</code>:</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Value</th><th>What to check</th></tr></thead>
+<tbody>
+<tr><td><code>gantry_corners</code></td><td><code>-60,-40.8</code> / <code>360,329.4</code></td><td>Must match where the Z belts actually pull on <em>your</em> frame — wrong corners make QGL converge slowly or not at all.</td></tr>
+<tr><td><code>points</code></td><td><code>30,0</code> · <code>30,220</code> · <code>270,220</code> · <code>270,0</code></td><td>Nozzle coordinates. The probe sits <code>y_offset: 33.8</code> behind the nozzle, so every point must stay reachable once that offset is added.</td></tr>
+<tr><td><code>retry_tolerance</code></td><td><code>0.02</code></td><td>Tight but realistic for this gantry. If it never gets there, look at mechanics, not at the number.</td></tr>
+<tr><td><code>retries</code></td><td><code>5</code></td><td>Should typically converge in 2–3.</td></tr>
+<tr><td><code>max_adjust</code></td><td><code>10</code></td><td>Safety limit. Hitting it means the gantry is badly out or a Z motor is mis-wired.</td></tr>
+<tr><td><code>horizontal_move_z</code></td><td><code>5</code></td><td>Travel height between probe points.</td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="fold">
+  <summary>Good to know: how the FLAT/TILT trick works</summary>
+  <div class="fold-body">
+    <p><code>[vortac_qgl_state]</code> hooks the QGL helper and records the per-stepper delta
+    vectors it applies. <code>VORTAC_GANTRY_FLAT</code> replays the negated deltas (back to
+    frame-parallel, dock geometry valid), <code>VORTAC_GANTRY_TILT</code> replays them again
+    (back to bed-parallel). No re-probing is needed, which is exactly what makes a mid-print tool
+    change affordable. Re-running <code>QUAD_GANTRY_LEVEL</code> while flat zeroes the stored
+    deltas first, so the new measurement starts clean.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Troubleshooting: QGL oscillates or refuses to converge</summary>
+  <div class="fold-body">
+    <ul>
+      <li><strong>It refuses to start at all</strong> — a tool is held (probe guard). Park it.</li>
+      <li><strong>Oscillating corrections</strong> — usually wrong <code>gantry_corners</code>, or
+          a Z motor turning the wrong way.</li>
+      <li><strong>Never reaches tolerance</strong> — check for binding, loose belts, and that the
+          bed itself is not moving. Probe repeatability comes first:
+          <code>PROBE_ACCURACY</code> (no tool!) should be well below
+          <code>retry_tolerance</code>.</li>
+      <li><strong>Fine right after homing, off later</strong> — something reset the state; check
+          <code>VORTAC_QGL_STATUS</code>.</li>
+    </ul>
+  </div>
+</details>
+
+<h2 id="z-reference">3 — The Z reference (probe z_offset)</h2>
+<p>The probe is mounted on the <strong>carriage</strong>, not on the tool
+(<code>[probe]</code> in <code>mcu/vortac.cfg</code>: <code>pin: vortac:PA6</code>,
+<code>x_offset: 0</code>, <code>y_offset: 33.8</code>). That has two consequences:</p>
+<ul>
+  <li>Probing works with the carriage empty — which is why the manager insists on it.</li>
+  <li>The probe measures the bed relative to the <em>carriage</em>. Turning that into "Z0 = bed
+      surface for the nozzle" is what <code>z_offset</code> plus the per-tool
+      <code>gcode_offset_z</code> do.</li>
+</ul>
+
+<div class="callout warn">
+  <span class="callout-title">PROBE_CALIBRATE is not usable here</span>
+  <p>Klipper's <code>PROBE_CALIBRATE</code> wants you to paper-test the nozzle right after
+  probing — but the nozzle belongs to a tool, and probing with a tool held is refused (and would
+  crash the nozzle). Use the two-measurement procedure below instead.</p>
+</div>
+
+<h3 id="z-procedure">Two-measurement procedure</h3>
+<p>Pick one tool as the <strong>reference tool</strong> (the one whose
+<code>gcode_offset_z</code> stays <code>0</code> — usually T0). Then, on a levelled gantry:</p>
+<ol>
+  <li>With <strong>no tool</strong>, probe the bed centre and note the trigger Z —
+      <code>PROBE</code> reports it (<code>Result is z=…</code>). Call it
+      <code>Z_probe</code>.</li>
+  <li>Pick up the reference tool (<code>VORTAC_LOAD TOOL=&lt;name&gt;</code>) and jog the nozzle
+      down at the <em>same XY</em> until a sheet of paper just drags. Note that Z as
+      <code>Z_nozzle</code>.</li>
+  <li>The probe offset is the difference: <code>z_offset = Z_probe − Z_nozzle</code>. Enter it
+      under <code>[probe]</code>.</li>
+</ol>
+<p>Verify by re-homing, running QGL, then commanding the nozzle to <code>Z0</code> with the
+reference tool: the paper drag should be the same. Fine-tune live with
+<code>SET_GCODE_OFFSET Z_ADJUST=…</code> during a first layer and fold the result into
+<code>z_offset</code> afterwards.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Sign convention</span>
+  <p>Klipper adds the G-code offset to the commanded position, exactly like Z babystepping:
+  <strong>a more positive Z offset raises the nozzle</strong> (thicker first layer), a more
+  negative one lowers it.</p>
+</div>
+
+<h2 id="tool-offsets">4 — Per-tool offsets</h2>
+<p>Each tool carries three numbers on its <code>[vortac_tool]</code> section; the manager applies
+them with <code>SET_GCODE_OFFSET … MOVE=0</code> on every tool change:</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>gcode_offset_x</code></td><td><code>0.0</code></td><td>nozzle X deviation from the reference tool</td></tr>
+<tr><td><code>gcode_offset_y</code></td><td><code>0.0</code></td><td>nozzle Y deviation</td></tr>
+<tr><td><code>gcode_offset_z</code></td><td><code>0.0</code></td><td>nozzle height deviation (positive = nozzle higher)</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout">
+  <span class="callout-title">Where to write them</span>
+  <p>The <code>[vortac_tool]</code> section is <em>injected from the PCB template</em>, so you do
+  not edit it directly — put the offsets into that tool's <code>include_with</code>
+  <code>overrides:</code> block, using the template's original section name:</p>
+  <pre><code>[include_with miniGrey vortac_configs/mcu/EBB42_V12.cfg]
+skip_sections:
+  mcu EBBCan
+overrides:
+  vortac_tool TN.gcode_offset_x: -0.30
+  vortac_tool TN.gcode_offset_y:  0.15
+  vortac_tool TN.gcode_offset_z: -0.05</code></pre>
+</div>
+
+<h3 id="tool-z-offsets">Z offsets between tools</h3>
+<p>Reference tool stays at <code>0</code>. For every other tool: load it, paper-test the nozzle
+at the same XY as in step 3, and enter the difference to the reference tool's touch height. A
+tool that touches <em>later</em> (nozzle sits higher) needs a <strong>negative</strong>
+<code>gcode_offset_z</code>.</p>
+<p>The practical refinement: print a small single-layer patch with each tool, adjust live with
+<code>SET_GCODE_OFFSET Z_ADJUST=…</code> until the first layer matches the reference tool's, and
+copy the accumulated value into the config.</p>
+
+<h3 id="tool-xy-offsets">XY offsets between tools</h3>
+<p>Print a two-tool alignment pattern — e.g. a cross or a set of parallel lines drawn by the
+reference tool, with the same pattern drawn on top by the second tool. Measure the shift, then
+<strong>subtract</strong> it: if T1's lines land 0.3&nbsp;mm too far in +X, set
+<code>gcode_offset_x: -0.30</code>. Repeat until the two patterns coincide; 0.05&nbsp;mm is a
+realistic target.</p>
+<div class="callout tip">
+  <span class="callout-title">Check repeatability first</span>
+  <p>Offsets are only meaningful if the pickup is repeatable. Run
+  <code>VORTAC_UNLOAD</code>/<code>VORTAC_LOAD</code> for the same tool several times and re-print
+  the pattern. If it moves between pickups, fix the mechanics (dock position, grabber
+  engage angle, kinematic coupling) before chasing offset numbers.</p>
+</div>
+
+<h2 id="bed-mesh">5 — Bed mesh</h2>
+<p>Again: no tool held, gantry levelled.</p>
+<pre><code>VORTAC_UNLOAD
+G28
+QUAD_GANTRY_LEVEL
+BED_MESH_CALIBRATE PROFILE=default
+SAVE_CONFIG</code></pre>
+<p>The tracked configuration in <code>mcu/octopus.cfg</code>:</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Value</th><th>What to check</th></tr></thead>
+<tbody>
+<tr><td><code>mesh_min</code></td><td><code>10, 40</code></td><td>Probe coordinates. Y must stay ≥ the probe's <code>y_offset</code> (33.8) so the nozzle stays on the bed while the probe reaches the front row.</td></tr>
+<tr><td><code>mesh_max</code></td><td><code>290, 250</code></td><td>Rear limit is bounded by <code>y_offset</code> too: the carriage travels 33.8 mm further back than the probed point.</td></tr>
+<tr><td><code>probe_count</code></td><td><code>3, 3</code></td><td>Fine for a quick check; raise it (5×5, 7×7) for the profile you actually print with.</td></tr>
+<tr><td><code>horizontal_move_z</code></td><td><code>4</code></td><td>Must clear any clips/warping.</td></tr>
+<tr><td><code>fade_start</code> / <code>fade_end</code> / <code>fade_target</code></td><td><code>1</code> / <code>10</code> / <code>0</code></td><td>Mesh compensation fades out between Z1 and Z10 mm.</td></tr>
+<tr><td><code>speed</code></td><td><code>200</code></td><td>Travel speed between points.</td></tr>
+</tbody>
+</table>
+</div>
+<p>The mesh describes the <strong>bed surface relative to the levelled gantry</strong>, so it is
+only valid together with a QGL run — and it is tool-independent (the probe is on the carriage).
+Per-tool height differences are handled by <code>gcode_offset_z</code>, not by the mesh.</p>
+<div class="callout tip">
+  <span class="callout-title">Mesh at printing temperature</span>
+  <p>Calibrate with the bed at its actual print temperature and after a proper heat soak —
+  a cold mesh on a heated bed is worse than no mesh. If you print at several bed temperatures,
+  save one profile per temperature (<code>PROFILE=pei_100</code>) and load it in your
+  print-start macro.</p>
+</div>
+
+<h2 id="extruder">6 — Per-tool extruder and heater calibration</h2>
+<p>Every tool is its own extruder and its own hotend, so these are <strong>per tool</strong>.
+Klipper names them index-based: the first tool owns <code>extruder</code>, the next
+<code>extruder1</code>, and so on (see <a href="configuration.html#include-with">include_with</a>).</p>
+<pre><code>ACTIVATE_EXTRUDER EXTRUDER=extruder1     # select the tool's extruder
+PID_CALIBRATE HEATER=extruder1 TARGET=240
+SAVE_CONFIG</code></pre>
+<ul>
+  <li><strong>Hotend PID</strong> — once per tool, at a typical print temperature. The bed
+      (<code>HEATER=heater_bed</code>) only once for the machine.</li>
+  <li><strong>rotation_distance</strong> — the shared template ships one value
+      (<code>21.95</code> with <code>gear_ratio: 50:10</code> on the SB2209 template). Extruders
+      differ; measure per tool (mark 120 mm of filament, extrude 100 mm, compute) and put a
+      deviating value into that tool's <code>overrides:</code> —
+      <code>extruder.rotation_distance: 22.10</code> — never into the shared template.</li>
+  <li><strong>Pressure advance, flow, temperature towers</strong> — per tool as well, since
+      hotend and nozzle differ. Pressure advance can live in the config
+      (<code>extruder.pressure_advance</code> via overrides) or in the slicer's per-tool
+      filament settings.</li>
+  <li><strong>Thermistor / RTD type</strong> — also an override, not a template edit. See
+      <a href="configuration.html#overrides">Configuration → overrides</a> for the MAX31865
+      example and the <a href="troubleshooting.html#thermocouple-fault">reference-resistor
+      trap</a>.</li>
+</ul>
+
+<h2 id="shaper">7 — Resonance / input shaper per tool</h2>
+<p>Every tool board carries its own ADXL345, and <code>include_with</code> namespaces it
+(<code>[adxl345]</code> → <code>[adxl345 miniGrey]</code>). But
+<code>[resonance_tester]</code>, <code>[input_shaper]</code> and <code>[shaketune]</code> are
+Klipper <strong>singletons</strong> — they cannot exist once per tool, which is why the tool
+configs skip them via <code>skip_sections:</code>.</p>
+<p>The consequence for calibration:</p>
+<ol>
+  <li>Declare <code>[resonance_tester]</code> once (in <code>printer.cfg</code>), pointing at the
+      tool you are currently measuring — the accel chip name is the namespaced one:
+      <pre><code>[resonance_tester]
+accel_chip: adxl345 miniGrey
+probe_points: 150, 150, 20</code></pre></li>
+  <li>Pick that tool up, run <code>SHAPER_CALIBRATE</code> (or Shake&amp;Tune), and note the
+      resulting shaper type and frequencies. Repeat per tool, re-pointing
+      <code>accel_chip</code> each time.</li>
+  <li>Since only one <code>[input_shaper]</code> section can exist, apply the per-tool values at
+      tool-change time instead of storing them statically — in that tool's
+      <code>tool_activate_gcode</code>:
+      <pre><code>overrides:
+  vortac_tool TN.tool_activate_gcode: SET_INPUT_SHAPER SHAPER_TYPE_X=mzv SHAPER_FREQ_X=57.8 SHAPER_TYPE_Y=mzv SHAPER_FREQ_Y=46.0</code></pre>
+      <p>Overrides are parsed <strong>one entry per line</strong>, so a value spanning several
+      G-code lines does not work in this format. For a multi-command hook use the JSON form of
+      <code>overrides:</code>, where <code>\n</code> separates the commands:</p>
+      <pre><code>overrides: {"vortac_tool TN": {"tool_activate_gcode":
+  "ACTIVATE_EXTRUDER EXTRUDER=extruder1\nSET_INPUT_SHAPER SHAPER_FREQ_X=57.8 SHAPER_FREQ_Y=46.0"}}</code></pre></li>
+</ol>
+<div class="callout">
+  <span class="callout-title">Measure with the tool actually held</span>
+  <p>The moving mass includes the tool, so resonances differ per tool — that is the whole reason
+  for doing this per tool. Load the tool before measuring, and keep the gantry in its normal
+  printing (tilted) state.</p>
+</div>
+
+<h2 id="persistence">What survives a restart — and what doesn't</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Result</th><th>Where it lives</th><th>Survives restart?</th></tr></thead>
+<tbody>
+<tr><td>Probe <code>z_offset</code>, PID values, bed mesh profiles</td><td>config / autosave block</td><td><strong>Yes</strong> — after <code>SAVE_CONFIG</code></td></tr>
+<tr><td>Per-tool <code>gcode_offset_*</code>, <code>rotation_distance</code>, shaper values</td><td>your tool <code>.cfg</code> (<code>overrides:</code>)</td><td><strong>Yes</strong> — plain config, you wrote them</td></tr>
+<tr><td>Dock positions, grabber LUT, zero offset</td><td>autosave block</td><td><strong>Yes</strong> — after <code>SAVE_CONFIG</code></td></tr>
+<tr><td>QGL tilt (stored deltas, FLAT/TILT state)</td><td>RAM</td><td><strong>No</strong> — re-run <code>QUAD_GANTRY_LEVEL</code></td></tr>
+<tr><td>Dock map / detected tools</td><td>RAM</td><td><strong>No</strong> — re-run <code>VORTAC_DETECT</code></td></tr>
+<tr><td>Live <code>SET_GCODE_OFFSET</code> adjustments</td><td>RAM</td><td><strong>No</strong> — fold them into the config</td></tr>
+</tbody>
+</table>
+</div>
+<div class="callout warn">
+  <span class="callout-title">SAVE_CONFIG restarts Klipper</span>
+  <p>…and therefore throws away the gantry tilt and the dock map. After every
+  <code>SAVE_CONFIG</code>, start over with <code>G28</code> → <code>QUAD_GANTRY_LEVEL</code> →
+  <code>VORTAC_DETECT</code> before you continue calibrating or printing.</p>
+</div>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

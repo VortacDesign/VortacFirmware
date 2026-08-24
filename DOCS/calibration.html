@@ -13,7 +13,7 @@
 
 <h1>Calibration</h1>
 <p class="subtitle">Three calibrations make the toolchanger work: the grabber's angle lookup
-table, its zero position, and each dock's XYZ position.</p>
+table, its zero position, and each dock's XYZ position. Everything a <em>printer</em> needs on top of that — QGL, bed mesh, offsets — is in <a href="print-calibration.html">Print Calibration</a>.</p>
 
 <div class="checklist">
   <div class="checklist-head">
@@ -146,6 +146,13 @@ SAVE_CONFIG</code></pre>
   written to disk when you run <code>SAVE_CONFIG</code> — which restarts Klipper. Don't skip it,
   or the calibration is gone after the next restart.</p>
 </div>
+
+<h2 id="next">Next steps</h2>
+<p>With the grabber and every dock calibrated, the toolchanger side is done. What is still
+missing before a print is the <em>printer</em> side — gantry levelling, the Z reference, per-tool
+offsets, the bed mesh and the per-tool extruder work: continue with
+<a href="print-calibration.html">Print Calibration</a>, then
+<a href="first-print.html">First Print</a>.</p>
 
 <div class="page-nav" data-auto></div>
 </div></main>

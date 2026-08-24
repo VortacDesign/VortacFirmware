@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First Print — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>First Print</h1>
+<p class="subtitle">Dry runs before filament, the print-start sequence a toolchanger needs,
+slicer setup, and what to watch while the first multi-tool print is running.</p>
+
+<div class="callout">
+  <span class="callout-title">Before this page</span>
+  <p>The toolchanger must be calibrated (<a href="calibration.html">Calibration</a>) and the
+  printer must be levelled, meshed and offset-trimmed
+  (<a href="print-calibration.html">Print Calibration</a>). If a tool change is not yet reliable
+  by hand, a print will not fix it.</p>
+</div>
+
+<h2 id="dry-run">1 — Dry runs, no filament</h2>
+<p>Tool changes are the one motion sequence that can wreck hardware, so exercise them cold first.
+With filament out and hotends off:</p>
+<pre><code>G28
+QUAD_GANTRY_LEVEL
+VORTAC_DETECT             ; establish the dock map
+VORTAC_STATUS             ; sanity: tools, docks, QGL state
+
+VORTAC_LOAD TOOL=&lt;name&gt;    ; pick up
+VORTAC_UNLOAD             ; put back
+; repeat 10× — it must be boringly identical every time</code></pre>
+<p>Then the same via the real command that a slicer will emit:</p>
+<pre><code>T0
+T1
+T0</code></pre>
+
+<div class="checklist">
+  <div class="checklist-head">
+    <h3>Dry-run checklist</h3>
+    <button class="reset" type="button">Reset checklist</button>
+  </div>
+  <label class="check"><input type="checkbox" data-ck="detect">
+    <span class="check-text"><span class="check-title">Detection is correct</span>
+    <span class="check-sub"><code>VORTAC_DETECT</code> maps every tool to its real dock, repeatably.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="repeat">
+    <span class="check-text"><span class="check-title">10× load/unload without a hiccup</span>
+    <span class="check-sub">No scraping, no missed hook, no re-tries at the dock.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="sense">
+    <span class="check-text"><span class="check-title">Sense pins follow the motion</span>
+    <span class="check-sub"><code>VORTAC_SENSE_MONITOR DURATION=30</code> during a change — grab/dock transitions where expected.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="tcmd">
+    <span class="check-text"><span class="check-title"><code>Tn</code> commands work</span>
+    <span class="check-sub">Including tool→tool (park one, fetch the other) and offsets applied.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="estop">
+    <span class="check-text"><span class="check-title">You can stop it fast</span>
+    <span class="check-sub">Emergency stop within reach; know that <code>M112</code> exists.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="macro">
+    <span class="check-text"><span class="check-title">Print-start macro in the right order</span>
+    <span class="check-sub">Probing before any tool is picked up — see below.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="slicer">
+    <span class="check-text"><span class="check-title">Slicer profile set up</span>
+    <span class="check-sub">One extruder per tool, per-tool temps, prime/purge on change.</span></span>
+  </label>
+</div>
+
+<div class="callout tip">
+  <span class="callout-title">Watch the sense pins live</span>
+  <p>Run <code>VORTAC_SENSE_MONITOR DURATION=30</code> in one console and trigger a tool change
+  from another. The transitions tell you whether the grabber really hooked before the carriage
+  moved away — much more informative than watching the toolhead.</p>
+</div>
+
+<h2 id="print-start">2 — The print-start sequence</h2>
+<p>A toolchanger constrains the order, because <strong>probing is refused while a tool is
+held</strong>. Everything probe-based has to happen with an empty carriage, before the first
+<code>Tn</code>:</p>
+<pre><code>G28                       # home -> gantry flat
+QUAD_GANTRY_LEVEL         # no tool held -> gantry tilted (print geometry)
+BED_MESH_CALIBRATE        # or: BED_MESH_PROFILE LOAD=default
+VORTAC_DETECT             # dock map (RAM only — gone after every restart)
+T0                        # manager: FLAT -> fetch -> TILT -> offsets -> activate
+# print</code></pre>
+
+<p>As a macro skeleton — adapt names and temperatures to your build; every
+<code>VORTAC_*</code> command here is real, the rest is plain Klipper:</p>
+<pre><code>[gcode_macro PRINT_START]
+gcode:
+    {% set bed = params.BED|default(60)|float %}
+    {% set hotend = params.HOTEND|default(240)|float %}
+    {% set tool = params.TOOL|default('T0') %}
+
+    VORTAC_UNLOAD                       # make sure the carriage is empty
+    M140 S{bed}                         # bed up first
+    G28
+    M190 S{bed}                         # soak while heated
+    QUAD_GANTRY_LEVEL                   # leaves the gantry tilted — do NOT re-home Z after this
+    BED_MESH_PROFILE LOAD=default
+    VORTAC_DETECT
+    {tool}                              # pick the printing tool up
+    M109 S{hotend}                      # heat the hotend that is now on the carriage
+    # prime / purge line here</code></pre>
+
+<div class="callout warn">
+  <span class="callout-title">Two ordering traps</span>
+  <p><strong>1.</strong> <code>VORTAC_UNLOAD</code> at the top only works if the machine knows it
+  holds something. After a restart the logical state is empty even when a tool is physically
+  grabbed — <code>VORTAC_DETECT</code> and the <code>grab_sense</code> pin are what surface that.
+  If in doubt, look before you print.<br>
+  <strong>2.</strong> Never re-home Z <em>after</em> QGL: that resets the gantry state to
+  <code>flat</code> and clears the stored deltas, so the levelling is gone and QGL would have to
+  run again. Home first, level second — and if you are unsure what your macro ends up in, check
+  <code>VORTAC_QGL_STATUS</code> at the end of it; it must say tilted.</p>
+</div>
+
+<details class="fold">
+  <summary>Good to know: what the manager does on every <code>Tn</code></summary>
+  <div class="fold-body">
+    <pre><code>tool_deactivate_gcode (old tool)
+→ VORTAC_GANTRY_FLAT        (dock geometry)
+→ park the old tool at its dock
+→ fetch the new tool from its dock
+→ VORTAC_GANTRY_TILT        (print geometry restored)
+→ SET_GCODE_OFFSET          (new tool's offsets)
+→ tool_activate_gcode (new tool)</code></pre>
+    <p>No probing is involved — the FLAT/TILT replay is what makes that possible. Details in the
+    <a href="modules.html#vortac-manager">Module Reference</a>.</p>
+  </div>
+</details>
+
+<h2 id="slicer">3 — Slicer setup</h2>
+<ul>
+  <li><strong>One extruder per tool</strong>, in the same order as the tool includes in
+      <code>tools.cfg</code> — tool numbering is include order, so the slicer's extruder 1 is
+      <code>T0</code>, extruder 2 is <code>T1</code>, and so on.</li>
+  <li><strong>Tool change G-code</strong>: the plain <code>T&lt;n&gt;</code> command is enough —
+      the manager owns the whole sequence. Do not add park/pickup moves in the slicer.</li>
+  <li><strong>Offsets stay in Klipper.</strong> Leave the slicer's extruder offsets at zero;
+      <code>gcode_offset_x/y/z</code> on the tool is the single source of truth. Two sets of
+      offsets silently add up.</li>
+  <li><strong>Per-tool temperatures and standby</strong>: give each tool its own filament
+      profile. A tool that waits in the dock does not need print temperature — but decide
+      deliberately how hot a parked tool stays; that is a property of your dock, not of the
+      firmware.</li>
+  <li><strong>Prime / purge after every change</strong>: a tool that sat idle oozes and needs a
+      few millimetres before it prints clean. Put the purge into the slicer's tool-change
+      G-code, or into that tool's <code>tool_activate_gcode</code> if your build has a fixed
+      purge position.</li>
+  <li><strong>Start with two tools and few changes.</strong> A tall two-colour cube with one
+      change per layer tells you more about repeatability than a complex model.</li>
+</ul>
+
+<h2 id="watch">4 — What to watch during the first print</h2>
+<ul>
+  <li><strong>The first change under load</strong> — stand next to it, hand on the stop. The tool
+      is heavy and hot now; a dock position that was fine cold can bind.</li>
+  <li><strong>First layer of each tool</strong> — if tool 2's first layer differs from tool 1's,
+      that is <code>gcode_offset_z</code>, not a flow problem. Trim live with
+      <code>SET_GCODE_OFFSET Z_ADJUST=…</code> and fold the value into the config afterwards
+      (live adjustments are RAM only).</li>
+  <li><strong>Registration between tools</strong> — colour boundaries or a two-tool alignment
+      pattern reveal XY offset error. Fix in
+      <a href="print-calibration.html#tool-xy-offsets">gcode_offset_x/y</a>.</li>
+  <li><strong>Ooze and stringing at changes</strong> — retraction and purge, not a toolchanger
+      problem, but it looks like one.</li>
+  <li><strong>Repeatability over height</strong> — errors that grow with Z point at the gantry
+      state (was QGL actually re-run?) rather than at offsets.</li>
+</ul>
+
+<h2 id="recovery">5 — When something goes wrong mid-print</h2>
+<details class="fold">
+  <summary>A tool change failed / the tool is not where the machine thinks</summary>
+  <div class="fold-body">
+    <p>Stop the print. Then re-establish reality before moving anything:</p>
+    <pre><code>VORTAC_STATUS             ; what does the manager believe?
+VORTAC_SENSE_STATUS       ; what do the pins say?
+VORTAC_DETECT             ; re-map docks (needs tools in docks)</code></pre>
+    <p>If the logical state is stale but nothing is physically held:
+    <code>VORTAC_SET_CURRENT_TOOL CLEAR=1</code>. If a tool is held but the manager does not know
+    it, tell it: <code>VORTAC_SET_CURRENT_TOOL TOOL=&lt;name&gt;</code> (no motion). Only then
+    move the carriage.</p>
+  </div>
+</details>
+<details class="fold">
+  <summary>Probing suddenly refuses (<em>"probing refused — tool … is held"</em>)</summary>
+  <div class="fold-body">
+    <p>That is the <a href="modules.html#probe-guard">probe guard</a>, and it is usually right.
+    Park the tool with <code>VORTAC_UNLOAD</code>, then probe. If no tool is physically on the
+    carriage, check <code>VORTAC_SENSE_STATUS</code> — a stuck or mis-wired
+    <code>grab_sense</code> pin reads as grabbed — and clear a stale logical tool with
+    <code>VORTAC_SET_CURRENT_TOOL CLEAR=1</code>.</p>
+  </div>
+</details>
+<details class="fold">
+  <summary>Z was re-homed while a tool was held</summary>
+  <div class="fold-body">
+    <p>The gantry state is now <code>flat</code> and the QGL deltas are gone, so print geometry is
+    invalid. Recovery: <code>VORTAC_UNLOAD</code> → <code>QUAD_GANTRY_LEVEL</code> → pick the tool
+    back up. Verify with <code>VORTAC_QGL_STATUS</code>.</p>
+  </div>
+</details>
+<details class="fold">
+  <summary>First layer is fine with one tool and wrong with another</summary>
+  <div class="fold-body">
+    <p>That is per-tool Z offset, by definition — the bed mesh and the probe are tool-independent
+    (the probe rides on the carriage). Go to
+    <a href="print-calibration.html#tool-z-offsets">per-tool Z offsets</a>.</p>
+  </div>
+</details>
+
+<div class="callout tip">
+  <span class="callout-title">After every SAVE_CONFIG</span>
+  <p>It restarts Klipper, which drops the gantry tilt <em>and</em> the dock map. Re-run
+  <code>G28</code> → <code>QUAD_GANTRY_LEVEL</code> → <code>VORTAC_DETECT</code> before the next
+  print — which is exactly why they belong in the print-start macro.</p>
+</div>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

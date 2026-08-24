@@ -84,6 +84,14 @@ if [[ -d "$SCRIPTS_DST" ]]; then
   done < <(find "$SCRIPTS_SRC" -maxdepth 1 -type f -name "*.py" -print0 2>/dev/null || true)
 fi
 
+# --- 5b) Remove ONLY our KlipperScreen panel symlinks ---
+KSCREEN_DIR="${KSCREEN_DIR:-$TARGET_HOME/KlipperScreen}"
+PANELS_SRC="$REPO_DIR/klipperscreen/panels"
+if [[ -d "$KSCREEN_DIR/panels" ]]; then
+  echo "🧷 Removing panel symlinks in $KSCREEN_DIR/panels"
+  find "$KSCREEN_DIR/panels" -maxdepth 1 -type l -lname "$PANELS_SRC/*" -print -delete || true
+fi
+
 # --- 6) Remove empty mountpoint dir (optional) ---
 rmdir "$CONFIG_DST" 2>/dev/null || true
 

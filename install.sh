@@ -47,6 +47,7 @@ echo "🔧 Klipper:  $KLIPPER_DIR"
 echo "🔧 Branch:   $BRANCH"
 echo "🔧 Addons:   $SCRIPTS_SRC  →  $SCRIPTS_DST (link all .py)"
 echo "🔧 Configs:  bind-mount:   $CONFIG_SRC  →  $CONFIG_DST"
+echo "🔧 Panels:   $REPO_DIR/klipperscreen/panels  →  \$HOME/KlipperScreen/panels (if present)"
 
 # --- sanity checks (no creation of SCRIPTS_DST per your wish) ---
 [[ -d "$SCRIPTS_SRC" ]] || { echo "❌ Missing $SCRIPTS_SRC"; exit 1; }
@@ -66,6 +67,26 @@ for f in "$SCRIPTS_SRC"/*.py; do
   ln -sfn "$f" "$dst"
   echo "  → $base"
 done
+
+# --- 1b) link KlipperScreen panels (only if KlipperScreen is installed) ---
+KSCREEN_DIR="${KSCREEN_DIR:-$TARGET_HOME/KlipperScreen}"
+PANELS_SRC="$REPO_DIR/klipperscreen/panels"
+if [[ -d "$KSCREEN_DIR/panels" && -d "$PANELS_SRC" ]]; then
+  echo "🔗 Linking KlipperScreen panels into $KSCREEN_DIR/panels"
+  for f in "$PANELS_SRC"/*.py; do
+    base="$(basename "$f")"
+    dst="$KSCREEN_DIR/panels/$base"
+    if [[ -e "$dst" && ! -L "$dst" ]]; then
+      echo "  ⚠️  skip: $base (exists and is not a symlink)"
+      continue
+    fi
+    ln -sfn "$f" "$dst"
+    echo "  → $base"
+  done
+  echo "  (restart the UI to load them:  sudo systemctl restart KlipperScreen)"
+else
+  echo "ℹ️  KlipperScreen not found at $KSCREEN_DIR — skipping panel links"
+fi
 
 # --- 2) bind-mount configs via systemd (persistent, no fstab) ---
 echo "🪢 Setting up systemd bind-mount for configs"

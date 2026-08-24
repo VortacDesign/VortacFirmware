@@ -1174,6 +1174,7 @@ class VortacManager:
                              if self.current_tool else None),
             'tools': sorted(self.tools.keys()),
             'dock_occupancy': dict(self.dock_occupancy),
+            'park_dock': dict(self.park_dock),
             'dock_detection_valid': self.dock_detection_valid,
             'calibration_dock': self.calibration_dock,
             'calibration_tool': (self.calibration_tool.tool_id

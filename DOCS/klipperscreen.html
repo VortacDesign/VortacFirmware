@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KlipperScreen — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>KlipperScreen</h1>
+<p class="subtitle">Installing the touchscreen UI and adding a custom menu to it.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Status</span>
+  <p>The custom <strong>vortac_docks panel is implemented</strong>:
+  <code>klipperscreen/panels/vortac_docks.py</code> in this repo, symlinked into
+  <code>~/KlipperScreen/panels/</code> by <code>install.sh</code> (skipped automatically on a Pi
+  without KlipperScreen). The repo's <code>KlipperScreen.conf</code> carries the matching
+  <code>[menu __main vortac]</code> entry. <code>main_menu.conf</code> remains a reference copy
+  of KlipperScreen's stock menu — do not deploy it.</p>
+</div>
+
+<h2 id="install">1 — Installing KlipperScreen</h2>
+<p>KlipperScreen is a separate project that talks to Moonraker, so it is installed and updated
+independently of this repo. On the Pi:</p>
+<pre><code>cd ~
+git clone https://github.com/KlipperScreen/KlipperScreen.git
+./KlipperScreen/scripts/KlipperScreen-install.sh</code></pre>
+<p>Let Moonraker manage updates by adding this to <code>moonraker.conf</code>:</p>
+<pre><code>[update_manager KlipperScreen]
+type: git_repo
+path: ~/KlipperScreen
+origin: https://github.com/KlipperScreen/KlipperScreen.git
+env: ~/.KlipperScreen-env/bin/python
+requirements: scripts/KlipperScreen-requirements.txt
+install_script: scripts/KlipperScreen-install.sh
+managed_services: KlipperScreen</code></pre>
+<p>Useful operational commands:</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Command</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>sudo systemctl restart KlipperScreen</code></td><td>reload after any config change — KlipperScreen does not hot-reload</td></tr>
+<tr><td><code>sudo systemctl status KlipperScreen</code></td><td>is it running?</td></tr>
+<tr><td><code>journalctl -u KlipperScreen -f</code></td><td>live log — first stop for a blank screen or a menu that won't appear</td></tr>
+<tr><td><code>~/printer_data/logs/KlipperScreen.log</code></td><td>KlipperScreen's own log, incl. config and Jinja parse errors</td></tr>
+</tbody>
+</table>
+</div>
+<div class="callout">
+  <span class="callout-title">Where the config lives</span>
+  <p>KlipperScreen reads <code>~/printer_data/config/KlipperScreen.conf</code>. That is the
+  <strong>only</strong> file you edit. Everything else — panels, the default menu, translations —
+  lives inside the KlipperScreen installation and is overwritten on update.</p>
+</div>
+
+<details class="fold">
+  <summary>Display, rotation and touch quirks</summary>
+  <div class="fold-body">
+    <p>Screen size, rotation and touch behaviour are display-driver territory, not Vortac
+    territory — follow the
+    <a href="https://klipperscreen.readthedocs.io/">KlipperScreen documentation</a> for your
+    panel. Two <code>[main]</code> settings worth knowing: <code>screen_blanking</code> (idle
+    blanking) and <code>show_cursor</code> (helpful over VNC during bring-up). The autosaved
+    <code>move_speed_xy</code>/<code>move_speed_z</code> in this repo's
+    <code>KlipperScreen.conf</code> come from the on-screen Settings panel — that is how
+    KlipperScreen writes UI settings back.</p>
+  </div>
+</details>
+
+<h2 id="deploy">2 — Deploying this repo's KlipperScreen config</h2>
+<p>Because <code>install.sh</code> does not touch these files, pick one of two approaches:</p>
+<pre><code># A) copy once, edit on the Pi
+cp ~/vortac/configs/klipper_screen_configs/KlipperScreen.conf ~/printer_data/config/
+
+# B) keep it tracked in git and symlink (edits stay in the repo)
+ln -sf ~/vortac/configs/klipper_screen_configs/KlipperScreen.conf \
+       ~/printer_data/config/KlipperScreen.conf
+
+sudo systemctl restart KlipperScreen</code></pre>
+<p>The <strong>panel</strong> itself needs no manual deployment: re-run
+<code>sudo ./install.sh</code> (or just <code>git pull</code> — the watcher re-runs it) and it
+symlinks every <code>klipperscreen/panels/*.py</code> into
+<code>~/KlipperScreen/panels/</code>. Then restart both services:</p>
+<pre><code>sudo systemctl restart klipper          # picks up the vortac_manager status export
+sudo systemctl restart KlipperScreen    # loads the panel + menu entry</code></pre>
+<p>The repo's <code>KlipperScreen.conf</code> already contains the menu entry that opens it:</p>
+<pre><code>[menu __main vortac]
+name: Vortac
+icon: extrude
+panel: vortac_docks
+enable: {{ 'vortac_manager' in printer.config_sections }}</code></pre>
+<p><strong>Getting back to the normal menu:</strong> panels opened from a menu get
+KlipperScreen's standard title bar with the back arrow — one tap returns to the main menu,
+nothing custom needed.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Do not deploy main_menu.conf</span>
+  <p>It is a reference copy of KlipperScreen's stock menu. Copying it into
+  <code>~/printer_data/config/</code> does nothing useful, and editing the original inside the
+  KlipperScreen installation is overwritten on the next update. Custom menus belong in
+  <code>KlipperScreen.conf</code>.</p>
+</div>
+
+<h2 id="menu-mechanics">3 — Adding a custom menu</h2>
+<p>Menu items are config sections in <code>KlipperScreen.conf</code> whose <em>name path</em>
+defines the tree:</p>
+<pre><code>[menu __main vortac]                 &lt;- entry in the main menu
+[menu __main vortac grabber]         &lt;- submenu inside it
+[menu __main vortac grabber engage]  &lt;- item inside that submenu</code></pre>
+<p>KlipperScreen loads its default menu first and your config on top: a <strong>new</strong> name
+path adds an entry, an <strong>existing</strong> one (see <code>main_menu.conf</code> for the
+stock paths) overrides the stock item.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>name</code></td><td>button label</td></tr>
+<tr><td><code>icon</code></td><td>icon name from KlipperScreen's image set (see <code>main_menu.conf</code> for known-good names: <code>move</code>, <code>refresh</code>, <code>settings</code>, <code>extrude</code>, <code>bed-level</code>, <code>console</code>, <code>complete</code>, <code>fine-tune</code>, <code>info</code>, …); an unknown name renders without an icon</td></tr>
+<tr><td><code>panel</code></td><td>opens a built-in panel (<code>move</code>, <code>bed_mesh</code>, <code>gcode_macros</code>, <code>console</code>, …)</td></tr>
+<tr><td><code>method</code> + <code>params</code></td><td>calls a Moonraker method — for G-code: <code>printer.gcode.script</code> with <code>params: {"script":"…"}</code></td></tr>
+<tr><td><code>confirm</code></td><td>confirmation dialog before running — use for anything that moves the machine or writes config</td></tr>
+<tr><td><code>enable</code></td><td>Jinja condition; e.g. <code>{{ 'vortac_manager' in printer.config_sections }}</code> hides the entry on a printer without the extras</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A minimal working example — one Vortac submenu with two buttons:</p>
+<pre><code>[menu __main vortac]
+name: Vortac
+icon: extrude
+enable: {{ 'vortac_manager' in printer.config_sections }}
+
+[menu __main vortac unload]
+name: Park Tool
+icon: home
+method: printer.gcode.script
+params: {"script":"VORTAC_UNLOAD"}
+confirm: Park the held tool at its dock?
+
+[menu __main vortac detect]
+name: Detect Tools
+icon: refresh
+method: printer.gcode.script
+params: {"script":"VORTAC_DETECT"}</code></pre>
+<p>Restart KlipperScreen and the entry appears in the main menu.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Two limits of menu buttons</span>
+  <p><strong>Buttons cannot take parameters.</strong> Commands like
+  <code>VORTAC_SELECT_DOCK DOCK=…</code> need either a fixed value baked into the button's
+  <code>script</code>, or a thin <code>gcode_macro</code> wrapper per case (which also shows up in
+  the stock <em>Macros</em> panel with zero menu config).<br>
+  <strong>Buttons cannot display state.</strong> Most <code>VORTAC_*</code> commands answer with
+  console text — put a <code>panel: console</code> shortcut next to any status button so the
+  reply is readable. A live dock/tool display needs a custom panel, not a menu (see below).</p>
+</div>
+
+<details class="fold">
+  <summary>Menu changes don't show up?</summary>
+  <div class="fold-body">
+    <ul>
+      <li>KlipperScreen does not reload config on its own:
+          <code>sudo systemctl restart KlipperScreen</code>.</li>
+      <li>Edited the wrong file? Only <code>~/printer_data/config/KlipperScreen.conf</code>
+          counts — not <code>main_menu.conf</code>, not anything inside
+          <code>~/KlipperScreen/</code>.</li>
+      <li>A section that is present but invisible is usually an <code>enable:</code> condition
+          evaluating false — e.g. the extras are not loaded.</li>
+      <li>Parse and Jinja errors land in <code>~/printer_data/logs/KlipperScreen.log</code>.</li>
+    </ul>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Toolchanger gotchas on the stock panels</summary>
+  <div class="fold-body">
+    <ul>
+      <li><strong>Bed Mesh / Z Calibrate fail with "probing refused"</strong> — that is the
+          manager's <a href="modules.html#probe-guard">probe guard</a> doing its job while a tool
+          is held. Park the tool first, then probe.</li>
+      <li><strong>The temperature panel shows <code>extruder</code>, <code>extruder1</code>, …</strong> —
+          Klipper's multi-extruder naming is hardwired; namespaced hardware (fans, LEDs) shows the
+          display name. See <a href="configuration.html#pretty-names">pretty names</a>.</li>
+      <li><strong>The Input Shaper button is missing</strong> — its <code>enable:</code> guard
+          checks for the <code>[input_shaper]</code> singleton, which the tool configs
+          <code>skip_sections:</code>. Declare it in <code>printer.cfg</code> if you want the
+          panel; background in
+          <a href="print-calibration.html#shaper">Print Calibration → input shaper</a>.</li>
+    </ul>
+  </div>
+</details>
+
+
+<h2 id="panel-preview">4 — Panel design proposal (preview)</h2>
+<p>This is a to-scale HTML mockup of the <code>vortac_docks</code> panel — implemented as a GTK panel
+with this layout in <code>klipperscreen/panels/vortac_docks.py</code>. It is drawn for a landscape 800×480
+touchscreen (the KlipperScreen default) and deliberately always dark, like the screen itself.
+Every element maps to data that <code>get_status</code> already exports.</p>
+
+<style>
+.ksmock { background:#0d1117; border:1px solid #2a3442; border-radius:14px;
+  max-width:760px; aspect-ratio:800/480; margin:0 0 1rem; padding:2.2%;
+  display:flex; flex-direction:column; gap:2.2%;
+  font-family:-apple-system,"Segoe UI",Roboto,sans-serif; color:#dde3ea;
+  user-select:none; box-shadow:0 6px 24px rgba(0,0,0,.45); }
+.ksmock * { box-sizing:border-box; }
+.ksmock .bar { display:flex; align-items:center; gap:2%; flex:0 0 13%; }
+.ksmock .brand { font-weight:800; letter-spacing:.06em; font-size:clamp(11px,2.2vw,17px); color:#f0764f; }
+.ksmock .chip { border-radius:999px; padding:.35em .9em; font-size:clamp(9px,1.6vw,13px);
+  font-weight:600; background:#1c2531; border:1px solid #2f3b4b; white-space:nowrap; }
+.ksmock .chip b { color:#f0764f; }
+.ksmock .chip.ok { border-color:#2f7d4f; color:#7fd6a0; }
+.ksmock .chip.warn { border-color:#a06a1f; color:#e8b45a; }
+.ksmock .chip.right { margin-left:auto; }
+.ksmock .docks { flex:1 1 auto; display:grid; grid-template-columns:repeat(4,1fr); gap:2.2%; }
+.ksmock .dock { border-radius:12px; background:#161e29; border:2px solid #2f3b4b;
+  display:flex; flex-direction:column; padding:4% 6%; position:relative; }
+.ksmock .dock .dname { font-size:clamp(8px,1.5vw,12px); color:#8b95a5; font-weight:600;
+  text-transform:uppercase; letter-spacing:.05em; }
+.ksmock .dock .tname { font-size:clamp(11px,2.4vw,19px); font-weight:800; margin-top:auto; }
+.ksmock .dock .tsub { font-size:clamp(8px,1.5vw,12px); color:#8b95a5; margin-bottom:auto; }
+.ksmock .dock .pins { display:flex; gap:.5em; font-size:clamp(8px,1.4vw,11px); color:#8b95a5; }
+.ksmock .dot { display:inline-block; width:.65em; height:.65em; border-radius:50%;
+  background:#3a4657; margin-right:.3em; vertical-align:baseline; }
+.ksmock .dot.on { background:#5aa9e8; box-shadow:0 0 6px #5aa9e8; }
+.ksmock .dot.grab { background:#f0764f; box-shadow:0 0 6px #f0764f; }
+.ksmock .dock.occupied { border-color:#3d6ea5; }
+.ksmock .dock.occupied .tname { color:#8fc1f2; }
+.ksmock .dock.held { border-color:#f0764f; background:#241a15; }
+.ksmock .dock.held .tname { color:#f0764f; }
+.ksmock .dock.held::after { content:"ON CARRIAGE"; position:absolute; top:6%; right:6%;
+  font-size:clamp(7px,1.2vw,10px); font-weight:800; color:#f0764f; letter-spacing:.06em; }
+.ksmock .dock.empty { border-style:dashed; }
+.ksmock .dock.empty .tname { color:#4a5568; font-weight:600; }
+.ksmock .dock.unknown { border-color:#6b5518; }
+.ksmock .dock.unknown .tname { color:#c9a75a; }
+.ksmock .dock .hint { font-size:clamp(7px,1.3vw,10px); color:#5b6675; margin-top:.4em; }
+.ksmock .actions { flex:0 0 17%; display:grid; grid-template-columns:repeat(5,1fr); gap:2.2%; }
+.ksmock .btn { border-radius:10px; background:#1c2531; border:1px solid #2f3b4b;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:.15em; font-size:clamp(9px,1.7vw,13px); font-weight:700; cursor:pointer; }
+.ksmock .btn svg { width:clamp(14px,3vw,22px); height:clamp(14px,3vw,22px); }
+.ksmock .btn.primary { background:#f0764f; border-color:#f0764f; color:#181818; }
+.ksmock .btn:hover { border-color:#f0764f; }
+</style>
+
+<div class="ksmock" role="img" aria-label="Mockup of the Vortac docks panel">
+  <div class="bar">
+    <span class="brand">VORTAC</span>
+    <span class="chip">Holding: <b>miniGrey&nbsp;(T1)</b></span>
+    <span class="chip ok">Gantry: TILTED</span>
+    <span class="chip right warn">Detection: stale — run Detect</span>
+  </div>
+  <div class="docks">
+    <div class="dock occupied">
+      <span class="dname">dock0</span>
+      <span class="tname">miniPink</span>
+      <span class="tsub">T0 · extruder</span>
+      <span class="pins"><span><span class="dot on"></span>dock</span><span><span class="dot"></span>grab</span></span>
+      <span class="hint">tap → pick up (confirm)</span>
+    </div>
+    <div class="dock held">
+      <span class="dname">dock1</span>
+      <span class="tname">miniGrey</span>
+      <span class="tsub">T1 · extruder1</span>
+      <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot grab"></span>grab</span></span>
+      <span class="hint">tap → park here (confirm)</span>
+    </div>
+    <div class="dock empty">
+      <span class="dname">dock2</span>
+      <span class="tname">— empty —</span>
+      <span class="tsub">&nbsp;</span>
+      <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot"></span>grab</span></span>
+      <span class="hint">calibrated, no tool</span>
+    </div>
+    <div class="dock unknown">
+      <span class="dname">dock3</span>
+      <span class="tname">not calibrated</span>
+      <span class="tsub">&nbsp;</span>
+      <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot"></span>grab</span></span>
+      <span class="hint">tap → select for calibration</span>
+    </div>
+  </div>
+  <div class="actions">
+    <div class="btn primary">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
+      Park Tool
+    </div>
+    <div class="btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-3-6.7M21 3v6h-6"/></svg>
+      Detect
+    </div>
+    <div class="btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 12l5-3"/></svg>
+      Engage
+    </div>
+    <div class="btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 12l-5 3"/></svg>
+      Disengage
+    </div>
+    <div class="btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v14H4zM7 9l3 3-3 3M12 15h5"/></svg>
+      Console
+    </div>
+  </div>
+</div>
+
+<h3 id="panel-behaviour">Behaviour</h3>
+<ul>
+  <li><strong>Header:</strong> held tool (<code>current_tool</code>, or "Carriage empty"),
+      gantry state (<code>qgl_state</code> — green when TILTED, amber when FLAT during
+      printing hours), and a detection-freshness chip (<code>dock_detection_valid</code>) that
+      turns amber after a restart until <code>VORTAC_DETECT</code> ran.</li>
+  <li><strong>One tile per dock</strong> (grid grows with <code>dock_count</code>). Tile state
+      from <code>dock_occupancy</code> + per-tool <code>dock_sense_state</code>/
+      <code>grab_sense_state</code>:
+      <span class="badge">blue</span> occupied, <span class="badge">orange</span> the held
+      tool's origin dock, dashed = calibrated but empty, amber = no calibrated position yet.
+      The two small dots mirror the raw sense pins — the live wiring truth, invaluable when a
+      tile disagrees with reality. While a tool is carried, its return dock is marked
+      "on carriage" (from the manager's <code>park_dock</code> status export).</li>
+  <li><strong>Tap logic is contextual:</strong> occupied tile → confirm → <code>T&lt;n&gt;</code>;
+      the held tool's tile → confirm → <code>VORTAC_UNLOAD</code>; uncalibrated tile → confirm →
+      <code>VORTAC_SELECT_DOCK DOCK=…</code> (calibration flow). One screen, no submenu digging.</li>
+  <li><strong>Action bar:</strong> the five global commands. Everything that moves the machine
+      confirms first; Console jumps to the stock console panel for command output.</li>
+  <li><strong>Calibration and grabber details stay in the menu</strong> (LUT sweep, set zero,
+      QGL flat/tilt) — the panel is for daily operation, the menu for commissioning.</li>
+</ul>
+
+<div class="callout tip">
+  <span class="callout-title">Why this exact layout</span>
+  <p>The panel answers the three questions you actually walk to the printer with — <em>what is
+  on the carriage, what is in which dock, is the state trustworthy</em> — without touching
+  anything. Every action is one tap plus one confirm, with the confirm carrying the concrete
+  consequence ("Run a tool change to T0?"). Diagnostic truth (sense dots) sits directly on the
+  thing it describes instead of in a separate status page.</p>
+</div>
+
+<h2 id="outlook">5 — Outlook: a real Vortac UI</h2>
+<p>Not built yet — recorded here so the options and their cost are on the table:</p>
+<ul>
+  <li><strong>Level 1 — G-code macro wrappers</strong> (hours): <code>VORTAC_UI_*</code> macros
+      for the parameterised commands. Visible in Mainsail, Fluidd <em>and</em> KlipperScreen's
+      stock Macros panel — one implementation, every UI.</li>
+  <li><strong>Level 2 — static KlipperScreen menu</strong> (hours): a button tree over those
+      macros using the mechanics above. Config only, no code.</li>
+  <li><strong>Level 3 — custom KlipperScreen panel: ✅ shipped</strong> (design preview
+      <a href="#panel-preview">above</a>, code in
+      <code>klipperscreen/panels/vortac_docks.py</code>). It polls
+      <code>vortac_manager</code> / <code>vortac_tool</code> / <code>vortac_qgl_state</code>
+      status once per second via <code>printer.objects.query</code> — deliberately independent
+      of KlipperScreen's internal subscription machinery, to minimise breakage across
+      KlipperScreen updates. Residual risk: the GTK panel base-class API is not versioned; a
+      KlipperScreen update may require small adaptations (only this panel fails, the rest of the
+      UI keeps working — check <code>KlipperScreen.log</code>).</li>
+</ul>
+<p>Mainsail has no plugin/panel system, so a KlipperScreen menu or panel cannot be carried over —
+the macro layer (level 1) is the only part all UIs share.</p>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>
