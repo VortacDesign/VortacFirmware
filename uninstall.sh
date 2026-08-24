@@ -91,6 +91,9 @@ if [[ -d "$KSCREEN_DIR/panels" ]]; then
   echo "🧷 Removing panel symlinks in $KSCREEN_DIR/panels"
   find "$KSCREEN_DIR/panels" -maxdepth 1 -type l -lname "$PANELS_SRC/*" -print -delete || true
 fi
+for imgdir in "$KSCREEN_DIR"/styles/*/images; do
+  [[ -d "$imgdir" ]] && find "$imgdir" -maxdepth 1 -type l -lname "$REPO_DIR/klipperscreen/icons/*" -print -delete || true
+done
 
 # --- 6) Remove empty mountpoint dir (optional) ---
 rmdir "$CONFIG_DST" 2>/dev/null || true

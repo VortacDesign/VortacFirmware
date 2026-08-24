@@ -26,12 +26,18 @@
 # active-low pin asserted (docked / grabbed), True = idle, None = no reading.
 
 import logging
+import os
 
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib, Pango
 
 from ks_includes.screen_panel import ScreenPanel
+
+# The panel file is symlinked into ~/KlipperScreen/panels/; realpath
+# resolves back into the repo, where ../icons/ holds the custom SVGs.
+ICON_DIR = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "..", "icons"))
 
 POLL_INTERVAL_MS = 1000
 MAX_COLS = 4
@@ -97,15 +103,15 @@ class Panel(ScreenPanel):
         actions.add(self.btn_primary)
         actions.add(self._action_button(
             "refresh", "Detect", None, "VORTAC_DETECT"))
-        actions.add(self._action_button(
-            "extrude", "Engage",
+        actions.add(self._icon_button(
+            "vortac_engage.svg", "Engage",
             "Rotate the grabber to the engage position?", "VORTAC_ENGAGE"))
-        actions.add(self._action_button(
-            "extrude", "Disengage",
+        actions.add(self._icon_button(
+            "vortac_disengage.svg", "Disengage",
             "Rotate the grabber to the disengage position?",
             "VORTAC_DISENGAGE"))
-        actions.add(self._action_button(
-            "complete", "Save Dock",
+        actions.add(self._icon_button(
+            "vortac_dock_save.svg", "Save Dock",
             "Save the current XYZ as the selected dock's hooked position?\n"
             "(Select a dock first by tapping an occupied tile's tool while "
             "it is detected, or via VORTAC_SELECT_DOCK.)",
@@ -389,6 +395,29 @@ class Panel(ScreenPanel):
         else:
             btn.connect("clicked", self._confirm_script, confirm_text, script)
         return btn
+
+    def _icon_button(self, svg_name, label, confirm_text, script):
+        # Button with one of our custom SVGs from klipperscreen/icons/.
+        # Falls back to a stock-icon button if the SVG cannot be loaded
+        # (missing librsvg, moved repo, ...).
+        try:
+            from gi.repository import GdkPixbuf
+            path = os.path.join(ICON_DIR, svg_name)
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_size(path, 40, 40)
+            img = Gtk.Image.new_from_pixbuf(pix)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+                          halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+            box.add(img)
+            box.add(Gtk.Label(label=label))
+            btn = Gtk.Button()
+            btn.add(box)
+            btn.set_can_focus(False)
+            btn.connect("clicked", self._confirm_script, confirm_text, script)
+            return btn
+        except Exception:
+            logging.exception("vortac_docks: icon %s failed, using fallback",
+                              svg_name)
+            return self._action_button("extrude", label, confirm_text, script)
 
     def _run_script(self, widget, script):
         self._screen._send_action(

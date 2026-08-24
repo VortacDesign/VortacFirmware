@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Vortac dock-save: classic floppy disk. -->
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 9 H41 L55 23 V49 Q55 55 49 55 H15 Q9 55 9 49 V15 Q9 9 15 9 Z"/>
+    <path d="M21 9 V20 Q21 23 24 23 H37 Q40 23 40 20 V9"/>
+    <path d="M18 55 V38 Q18 35 21 35 H43 Q46 35 46 38 V55"/>
+    <path d="M33.5 12 V19"/>
+  </g>
+</svg>

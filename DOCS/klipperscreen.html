@@ -237,8 +237,8 @@ Every element maps to data that <code>get_status</code> already exports.</p>
 .ksmock .dock.occupied .tname { color:#8fc1f2; }
 .ksmock .dock.held { border-color:#f0764f; background:#241a15; }
 .ksmock .dock.held .tname { color:#f0764f; }
-.ksmock .dock.held::after { content:"ON CARRIAGE"; position:absolute; top:6%; right:6%;
-  font-size:clamp(7px,1.2vw,10px); font-weight:800; color:#f0764f; letter-spacing:.06em; }
+.ksmock .dock.held::after { content:"on carriage"; position:absolute; top:6%; right:6%;
+  font-size:clamp(7px,1.2vw,10px); font-weight:700; color:#f0764f; }
 .ksmock .dock.empty { border-style:dashed; }
 .ksmock .dock.empty .tname { color:#4a5568; font-weight:600; }
 .ksmock .dock.unknown { border-color:#6b5518; }
@@ -248,7 +248,7 @@ Every element maps to data that <code>get_status</code> already exports.</p>
 .ksmock .btn { border-radius:10px; background:#1c2531; border:1px solid #2f3b4b;
   display:flex; flex-direction:column; align-items:center; justify-content:center;
   gap:.15em; font-size:clamp(9px,1.7vw,13px); font-weight:700; cursor:pointer; }
-.ksmock .btn svg { width:clamp(14px,3vw,22px); height:clamp(14px,3vw,22px); }
+.ksmock .btn svg { width:clamp(16px,3.4vw,26px); height:clamp(16px,3.4vw,26px); }
 .ksmock .btn.primary { background:#f0764f; border-color:#f0764f; color:#181818; }
 .ksmock .btn:hover { border-color:#f0764f; }
 </style>
@@ -266,52 +266,256 @@ Every element maps to data that <code>get_status</code> already exports.</p>
       <span class="tname">miniPink</span>
       <span class="tsub">T0 · extruder</span>
       <span class="pins"><span><span class="dot on"></span>dock</span><span><span class="dot"></span>grab</span></span>
-      <span class="hint">tap → pick up (confirm)</span>
+      <span class="hint">tap: load</span>
     </div>
     <div class="dock held">
       <span class="dname">dock1</span>
       <span class="tname">miniGrey</span>
       <span class="tsub">T1 · extruder1</span>
       <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot grab"></span>grab</span></span>
-      <span class="hint">tap → park here (confirm)</span>
+      <span class="hint">grab ●   tap: park here</span>
     </div>
     <div class="dock empty">
       <span class="dname">dock2</span>
       <span class="tname">— empty —</span>
       <span class="tsub">&nbsp;</span>
       <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot"></span>grab</span></span>
-      <span class="hint">calibrated, no tool</span>
+      <span class="hint">tap: select for calibration</span>
     </div>
     <div class="dock unknown">
       <span class="dname">dock3</span>
       <span class="tname">not calibrated</span>
       <span class="tsub">&nbsp;</span>
       <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot"></span>grab</span></span>
-      <span class="hint">tap → select for calibration</span>
+      <span class="hint">tap: select for calibration</span>
     </div>
   </div>
   <div class="actions">
-    <div class="btn primary">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
-      Park Tool
-    </div>
-    <div class="btn">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-3-6.7M21 3v6h-6"/></svg>
-      Detect
-    </div>
-    <div class="btn">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 12l5-3"/></svg>
-      Engage
-    </div>
-    <div class="btn">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 12l-5 3"/></svg>
-      Disengage
-    </div>
-    <div class="btn">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v14H4zM7 9l3 3-3 3M12 15h5"/></svg>
-      Console
-    </div>
+    <div class="btn primary">Park miniGrey</div>
+    <div class="btn"><svg width="24" height="24"
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+  
+  
+   viewBox="0 0 64 64"
+   version="1.1"
+   id="svg10"
+   sodipodi:docname="refresh.svg"
+   inkscape:version="1.0.2 (e86c870879, 2021-01-15, custom)">
+  <metadata
+     id="metadata16">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title>folder</dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <defs
+     id="defs14" />
+  <sodipodi:namedview
+     pagecolor="#bfbfbf"
+     bordercolor="#666666"
+     borderopacity="1"
+     objecttolerance="10"
+     gridtolerance="10"
+     guidetolerance="10"
+     inkscape:pageopacity="0"
+     inkscape:pageshadow="2"
+     inkscape:window-width="1600"
+     inkscape:window-height="837"
+     id="namedview12"
+     showgrid="false"
+     inkscape:pagecheckerboard="false"
+     inkscape:zoom="5.4137931"
+     inkscape:cx="32.109123"
+     inkscape:cy="22.356606"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg10"
+     inkscape:snap-bbox="true"
+     inkscape:snap-bbox-edge-midpoints="true"
+     inkscape:document-rotation="0"
+     inkscape:snap-bbox-midpoints="true"
+     inkscape:snap-intersection-paths="true"
+     inkscape:snap-midpoints="true"
+     inkscape:snap-smooth-nodes="true"
+     inkscape:snap-object-midpoints="true"
+     inkscape:snap-center="true"
+     inkscape:bbox-nodes="true"
+     inkscape:bbox-paths="true" />
+  
+  <title
+     id="title2">folder</title>
+  <desc
+     id="desc4">Created with Sketch.</desc>
+  <path
+     sodipodi:nodetypes="ccc"
+     inkscape:connector-curvature="0"
+     id="path4710-2-1"
+     d="m 4.3403339,31.365635 5.187416,7.118657 5.0236311,-7.118657 z"
+     style="display:inline;fill:#ffffff;fill-opacity:1;fill-rule:evenodd;stroke:#ffffff;stroke-width:2.73127;stroke-linecap:butt;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
+  <path
+     style="fill:none;stroke:#ffffff;stroke-width:4;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stop-color:#000000"
+     id="path853"
+     sodipodi:type="arc"
+     sodipodi:cx="33"
+     sodipodi:cy="32"
+     sodipodi:rx="23.5"
+     sodipodi:ry="23.5"
+     sodipodi:start="3.1415927"
+     sodipodi:end="5.4977871"
+     sodipodi:arc-type="arc"
+     sodipodi:open="true"
+     d="M 9.5,32 A 23.5,23.5 0 0 1 24.006939,10.288831 23.5,23.5 0 0 1 49.617009,15.38299" />
+  <path
+     sodipodi:nodetypes="ccc"
+     inkscape:connector-curvature="0"
+     id="path866"
+     d="M 59.659666,32.634365 54.47225,25.515708 49.448619,32.634365 Z"
+     style="display:inline;fill:#ffffff;fill-opacity:1;fill-rule:evenodd;stroke:#ffffff;stroke-width:2.73127;stroke-linecap:butt;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
+  <path
+     style="fill:none;stroke:#ffffff;stroke-width:4;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stop-color:#000000"
+     id="path868"
+     sodipodi:type="arc"
+     sodipodi:cx="-31.000221"
+     sodipodi:cy="-32"
+     sodipodi:rx="23.5"
+     sodipodi:ry="23.5"
+     sodipodi:start="3.1415927"
+     sodipodi:end="5.4977871"
+     sodipodi:arc-type="arc"
+     sodipodi:open="true"
+     d="m -54.500221,-32 a 23.5,23.5 0 0 1 14.506939,-21.711169 23.5,23.5 0 0 1 25.610069,5.094159"
+     transform="scale(-1)" />
+</svg> Detect</div>
+    <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    
+    <g transform="translate(30 33) rotate(-30)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    
+    <g transform="translate(30 33) rotate(60)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    
+    <path d="M56.9 29.8 A25 25 0 0 1 52.5 46.3"/>
+    <path d="M52.5 46.3 L57.8 43.6 M52.5 46.3 L53.2 40.3"/>
+  </g>
+</svg> Engage</div>
+    <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    
+    <g transform="translate(30 33) rotate(60)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    
+    <g transform="translate(30 33) rotate(-30)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    
+    <path d="M52.5 46.3 A25 25 0 0 0 56.9 29.8"/>
+    <path d="M56.9 29.8 L54.6 35.3 M56.9 29.8 L60.2 34.8"/>
+  </g>
+</svg> Disengage</div>
+    <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 9 H41 L55 23 V49 Q55 55 49 55 H15 Q9 55 9 49 V15 Q9 9 15 9 Z"/>
+    <path d="M21 9 V20 Q21 23 24 23 H37 Q40 23 40 20 V9"/>
+    <path d="M18 55 V38 Q18 35 21 35 H43 Q46 35 46 38 V55"/>
+    <path d="M33.5 12 V19"/>
+  </g>
+</svg> Save Dock</div>
   </div>
+</div>
+
+<h3 id="panel-icons">Custom icons</h3>
+<p>Engage/Disengage use custom SVGs from <code>klipperscreen/icons/</code> — the grabber key in
+both positions: the <em>target</em> position solid (with the sensor hole), the <em>start</em>
+position ghosted at 50% opacity, plus a small arrow showing the direction of rotation. The
+cleaned monochrome <strong>Vortac logo</strong> (right; source export kept as
+<code>vortac_logo_original.svg</code>) is the panel's entry icon in the main menu —
+<code>install.sh</code> links it into every KlipperScreen theme's <code>images/</code> dir, so
+<code>icon: vortac_logo</code> resolves like a stock icon name. The panel resolves the icon path through its own symlink
+back into the repo, so <code>install.sh</code> needs no extra step; if the SVG cannot be loaded,
+the button falls back to a stock icon.</p>
+<div class="vortac-icons" style="display:flex;gap:2rem;align-items:center;background:#10151d;border:1px solid #2a3442;border-radius:11px;padding:1.2rem 1.5rem;margin:0 0 1.2rem;width:max-content;">
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 9 H41 L55 23 V49 Q55 55 49 55 H15 Q9 55 9 49 V15 Q9 9 15 9 Z"/>
+    <path d="M21 9 V20 Q21 23 24 23 H37 Q40 23 40 20 V9"/>
+    <path d="M18 55 V38 Q18 35 21 35 H43 Q46 35 46 38 V55"/>
+    <path d="M33.5 12 V19"/>
+  </g>
+</svg>
+    <figcaption>vortac_dock_save.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    
+    <g transform="translate(30 33) rotate(60)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    
+    <g transform="translate(30 33) rotate(-30)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    
+    <path d="M52.5 46.3 A25 25 0 0 0 56.9 29.8"/>
+    <path d="M56.9 29.8 L54.6 35.3 M56.9 29.8 L60.2 34.8"/>
+  </g>
+</svg>
+
+    <figcaption>vortac_disengage.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    
+    <g transform="translate(30 33) rotate(-30)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    
+    <g transform="translate(30 33) rotate(60)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    
+    <path d="M56.9 29.8 A25 25 0 0 1 52.5 46.3"/>
+    <path d="M52.5 46.3 L57.8 43.6 M52.5 46.3 L53.2 40.3"/>
+  </g>
+</svg>
+
+    <figcaption>vortac_engage.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <path fill="#e8e8e8" transform="translate(-646.72 -935.96) scale(2.8)" d="M240.63,337.18h3.76c.15,0,.27.12.27.27v6.22l2.15,3.72h0s5.39,3.11,5.39,3.11c.13.07.17.24.1.37l-1.88,3.26c-.07.13-.24.17-.37.1l-5.39-3.11h-4.3l-5.39,3.11c-.13.07-.29.03-.37-.1l-1.88-3.26c-.07-.13-.03-.29.1-.37l5.38-3.11h0s2.15-3.73,2.15-3.73v-6.22c0-.15.12-.27.27-.27ZM241.44,344.88l-1.45,2.52h1.01l1.45-2.52h-1.01ZM243.46,344.88l-2.91,5.04h1.01l2.91-5.04h-1.01ZM244.02,347.4l-1.45,2.52h1.01l1.45-2.52h-1.01Z"/>
+</svg>
+    <figcaption>vortac_logo.svg</figcaption>
+  </figure>
 </div>
 
 <h3 id="panel-behaviour">Behaviour</h3>

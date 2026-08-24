@@ -83,6 +83,15 @@ if [[ -d "$KSCREEN_DIR/panels" && -d "$PANELS_SRC" ]]; then
     ln -sfn "$f" "$dst"
     echo "  → $base"
   done
+  # menu icon: KlipperScreen resolves `icon:` names against the active
+  # theme's images dir, so link the logo into every theme
+  ICON_SRC="$REPO_DIR/klipperscreen/icons/vortac_logo.svg"
+  if [[ -f "$ICON_SRC" ]]; then
+    for imgdir in "$KSCREEN_DIR"/styles/*/images; do
+      [[ -d "$imgdir" ]] && ln -sfn "$ICON_SRC" "$imgdir/vortac_logo.svg"
+    done
+    echo "  → vortac_logo.svg (all themes)"
+  fi
   echo "  (restart the UI to load them:  sudo systemctl restart KlipperScreen)"
 else
   echo "ℹ️  KlipperScreen not found at $KSCREEN_DIR — skipping panel links"

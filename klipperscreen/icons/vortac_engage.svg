@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Vortac engage: grabber key rotating from the engaged position
+       (2 o'clock, ghosted) to the disengaged position (5 o'clock, solid).
+       Small CW arrow shows the motion. -->
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- start position, ghosted -->
+    <g transform="translate(30 33) rotate(-30)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    <!-- target position, solid -->
+    <g transform="translate(30 33) rotate(60)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    <!-- rotation arrow, 2:00 -> 5:00 -->
+    <path d="M56.9 29.8 A25 25 0 0 1 52.5 46.3"/>
+    <path d="M52.5 46.3 L57.8 43.6 M52.5 46.3 L53.2 40.3"/>
+  </g>
+</svg>
