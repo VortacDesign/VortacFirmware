@@ -301,15 +301,19 @@ bus and takes klippy down. Everything below follows from that single constraint.
 <h4>Where the contact is made and broken</h4>
 <p>The pogo contact opens and closes on the <strong>Y slide</strong> at the dock, never on Z: the
 spring-loaded dock board rides along through the whole Z travel (that is exactly why
-<code>dock_sense</code> is expected to stay LOW during the checked lift). So every supply switch
-brackets a Y move, and the contacts never make or break under load:</p>
-<pre><code>park  : approach lifted -> slide in Y   (contact closes, dock DEAD)
-        -> verify dock_sense -> power ON
+<code>dock_sense</code> is expected to stay LOW during the checked lift). Hardware finding from
+the first real handover runs: <em>mating</em> live is fine — the grabber side always does — but
+<em>switching</em> the dock supply ON into pogos already mated to the grabber-fed tool trips the
+dock's fuse. Switching OFF into mated, grabber-fed pogos works. The switch therefore always
+happens with either the pogos separated (park, switching on) or as a cut (fetch, switching
+off):</p>
+<pre><code>park  : approach lifted -> power ON   (pogos still separated)
+        -> slide in Y (mates live)
         -> checked Z drop -> disengage -> slide out Y
 
 fetch : approach -> slide in Y -> engage
         -> checked Z lift -> verify grab_sense
-        -> power OFF -> checked Y backout  (contact opens, dock DEAD)</code></pre>
+        -> power OFF -> checked Y backout  (contact opens dead)</code></pre>
 <p>In both directions the board is fed from the other side while the dock side switches: the
 grabber carries it during the fetch, the dock carries it after the park. There is never a moment
 where both feeds are down. The grabber-side contact is always made and broken live — it has no
@@ -321,7 +325,7 @@ switch, and cannot get one.</p>
 <thead><tr><th>Mode</th><th>Behaviour</th><th>Requires</th></tr></thead>
 <tbody>
 <tr><td><code>off</code></td><td>the supply channel is never touched</td><td>—</td></tr>
-<tr><td><code>occupancy</code></td><td>docks positively known to be empty are de-energized; the park side already switches at the contact check, the fetch side cuts only after the tool has left (so the pogos separate live)</td><td>nothing — cannot lose an MCU</td></tr>
+<tr><td><code>occupancy</code></td><td>docks positively known to be empty are de-energized; the park side energizes before the slide-in, the fetch side cuts only after the tool has left (so the pogos separate live)</td><td>nothing — cannot lose an MCU</td></tr>
 <tr><td><code>handover</code></td><td>additionally cuts the supply <em>before</em> the fetch backout, so the pogos separate dead</td><td>the grabber must feed the held tool</td></tr>
 </tbody>
 </table>

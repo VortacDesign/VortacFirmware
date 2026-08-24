@@ -31,10 +31,14 @@
 # DARK POWER MANAGEMENT (dock_power_mode)
 # The pogo contact between tool board and dock is made and broken by the Y
 # slide at the dock — the spring-loaded dock board rides along through the
-# whole Z travel, so Z never opens it. Every supply switch therefore brackets
-# a Y move, never a Z move:
-#   park  : slide in (contact closes dead) -> verify dock_sense -> power ON
-#           -> checked Z drop -> disengage -> slide out
+# whole Z travel, so Z never opens it. Hardware finding from the first real
+# handover runs: MATING live is fine (the grabber side always does), but
+# SWITCHING the dock supply ON into pogos already mated to the grabber-fed
+# tool trips the dock's fuse — two live feeds meeting through a closing
+# switch read as a fault. Switching OFF into mated, grabber-fed pogos is
+# fine (proven by the fetch handover). Hence:
+#   park  : approach -> power ON (pogos still separated) -> slide in
+#           (mates live) -> checked Z drop -> disengage -> slide out
 #   fetch : slide in -> engage -> checked Z lift -> verify grab_sense
 #           -> power OFF -> slide out (contact opens dead)
 # In both cases the tool board is fed from the other side while the dock side
@@ -889,49 +893,26 @@ class VortacManager:
                 and self._power_index() is not None
                 and not self.sense_needs_dock_power)
 
-    def _power_on_at_contact(self, tool, dock_name, gcmd):
-        """Park: energize the dock once the pogos are mated.
+    def _power_on_before_slide(self, dock_name):
+        """Park: energize the dock BEFORE the Y slide mates the pogos.
 
-        Called at the slid-in position, BEFORE the checked Z drop. The
-        spring-loaded dock board rides along through the whole Z travel, so
-        the pogos make and break contact on the Y slide only — which is why
-        contact is verified here, while the dock is still dead, and the
-        supply comes up before anything moves again.
+        Hardware constraint (first real handover runs): the dock's fuse
+        trips when the supply is switched ON into pogos already mated to
+        the grabber-fed tool — two live feeds meeting through a closed
+        switch read as a fault. So the switch happens open-circuit, and the
+        pogos then mate live on the slide (mating live is fine — the
+        grabber side always does; only switching under load is not).
 
-        The two readings around the switch also self-diagnose: if dock_sense
-        cannot see the mated contact while the dock is dead but can see it
-        once it is live, the dock's sense pull hangs off the switched supply.
-        That is recorded once and disables the dead-break on the fetch side,
-        where it would otherwise fake a clean release."""
+        Contact verification happens afterwards in _try_hook's 'seated'
+        criterion; the sense pull (green) is independent of the supply, so
+        it reads the same either way."""
         if self._power_index() is None or self._policy_power(dock_name):
             return
-        # SET_LED takes effect immediately, NOT in step with the move queue,
-        # so the slide-in must be finished before the supply comes up —
-        # otherwise the pogos would mate live. This wait is unconditional:
-        # a tool without sense readings has no is_docked() to wait on, but
-        # still has a queued G1.
-        self._wait_sense()
-        contact = tool.is_docked() if tool.sense_ready() else None
+        # SET_LED takes effect immediately, NOT in step with the move
+        # queue — the approach must be finished (and the slide not yet
+        # issued) when the supply comes up.
+        self.printer.lookup_object('toolhead').wait_moves()
         self._set_dock_power(dock_name, True)
-        if contact is None or contact:
-            return
-        self._wait_sense()
-        if tool.is_docked():
-            if not self.sense_needs_dock_power:
-                self.sense_needs_dock_power = True
-                self._report(
-                    gcmd,
-                    f"Vortac: {tool.tool_id} only reports dock contact at "
-                    f"{dock_name} once the dock is energized — the dock's "
-                    f"sense pull depends on the switched supply. Dead-break "
-                    f"disabled for this session; dock changes keep the "
-                    f"supply on while the pogos separate.")
-        else:
-            self._report(
-                gcmd,
-                f"Vortac warning: no dock contact for {tool.tool_id} at "
-                f"{dock_name} after sliding in — the checked drop below "
-                f"will retry, check dock calibration and pogo pins.")
 
     def _power_off_before_backout(self, tool, dock_name, gcmd):
         """Fetch: cut the dock supply after the checked lift and before the
@@ -1410,10 +1391,13 @@ class VortacManager:
         position before the grabber lets go; after backing out, the tool
         must still read docked and no longer grabbed.
 
-        Dock supply: the dock is dead on arrival (it was empty), the pogos
-        mate on the Y slide below, and the supply comes up right after that
-        — before the Z drop, while the grabber still carries the tool. So
-        the contact closes dead and nothing is switched under load."""
+        Dock supply: energized AFTER the approach and BEFORE the Y slide,
+        i.e. while the pogos are still separated. Hardware finding from the
+        first real handover runs: switching the dock supply ON into pogos
+        that are already mated to the grabber-fed tool trips the dock's
+        fuse — the switch itself must happen open-circuit. The pogos then
+        mate live on the slide, exactly like the grabber side always does;
+        only switching under load is forbidden, not mating."""
         x = tool.get_dock_pos(dock_name, 'x')
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
@@ -1421,17 +1405,20 @@ class VortacManager:
         gcode.run_script_from_command(
             f'G90\n'
             f'G1 X{x} Y{y + DOCK_Y_SAFE} Z{z + DOCK_Z_CLEARANCE} '
-            f'F{DOCK_APPROACH_F}\n'
+            f'F{DOCK_APPROACH_F}')
+        # Energize NOW, with the pogos still separated (see docstring) —
+        # switching on after the slide, into the grabber-fed tool, trips
+        # the dock fuse.
+        self._power_on_before_slide(dock_name)
+        gcode.run_script_from_command(
             f'G1 Y{y} F{DOCK_SLIDE_F}')
 
         if not tool.sense_ready():
-            # No sense feedback available — blind hook-in, but slow. The
-            # supply still has to come up before the grabber lets go.
+            # No sense feedback available — blind hook-in, but slow.
             if gcmd is not None:
                 gcmd.respond_info(
                     f"Vortac: {tool.tool_id} sense pins not ready, "
                     f"hooking in blind")
-            self._power_on_at_contact(tool, dock_name, gcmd)
             gcode.run_script_from_command(
                 f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
             self.grabber.disengage(gcmd=gcmd)
@@ -1440,9 +1427,6 @@ class VortacManager:
             return
 
         self._ensure_sense_active(gcmd)
-        # Pogos are mated by the Y slide above: verify contact with the dock
-        # still dead, then energize before the checked drop starts.
-        self._power_on_at_contact(tool, dock_name, gcmd)
         for attempt in range(1, DOCK_UNHOOK_RETRIES + 1):
             result = self._try_hook(tool, z)
             if result == 'seated':

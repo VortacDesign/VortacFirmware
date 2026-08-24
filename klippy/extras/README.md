@@ -256,11 +256,13 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   LED's red channel gates the parked tool board's supply, INVERTED (red HIGH
   cuts it, 0.0 = powered). The supply is switched around the *Y* moves at the
   dock, never the Z moves — the spring-loaded dock board rides along through
-  the Z travel, so Y is where the pogos actually open and close:
-  park slides in, verifies `dock_sense` with the dock still dead, then
-  energizes before the drop; fetch engages, lifts, verifies `grab_sense`,
-  then cuts before the backout. The board is always fed from the other side
-  while the dock switches.
+  the Z travel, so Y is where the pogos actually open and close. The supply
+  must never be switched ON into pogos already mated to the grabber-fed tool
+  (trips the dock fuse; switching OFF into mated pogos is fine): park
+  energizes after the approach with the pogos still separated, then slides
+  in; fetch engages, lifts, verifies `grab_sense`, then cuts before the
+  backout. The board is always fed from the other side while the dock
+  switches.
   Everything else follows from one constraint: the sense pins live on the
   TOOL's mcu and Klipper has no optional mcus, so a dark board is a klippy
   shutdown. Hence only a dock POSITIVELY known to be empty is de-energized
