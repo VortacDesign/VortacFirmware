@@ -260,9 +260,13 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   must never be switched ON into pogos already mated to the grabber-fed tool
   (trips the dock fuse; switching OFF into mated pogos is fine): park
   energizes after the approach with the pogos still separated, then slides
-  in; fetch engages, lifts, verifies `grab_sense`, then cuts before the
-  backout. The board is always fed from the other side while the dock
-  switches.
+  in; fetch engages, lifts, runs the checked backout with the dock
+  untouched, and cuts only once the tool is back out at the safe line
+  (`_power_off_at_safe`, `grab_sense` confirmed). Both switching events are
+  therefore open-circuit at the safe line, and the board is always fed from
+  the other side while the dock switches. The fetch cut used to sit between
+  the lift and the backout (pogos separating dead); it was moved out because
+  it ran inside the very window the `dock_sense` release check evaluates.
   Everything else follows from one constraint: the sense pins live on the
   TOOL's mcu and Klipper has no optional mcus, so a dark board is a klippy
   shutdown. Hence only a dock POSITIVELY known to be empty is de-energized
@@ -278,10 +282,6 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   channel against the policy, so a manual SET_LED that cuts an occupied
   dock is reverted before a service restart can strand the board. A full
   power cycle clears the latch and is the unconditional recovery.
-  `_power_off_before_backout` probes whether `dock_sense` survives the cut;
-  if it does not, the release check would read a false "released", so the
-  supply is restored and the dead-break is disabled for the session
-  (`sense_needs_dock_power`).
 - **Status LED (`argb_status_mode`):** `sense` (mirrors the sense pull),
   `power` (lit while the dock feeds its board), `detected` (full = tool
   detected, `argb_status_dim` = confirmed empty, off = map not trustworthy).

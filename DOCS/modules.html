@@ -194,6 +194,7 @@ nozzle would hit the bed before the probe triggers. Park the tool
 <tr><td><code>DOCK_Y_SAFE</code></td><td>50.0</td><td>safe Y line in front of the docks</td></tr>
 <tr><td><code>DOCK_Z_CLEARANCE</code></td><td>5.0</td><td>lift above the saved (hooked/engage) Z</td></tr>
 <tr><td><code>DOCK_APPROACH_F</code></td><td>2000</td><td>approach feedrate (mm/min)</td></tr>
+<tr><td><code>DOCK_APPROACH_HOP</code></td><td>5.0</td><td>relative Z hop before the Y/X travel when below the approach height</td></tr>
 <tr><td><code>DOCK_SLIDE_F</code></td><td>400</td><td>Y slide in/out feedrate (mm/min) — Y only</td></tr>
 <tr><td><code>DOCK_UNHOOK_LIFT_F</code></td><td>40</td><td>checked Z lift/drop feedrate (mm/min)</td></tr>
 <tr><td><code>DOCK_UNHOOK_ZSTEP</code></td><td>1.0</td><td>Z per checked step (hook and unhook)</td></tr>
@@ -206,6 +207,29 @@ the hooked/engage position; load uses saved Z then lifts to
 Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code>, and unload approaches at
 Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> before dropping to saved Z.</p>
 
+<h3 id="dock-approach">Sequential (axis-by-axis) dock approach</h3>
+<p>The move to the dock front is never a single combined <code>G1 X Y Z</code>. A
+combined move takes the shortest diagonal, and that diagonal cuts through the
+dock row: with a tool on the grabber it can clip a neighbouring tool, and it
+arrives at the target dock at an angle instead of head-on. Every approach
+(<code>_approach_dock()</code>) is therefore split into axis-aligned moves, always
+in the same order:</p>
+<ol>
+  <li><strong>Y</strong> out to the safe line (<code>y + DOCK_Y_SAFE</code>) — the
+      slide-out direction, the one move that can always be made, whether the carriage
+      stands in a dock or out in the printer.</li>
+  <li><strong>X</strong> across at the safe line, clear of every dock.</li>
+  <li><strong>Z</strong> last, with X/Y already on the dock.</li>
+</ol>
+<p>Ahead of those three, a relative <code>DOCK_APPROACH_HOP</code> (5&nbsp;mm) lift runs
+if the carriage sits below the approach height, so a held tool does not scrape over the
+tool plate or catch on the print during the Y/X travel. It is deliberately a small hop and
+not a lift all the way to the approach height — that would be the Z-before-Y order this
+avoids.</p>
+<p>The approach ends with a <code>wait_moves()</code> so the queued corner blending cannot
+start the Y slide-in while the approach is still running — and so the dock supply switching
+in <code>handover</code> mode still happens with the carriage standing still.</p>
+
 <h3 id="hook-verification">Checked hook / unhook (sense-verified Z phases)</h3>
 <p>Both Z phases at the dock are stepwise and sense-verified with the same
 <code>DOCK_UNHOOK_ZSTEP</code>/<code>DOCK_UNHOOK_LIFT_F</code> constants; only the Y slides use
@@ -215,10 +239,12 @@ a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
   <li><strong>Fetch (unhook):</strong> engage, then checked lift — <code>dock_sense</code> must
       STAY LOW (going HIGH mid-lift = tilt/bind → lower back, re-seat, retry) — then checked Y
       backout where <code>dock_sense</code> going HIGH is the clean release. <code>grab_sense</code>
-      HIGH at any checkpoint freezes motion (tool lost). Between the two phases the dock supply is
-      cut in <code>handover</code> mode: the lift has just confirmed both a held tool and intact
-      dock contact, which are exactly the two conditions that make handing the feed to the grabber
-      safe (<a href="#dock-power">Dock power</a>).</li>
+      HIGH at any checkpoint freezes motion (tool lost). The dock supply is <em>not</em> touched
+      during either phase &mdash; in <code>handover</code> mode it is cut afterwards, at the safe
+      line, so the release check runs against an untouched dock
+      (<a href="#dock-power">Dock power</a>). The backward step must be longer than the Y extent
+      of the dock's landing pad (<code>DOCK_UNHOOK_STEP</code>), or the pogo pin still sits on the
+      pad after the step and a clean release reads as <em>still hooked</em>.</li>
   <li><strong>Park (hook-in):</strong> slide in lifted — this is where the pogos mate, so
       <code>dock_sense</code> is checked here with the dock still dead and the supply is switched
       on before anything moves again — then the checked drop from
@@ -309,16 +335,23 @@ spring-loaded dock board rides along through the whole Z travel (that is exactly
 <code>dock_sense</code> is expected to stay LOW during the checked lift). Hardware finding from
 the first real handover runs: <em>mating</em> live is fine — the grabber side always does — but
 <em>switching</em> the dock supply ON into pogos already mated to the grabber-fed tool trips the
-dock's fuse. Switching OFF into mated, grabber-fed pogos works. The switch therefore always
-happens with either the pogos separated (park, switching on) or as a cut (fetch, switching
-off):</p>
+dock's fuse. Switching OFF into mated, grabber-fed pogos works too, but both switching events
+now happen <strong>open-circuit at the safe line</strong>, with the pogos separated and the
+carriage standing still:</p>
 <pre><code>park  : approach lifted -> power ON   (pogos still separated)
         -> slide in Y (mates live)
         -> checked Z drop -> disengage -> slide out Y
 
 fetch : approach -> slide in Y -> engage
-        -> checked Z lift -> verify grab_sense
-        -> power OFF -> checked Y backout  (contact opens dead)</code></pre>
+        -> checked Z lift -> checked Y backout  (contact opens live)
+        -> slide out Y to the safe line
+        -> power OFF   (pogos already separated)</code></pre>
+<p>The fetch cut used to sit between the checked lift and the Y backout, so the pogos separated
+dead. It was moved out to the safe line because it ran <em>inside</em> the window the release
+check evaluates: the backout reads a clean release from <code>dock_sense</code> going HIGH, and
+the sense pull sits on the same dock LED as the supply gate. Switching there put the
+measurement's own pull into the measurement. The contact now opens live on the way out &mdash;
+exactly as it already mated live on the way in.</p>
 <p>In both directions the board is fed from the other side while the dock side switches: the
 grabber carries it during the fetch, the dock carries it after the park. There is never a moment
 where both feeds are down. The grabber-side contact is always made and broken live — it has no
@@ -330,8 +363,8 @@ switch, and cannot get one.</p>
 <thead><tr><th>Mode</th><th>Behaviour</th><th>Requires</th></tr></thead>
 <tbody>
 <tr><td><code>off</code></td><td>the supply channel is never touched</td><td>—</td></tr>
-<tr><td><code>occupancy</code></td><td>docks positively known to be empty are de-energized; the park side energizes before the slide-in, the fetch side cuts only after the tool has left (so the pogos separate live)</td><td>nothing — cannot lose an MCU</td></tr>
-<tr><td><code>handover</code></td><td>additionally cuts the supply <em>before</em> the fetch backout, so the pogos separate dead</td><td>the grabber must feed the held tool</td></tr>
+<tr><td><code>occupancy</code></td><td>docks positively known to be empty are de-energized; the park side energizes before the slide-in, the fetch side cuts once the occupancy map says the dock is empty</td><td>nothing — cannot lose an MCU</td></tr>
+<tr><td><code>handover</code></td><td>cuts the supply explicitly at the end of a fetch, once the tool is back out at the safe line and <code>grab_sense</code> confirms the grabber feeds it — a moment before the occupancy policy would do it anyway</td><td>the grabber must feed the held tool</td></tr>
 </tbody>
 </table>
 </div>
@@ -347,7 +380,7 @@ switch, and cannot get one.</p>
       located, so they pin <strong>every</strong> dock on for the whole session.</li>
   <li><strong>Every failure exit of a fetch re-energizes the dock.</strong> Lost grab, stuck
       hooks, a failed re-seat: the tool may still be in that dock. On the
-      retries-exhausted path the supply is restored <em>before</em> the grabber disengages,
+      retries-exhausted path the supply is re-asserted <em>before</em> the grabber disengages,
       because from that moment the dock is the board's only feed.</li>
   <li><strong><code>RESTART</code> and <code>FIRMWARE_RESTART</code> are wrapped</strong> to
       energize every dock first (<code>_install_restart_guard</code>). WS2812 latch their last
@@ -366,20 +399,6 @@ switch, and cannot get one.</p>
   <li>The supply is left alone at <code>klippy:ready</code> — every board is alive by then, and
       nothing may be switched off before the auto-detect has established which dock is empty.</li>
 </ul>
-
-<h4>Self-diagnosis: does the sense pull survive the cut?</h4>
-<p>The release criterion during the fetch backout is <code>dock_sense</code> going HIGH. If the
-dock's sense pull happened to be fed from the <em>switched</em> supply, cutting the supply would
-drive <code>dock_sense</code> HIGH immediately — with the tool not having moved at all — and
-every release check would silently pass. That is a <em>false positive</em>, worse than a
-failure.</p>
-<p>So <code>_power_off_before_backout</code> probes for exactly that: right after the cut, with
-the tool still seated, <code>dock_sense</code> <em>must</em> still read LOW. If it does not, the
-supply is restored, <code>sense_needs_dock_power</code> is latched for the session, the
-dead-break half of the handover is disabled, and a message says so.
-<code>_power_on_at_contact</code> makes the mirror-image observation on the park side (no contact
-while dead, contact once live). <code>VORTAC_STATUS</code> and
-<code>VORTAC_DOCK_POWER</code> report the flag.</p>
 
 <h4>Other things this buys you</h4>
 <ul>

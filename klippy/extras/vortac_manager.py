@@ -39,11 +39,20 @@
 # fine (proven by the fetch handover). Hence:
 #   park  : approach -> power ON (pogos still separated) -> slide in
 #           (mates live) -> checked Z drop -> disengage -> slide out
-#   fetch : slide in -> engage -> checked Z lift -> verify grab_sense
-#           -> power OFF -> slide out (contact opens dead)
-# In both cases the tool board is fed from the other side while the dock side
-# switches: the grabber carries it during fetch, the dock carries it after
-# park. There is never a moment where both feeds are down.
+#   fetch : slide in -> engage -> checked Z lift -> checked Y backout
+#           (contact opens live) -> slide out to the safe line
+#           -> power OFF (pogos already separated)
+# Both switching events therefore happen open-circuit at the safe line, with
+# the carriage standing still and the tool board fed from the other side: the
+# dock carries it after park, the grabber during fetch. There is never a
+# moment where both feeds are down.
+#
+# The fetch supply cut used to sit BETWEEN the checked Z lift and the Y
+# backout, so the pogos separated dead. It was moved out to the safe line
+# because it ran inside the very window the release check evaluates: the
+# backout reads a clean release from dock_sense going HIGH, and switching the
+# dock LED in the middle of that put the sense pull's own supply into the
+# measurement. The release check now runs with the dock state untouched.
 #
 # HARD CONSTRAINT: dock_sense/grab_sense live on the TOOL mcu, and Klipper has
 # no notion of an optional mcu. A tool board that goes dark drops off the CAN
@@ -67,9 +76,13 @@ import re
 # position (grabber inside the tool at dock height). The clearance position is
 # Z + DOCK_Z_CLEARANCE, used to lift a grabbed tool off the dock screws or
 # approach with a held tool before dropping it into the dock.
+# The approach to that clearance position is always axis-by-axis in the fixed
+# order Y -> X -> Z, never the shortest diagonal — see _approach_dock().
 DOCK_Y_SAFE      = 50.0    # mm, Y clearance for approach/depart
 DOCK_Z_CLEARANCE = 5.0     # mm, lift from saved hooked Z to clearance Z
 DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
+DOCK_APPROACH_HOP = 5.0    # mm, relative Z hop before the Y/X travel when the
+                           # carriage sits below the approach height
 DOCK_SLIDE_F     = 400     # mm/min, Y slide-in/out only (Z drop/lift at the
                            # dock is always the checked DOCK_UNHOOK_* phase)
 
@@ -94,7 +107,10 @@ DOCK_SLIDE_F     = 400     # mm/min, Y slide-in/out only (Z drop/lift at the
 DOCK_UNHOOK_LIFT_F      = 40    # mm/min, slow Z lift off the dock screws
 DOCK_UNHOOK_BACK_F      = 40    # mm/min, checked backward steps
 DOCK_UNHOOK_ZSTEP       = 1.0   # mm per checked lift step
-DOCK_UNHOOK_STEP        = 1.5   # mm per checked backward step
+DOCK_UNHOOK_STEP        = 2.0   # mm per checked backward step — must exceed
+                                # the Y extent of the dock's landing pad, or
+                                # the pogo pin still sits on it and the clean
+                                # release reads as 'hooked'
 DOCK_UNHOOK_CHECK_STEPS = 1     # backward steps for dock decoupling check
 DOCK_UNHOOK_RETRIES     = 3     # re-seat + lift attempts before reversing
 DOCK_CONTACT_SETTLE     = 1.0   # s to wait for dock_sense to report contact
@@ -127,10 +143,10 @@ class VortacManager:
         # --- dock power (dark power management) -------------------------
         #   off       = never touch the power channel
         #   occupancy = de-energize docks positively known to be empty
-        #   handover  = additionally cut the supply before the fetch backout,
-        #               so the pogos separate dead (needs the grabber to feed
-        #               the held tool — verified at runtime, see
-        #               _power_off_before_backout)
+        #   handover  = additionally cut the supply explicitly at the end of
+        #               a fetch, once the tool is back out at the safe line
+        #               (needs the grabber to feed the held tool — verified
+        #               via grab_sense, see _power_off_at_safe)
         self.dock_power_mode = config.getchoice(
             'dock_power_mode',
             {m: m for m in ('off', 'occupancy', 'handover')}, 'off')
@@ -227,10 +243,6 @@ class VortacManager:
         self.dock_power_override = {}
         # Debounce for the watchdog: at most one fix in flight at a time.
         self._watchdog_fix_pending = False
-        # Set once if the dock's sense pull turns out to die with the dock
-        # supply — then dock_sense cannot be trusted while the dock is dead
-        # and the dead-break half of the handover is disabled.
-        self.sense_needs_dock_power = False
 
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command(
@@ -894,12 +906,10 @@ class VortacManager:
             logging.info(msg)
 
     def _handover_enabled(self):
-        """Whether the dead-break half of the handover may run: it needs
-        handover mode, a supply gate, and a dock whose sense pull survives
-        losing that supply (see _power_off_before_backout)."""
+        """Whether the explicit fetch-side supply cut may run: it needs
+        handover mode and a supply gate (see _power_off_at_safe)."""
         return (self.dock_power_mode == 'handover'
-                and self._power_index() is not None
-                and not self.sense_needs_dock_power)
+                and self._power_index() is not None)
 
     def _power_on_before_slide(self, dock_name):
         """Park: energize the dock BEFORE the Y slide mates the pogos.
@@ -922,16 +932,20 @@ class VortacManager:
         self.printer.lookup_object('toolhead').wait_moves()
         self._set_dock_power(dock_name, True)
 
-    def _power_off_before_backout(self, tool, dock_name, gcmd):
-        """Fetch: cut the dock supply after the checked lift and before the
-        Y backout, so the pogos separate dead. The grabber already carries
-        the tool, so the board keeps its supply from the other side.
+    def _power_off_at_safe(self, tool, dock_name):
+        """Fetch: cut the dock supply once the tool is back out at the safe
+        line — the mirror of _power_on_before_slide on the park side, and
+        like it an open-circuit switch with the carriage standing still.
 
-        Guard: the backout check reads a clean release from dock_sense going
-        HIGH. If the dock's sense pull died with the supply, dock_sense would
-        go HIGH right here — with the tool not having moved at all — and
-        every release check would silently pass. So verify dock_sense is
-        still LOW; if not, restore the supply and stay powered from now on."""
+        Deliberately AFTER the Y backout, not before it: the backout reads a
+        clean release from dock_sense going HIGH, and the sense pull sits on
+        the same dock LED as the supply gate. Switching in the middle of that
+        window puts the measurement's own pull into the measurement. Now the
+        release check sees an untouched dock, and the pogos separate live —
+        which the park side has always done on the way in.
+
+        grab_sense must confirm the tool is on the grabber: that is the
+        second feed the board runs on once this dock goes dark."""
         if not self._handover_enabled():
             return
         if self.dock_power_override.get(dock_name) is False:
@@ -939,24 +953,10 @@ class VortacManager:
         if not tool.sense_ready() or not tool.is_grabbed():
             # Without confirmed grab there is no second feed to rely on.
             return
-        # The caller drains the queue on every checked lift step, but make the
-        # invariant local: SET_LED is not synchronized with the move queue, so
-        # no supply switch may happen with motion still pending.
-        self._wait_sense()
+        # SET_LED is not synchronized with the move queue — no supply switch
+        # may happen with motion still pending.
+        self.printer.lookup_object('toolhead').wait_moves()
         self._set_dock_power(dock_name, False)
-        self._wait_sense()
-        if tool.is_docked():
-            return          # contact still reported — the cut is real
-        self._set_dock_power(dock_name, True)
-        self.sense_needs_dock_power = True
-        self._report(
-            gcmd,
-            f"Vortac: dock_sense for {tool.tool_id} went HIGH the moment "
-            f"{dock_name} was de-energized, while the tool had not moved — "
-            f"the dock's sense pull hangs off the switched supply, so the "
-            f"release check cannot be trusted without it. Supply restored, "
-            f"dead-break disabled for this session.")
-        self._wait_sense()
 
     def _sense_active_on_dock(self, color):
         """Only the sense-pull channel is load-bearing here — the status LED
@@ -1392,8 +1392,46 @@ class VortacManager:
     # Dock motion (hardcoded geometry — see constants at top of file)
     # --------------------------------------------------------------------
 
+    def _approach_dock(self, x, y, z):
+        """Drive to the dock front (x, y + DOCK_Y_SAFE, z) one axis at a time,
+        always in the order Y -> X -> Z.
+
+        A single combined G1 takes the shortest diagonal, and that diagonal
+        cuts straight through the dock row: with a tool on the grabber it can
+        clip a neighbouring tool, and it arrives at the target dock at an
+        angle instead of head-on. Hence axis-aligned moves, in a fixed order:
+
+          Y  out to the safe line first. This is the slide-out direction —
+             the one move that can always be made, whether we are standing
+             in a dock or out in the printer.
+          X  across at the safe line, clear of every dock.
+          Z  last, with X/Y already on the dock.
+
+        Ahead of all three, a DOCK_APPROACH_HOP lift if the carriage sits
+        below the approach height, so a held tool does not scrape over the
+        tool plate or catch on the print on its way to the front. It is a
+        small relative hop, not a lift to the approach height: going all the
+        way up first would be the Z-before-Y order this avoids.
+        """
+        gcode = self.printer.lookup_object('gcode')
+        toolhead = self.printer.lookup_object('toolhead')
+        cur_z = toolhead.get_position()[2]
+        moves = ['G90']
+        if cur_z < z - 1e-6:
+            moves.append(
+                f'G91\nG1 Z{DOCK_APPROACH_HOP:.3f} F{DOCK_APPROACH_F}\nG90')
+        moves.append(f'G1 Y{y + DOCK_Y_SAFE:.3f} F{DOCK_APPROACH_F}')
+        moves.append(f'G1 X{x:.3f} F{DOCK_APPROACH_F}')
+        moves.append(f'G1 Z{z:.3f} F{DOCK_APPROACH_F}')
+        gcode.run_script_from_command('\n'.join(moves))
+        # The dock geometry below relies on being exactly on X/Y/Z before the
+        # slide: without this the queued corner blending would start the
+        # slide-in while the approach is still running.
+        toolhead.wait_moves()
+
     def _park_at_dock(self, tool, dock_name, gcmd):
-        """Park a held tool: approach lifted, slide in, then hook in with a
+        """Park a held tool: approach lifted (axis-by-axis, see
+        _approach_dock), slide in, then hook in with a
         checked stepwise Z drop (mirror of the unhook verification — same
         step size and feedrate). dock_sense must be LOW at the hooked
         position before the grabber lets go; after backing out, the tool
@@ -1410,10 +1448,7 @@ class VortacManager:
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
         gcode = self.printer.lookup_object('gcode')
-        gcode.run_script_from_command(
-            f'G90\n'
-            f'G1 X{x} Y{y + DOCK_Y_SAFE} Z{z + DOCK_Z_CLEARANCE} '
-            f'F{DOCK_APPROACH_F}')
+        self._approach_dock(x, y, z + DOCK_Z_CLEARANCE)
         # Energize NOW, with the pogos still separated (see docstring) —
         # switching on after the slide, into the grabber-fed tool, trips
         # the dock fuse.
@@ -1557,33 +1592,32 @@ class VortacManager:
         return 'seated' if tool.is_docked() else 'not_seated'
 
     def _fetch_from_dock(self, tool, dock_name, gcmd):
-        """Fetch a docked tool: approach at saved hooked Z, slide in, engage
+        """Fetch a docked tool: approach at saved hooked Z (axis-by-axis, see
+        _approach_dock), slide in, engage
         the grabber, then unhook slowly with dock_sense verification and
         checked backward steps. On repeated unhook failure, reverse all
         steps (re-seat, disengage, back out empty) and raise.
 
-        Dock supply: live on arrival (the tool is parked and awake). It is
-        cut inside _try_unhook, after the checked lift and before the Y
-        backout that separates the pogos — by then the grabber carries the
-        tool and feeds it. Every failure exit re-energizes the dock, because
-        a tool left behind in a dead dock would be a lost mcu at the next
-        restart."""
+        Dock supply: live on arrival (the tool is parked and awake) and live
+        through the whole unhook, so the dock_sense release check runs against
+        an untouched dock. It is cut only once the tool is back out at the
+        safe line (_power_off_at_safe, handover mode). Every failure exit
+        re-energizes the dock, because a tool left behind in a dead dock
+        would be a lost mcu at the next restart."""
         x = tool.get_dock_pos(dock_name, 'x')
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
         gcode = self.printer.lookup_object('gcode')
+        self._approach_dock(x, y, z)
         gcode.run_script_from_command(
-            f'G90\n'
-            f'G1 X{x} Y{y + DOCK_Y_SAFE} Z{z} F{DOCK_APPROACH_F}\n'
             f'G1 Y{y} F{DOCK_SLIDE_F}')
         self.grabber.engage(gcmd=gcmd)
 
         if not tool.sense_ready():
-            # No sense feedback available — blind unhook, but slow. No
-            # dead-break either: without dock_sense there is no way to tell
-            # a real release from a supply that just went away, so the pogos
-            # separate live here (the dock is de-energized afterwards, once
-            # the occupancy map says it is empty).
+            # No sense feedback available — blind unhook, but slow. The
+            # handover cut is skipped too (no grab_sense to confirm the second
+            # feed), so the dock is only de-energized afterwards, once the
+            # occupancy map says it is empty.
             if gcmd is not None:
                 gcmd.respond_info(
                     f"Vortac: {tool.tool_id} sense pins not ready, "
@@ -1605,6 +1639,9 @@ class VortacManager:
         try:
             self._fetch_unhook_loop(tool, dock_name, y, z, gcmd)
             handed_off = True
+            # Out at the safe line, pogos separated, grab confirmed: this is
+            # where the dock supply is switched off in handover mode.
+            self._power_off_at_safe(tool, dock_name)
         finally:
             if not handed_off:
                 try:
@@ -1675,9 +1712,11 @@ class VortacManager:
                 f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
 
         # All retries failed — reverse everything: tool stays in its dock,
-        # release the grabber and back out empty. The supply has to be back
-        # BEFORE the grabber lets go: from that moment the dock is the tool
-        # board's only feed, and the caller's finally comes too late for that.
+        # release the grabber and back out empty. Nothing cut the supply on
+        # this path any more (that happens at the safe line, on success only),
+        # but re-assert it anyway: from the moment the grabber lets go the
+        # dock is the tool board's only feed, a manual VORTAC_DOCK_POWER may
+        # have cut it, and the caller's finally comes too late for that.
         # Wait for the last re-seat move first — SET_LED is not synchronized
         # with the move queue, so switching now would energize a contact that
         # is still closing.
@@ -1699,10 +1738,9 @@ class VortacManager:
         means the tool is tilting on stuck hooks). Then checked backward
         steps, where dock_sense going HIGH is the clean release.
 
-        Between the two phases the dock supply is cut (handover mode): the
-        pogos only separate on the Y steps below, and by now the lift has
-        confirmed both a held tool and intact dock contact — the two
-        conditions that make it safe to hand the feed over to the grabber.
+        The dock supply is NOT touched here — it is cut afterwards, at the
+        safe line, so that this release check runs against an untouched dock
+        (see _power_off_at_safe).
 
         Returns 'released', 'hooked' (dock still LOW after the checked
         backward steps), 'tilt' (dock contact lost during the lift; no Y
@@ -1720,7 +1758,6 @@ class VortacManager:
                 return 'lost_grab'
             if not tool.is_docked():
                 return 'tilt'
-        self._power_off_before_backout(tool, dock_name, gcmd)
         cur_y = y
         for _ in range(DOCK_UNHOOK_CHECK_STEPS):
             cur_y += DOCK_UNHOOK_STEP
@@ -1840,8 +1877,6 @@ class VortacManager:
             if self.dock_uncertain:
                 power_line += (f"  [held on: "
                                f"{', '.join(sorted(self.dock_uncertain))}]")
-            if self.sense_needs_dock_power:
-                power_line += "  [dead-break disabled: sense needs dock power]"
         gcmd.respond_info(
             f"Vortac status:\n"
             f"  Current tool : {cur}\n"
@@ -1988,9 +2023,7 @@ class VortacManager:
                 f"Vortac dock power ({self.dock_power_mode}, channel "
                 f"{self.dock_power_channel}"
                 f"{', inverted' if self.dock_power_invert else ''}):\n"
-                f"  {state}\n"
-                f"  Sense pull needs dock power: "
-                f"{'yes (dead-break disabled)' if self.sense_needs_dock_power else 'no'}")
+                f"  {state}")
             return
         if dock_arg is None:
             raise gcmd.error("Missing DOCK=dockN")
@@ -2129,7 +2162,6 @@ class VortacManager:
                            if self._power_index() is not None else {}),
             'dock_power_mode': self.dock_power_mode,
             'argb_status_mode': self.argb_status_mode,
-            'sense_needs_dock_power': self.sense_needs_dock_power,
             'calibration_dock': self.calibration_dock,
             'calibration_tool': (self.calibration_tool.tool_id
                                  if self.calibration_tool else None),

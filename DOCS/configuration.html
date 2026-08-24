@@ -288,7 +288,9 @@ T0                   # manager: FLAT -> fetch -> TILT, applies offsets
 
 <h2 id="dock-motion">Where the dock motion lives</h2>
 <ul>
-  <li><strong>XYZ approach/depart</strong> is hardcoded in <code>vortac_manager.py</code>
+  <li><strong>XYZ approach/depart</strong> is axis-by-axis, never a diagonal
+      (see <a href="modules.html#dock-approach">Sequential dock approach</a>), and
+      hardcoded in <code>vortac_manager.py</code>
       (constants at the top of the file): <code>DOCK_Y_SAFE = 50.0</code>,
       <code>DOCK_Z_CLEARANCE = 5.0</code>, <code>DOCK_APPROACH_F = 2000</code>,
       <code>DOCK_SLIDE_F = 400</code>. Edit there for global geometry tweaks.</li>

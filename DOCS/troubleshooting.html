@@ -346,21 +346,25 @@ fix.</p>
 </details>
 
 <details class="fold">
-  <summary><code>dead-break disabled: sense needs dock power</code></summary>
+  <summary><code>still hooked at dockN (attempt 3/3)</code> although nothing is stuck</summary>
   <div class="fold-body">
-    <p><strong>Meaning:</strong> the manager cut a dock's supply while the tool was still seated
-    and <code>dock_sense</code> immediately went HIGH, although nothing had moved. So this dock's
-    sense pull is fed from the <em>switched</em> supply rather than from the LED's sense channel
-    alone.</p>
-    <p><strong>Consequence:</strong> the release check during the fetch backout reads
-    &ldquo;<code>dock_sense</code> went HIGH&rdquo; as a clean release, which the supply cut would
-    fake on every attempt. The manager therefore restores the supply, latches
-    <code>sense_needs_dock_power</code> for the session and keeps the supply on while the pogos
-    separate — i.e. it silently falls back to <code>occupancy</code> behaviour. Tool changes keep
-    working; only the arc-free separation is lost.</p>
-    <p><strong>Fix:</strong> hardware — feed the dock's sense pull from the unswitched rail. Until
-    then, setting <code>dock_power_mode: occupancy</code> makes the fallback explicit instead of
-    re-discovering it on every restart.</p>
+    <p><strong>Meaning:</strong> after the checked Z lift the manager backs out by
+    <code>DOCK_UNHOOK_STEP</code> in Y and expects <code>dock_sense</code> to go HIGH &mdash; the
+    pogo pin sliding off its landing pad is what signals a clean release. It stayed LOW, so the
+    verdict is &ldquo;hooks did not release&rdquo;, the tool is re-seated and the attempt repeats.</p>
+    <p><strong>Telling a false positive from a real bind:</strong> a real bind usually clears on
+    one of the retries or shows up as a <code>tilt</code> (dock contact lost during the lift). All
+    three attempts failing identically, with the tool visibly free on the hooks, points at the
+    step simply being too short: the pin is still on the pad. The relevant dimension is the
+    <em>Y extent of the pad</em> (plus any Y compliance of the spring-loaded dock board, which is
+    riding at the top of its travel at that moment), not the pin's own spring travel.</p>
+    <p><strong>Fix:</strong> read the checkpoints in <code>klippy.log</code>
+    (<code>vortac unhook &lt;tool&gt;: backout +2.000mm dock=LOW grab=LOW</code>) and raise
+    <code>DOCK_UNHOOK_STEP</code> in <a href="modules.html#hook-verification"><code>vortac_manager.py</code></a>
+    until <code>dock</code> reads HIGH on the first step. Raising
+    <code>DOCK_UNHOOK_CHECK_STEPS</code> instead gives the pin several steps to clear the pad
+    before a verdict is passed. The backout happens at Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code>
+    with the tool off the hooks, so a longer step is not in itself risky.</p>
   </div>
 </details>
 
