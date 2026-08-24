@@ -97,6 +97,8 @@ DOCK_UNHOOK_ZSTEP       = 1.0   # mm per checked lift step
 DOCK_UNHOOK_STEP        = 1.5   # mm per checked backward step
 DOCK_UNHOOK_CHECK_STEPS = 1     # backward steps for dock decoupling check
 DOCK_UNHOOK_RETRIES     = 3     # re-seat + lift attempts before reversing
+DOCK_CONTACT_SETTLE     = 1.0   # s to wait for dock_sense to report contact
+                                # again after the seat press
 
 
 class VortacManager:
@@ -141,6 +143,12 @@ class VortacManager:
             'dock_power_invert', default=True)
         self.dock_power_settle = config.getfloat(
             'dock_power_settle', default=0.25, minval=0.0)
+        # Overtravel below the hooked Z after a seated hook-in, to press
+        # the hooks the last hair into their seat before the grabber lets
+        # go. Park (way down) only — the unhook already overtravels up to
+        # Z + DOCK_Z_CLEARANCE. 0 disables the press.
+        self.dock_seat_press = config.getfloat(
+            'dock_seat_press', default=0.0, minval=0.0, maxval=2.0)
         # A manual SET_LED that raises the supply channel on an occupied
         # dock is only corrected at the next sense-dependent operation — but
         # a service restart (systemctl / SIGTERM) can happen first, and THAT
@@ -1421,6 +1429,7 @@ class VortacManager:
                     f"hooking in blind")
             gcode.run_script_from_command(
                 f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
+            self._seat_press(tool, z, gcmd)
             self.grabber.disengage(gcmd=gcmd)
             gcode.run_script_from_command(
                 f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
@@ -1467,6 +1476,17 @@ class VortacManager:
                 f"tool is still held by the grabber, backed out lifted. "
                 f"Check dock calibration and pogo pins.")
 
+        self._seat_press(tool, z, gcmd)
+        # The press must not have cost the contact — the grabber still holds
+        # the tool, so a clean stop here beats releasing onto a bad seat.
+        if not self._wait_dock_contact(tool):
+            raise self.printer.command_error(
+                f"Vortac: dock contact for {tool.tool_id} at {dock_name} "
+                f"was lost after the seat press (dock_seat_press="
+                f"{self.dock_seat_press:.2f}mm) — tool still held, grabber "
+                f"engaged. Check the dock seat and pogo pins; reduce "
+                f"dock_seat_press if the press exceeds the dock board's "
+                f"spring travel.")
         self.grabber.disengage(gcmd=gcmd)
         gcode.run_script_from_command(
             f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
@@ -1482,6 +1502,38 @@ class VortacManager:
                 f"Vortac: {tool.tool_id} still reports grabbed after "
                 f"disengage and backout at {dock_name}. Stopped; check "
                 f"the grabber before continuing.")
+
+    def _wait_dock_contact(self, tool):
+        """Give dock_sense up to DOCK_CONTACT_SETTLE to report contact after
+        the seat press — the contact can bounce while the hooks settle, and
+        the tool board's button report rides the CAN bus, so one immediate
+        sample is not enough for a fatal verdict."""
+        reactor = self.printer.get_reactor()
+        deadline = reactor.monotonic() + DOCK_CONTACT_SETTLE
+        while True:
+            if tool.is_docked():
+                return True
+            if reactor.monotonic() >= deadline:
+                return False
+            reactor.pause(reactor.monotonic() + self.dock_strobe_time)
+
+    def _seat_press(self, tool, z, gcmd):
+        """Press the tool onto the dock screws: overtravel dock_seat_press
+        below the hooked Z and come back. The checked drop stops exactly at
+        the saved Z, but the hooks sometimes rest a hair above their seat —
+        the press adds the missing force. Sense checks are deliberately NOT
+        fatal during the press: the hook unloads the grabber momentarily,
+        so grab_sense may flicker while the tool physically cannot be lost
+        (it is being pressed into the dock). Verification happens after
+        returning to Z, in the caller."""
+        if self.dock_seat_press <= 0.0:
+            return
+        gcode = self.printer.lookup_object('gcode')
+        gcode.run_script_from_command(
+            f'G1 Z{z - self.dock_seat_press:.3f} F{DOCK_UNHOOK_LIFT_F}\n'
+            f'G1 Z{z:.3f} F{DOCK_UNHOOK_LIFT_F}')
+        self._wait_sense()
+        self._log_unhook_checkpoint(tool, 'press', -self.dock_seat_press)
 
     def _try_hook(self, tool, z):
         """One hook-in attempt: checked stepwise Z drop from clearance to

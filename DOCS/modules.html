@@ -147,6 +147,7 @@ accept the tool name (case-insensitive), <code>T&lt;n&gt;</code>, or a bare inde
 <tr><td><code>dock_power_invert</code></td><td>True</td><td>channel HIGH cuts the supply, 0.0 = powered (Vortac hardware; do not flip, see below)</td></tr>
 <tr><td><code>dock_power_settle</code></td><td>0.25</td><td>seconds to wait after energizing a dock before relying on the board</td></tr>
 <tr><td><code>dock_power_watchdog</code></td><td>5.0</td><td>seconds between supply-channel checks against the policy (reverts manual <code>SET_LED</code> tampering); 0 disables</td></tr>
+<tr><td><code>dock_seat_press</code></td><td>0.0</td><td>mm of overtravel below the hooked Z after a seated hook-in, pressing the hooks into their seat before the grabber releases; 0 disables</td></tr>
 <tr><td><code>dock_strobe_time</code></td><td>0.10</td><td>seconds to wait after each strobe change</td></tr>
 <tr><td><code>auto_detect</code></td><td>True</td><td>run <code>VORTAC_DETECT</code> automatically after startup, so the dock map exists without a manual step</td></tr>
 <tr><td><code>auto_detect_delay</code></td><td>3.0</td><td>seconds after <code>klippy:ready</code> before the auto-detect runs (lets the tool boards deliver their first sense readings)</td></tr>
@@ -224,7 +225,11 @@ a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
       Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> to the hooked Z, where <code>dock_sense</code>
       must be LOW <em>before</em> the grabber disengages; no contact
       → lift back up and retry (<code>DOCK_UNHOOK_RETRIES</code>), final failure de-energizes the
-      dock and backs out with the tool still held. After disengage + backout, the tool must still
+      dock and backs out with the tool still held. With <code>dock_seat_press</code> set, a slow
+      overtravel below the hooked Z presses the hooks into their seat after the drop — sense
+      checks are deliberately not fatal during the press (the hook unloads the grabber for a
+      moment while the tool cannot go anywhere), and dock contact is re-verified afterwards,
+      before the grabber lets go. After disengage + backout, the tool must still
       read docked and no longer grabbed. Tools without sense pins hook in blind (slow drop, no
       verification, supply switched on unverified).</li>
 </ul>
