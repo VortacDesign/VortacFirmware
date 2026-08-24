@@ -146,6 +146,7 @@ accept the tool name (case-insensitive), <code>T&lt;n&gt;</code>, or a bare inde
 <tr><td><code>dock_power_channel</code></td><td>red</td><td>channel gating the parked tool board's supply</td></tr>
 <tr><td><code>dock_power_invert</code></td><td>True</td><td>channel HIGH cuts the supply, 0.0 = powered (Vortac hardware; do not flip, see below)</td></tr>
 <tr><td><code>dock_power_settle</code></td><td>0.25</td><td>seconds to wait after energizing a dock before relying on the board</td></tr>
+<tr><td><code>dock_power_watchdog</code></td><td>5.0</td><td>seconds between supply-channel checks against the policy (reverts manual <code>SET_LED</code> tampering); 0 disables</td></tr>
 <tr><td><code>dock_strobe_time</code></td><td>0.10</td><td>seconds to wait after each strobe change</td></tr>
 <tr><td><code>auto_detect</code></td><td>True</td><td>run <code>VORTAC_DETECT</code> automatically after startup, so the dock map exists without a manual step</td></tr>
 <tr><td><code>auto_detect_delay</code></td><td>3.0</td><td>seconds after <code>klippy:ready</code> before the auto-detect runs (lets the tool boards deliver their first sense readings)</td></tr>
@@ -343,7 +344,16 @@ switch, and cannot get one.</p>
       energize every dock first (<code>_install_restart_guard</code>). WS2812 latch their last
       value across a klippy restart, so a dock left dead would still be dead at the next
       <code>mcu_identify</code>. A full power cycle clears the latch and is the unconditional
-      recovery path.</li>
+      recovery path. The guard only exists on the gcode path — a <em>service</em> restart
+      (<code>systemctl restart klipper</code>, the standard step after a <code>git pull</code>)
+      kills the host without running any klippy code and cannot be intercepted.</li>
+  <li><strong>A watchdog re-asserts the supply channel</strong> against the policy every
+      <code>dock_power_watchdog</code> seconds (default 5): a manual <code>SET_LED</code> that
+      cuts an occupied dock's supply is reverted within one period, which closes the window in
+      which a service restart would strand that board. It touches <em>only</em> the supply
+      channel of mismatched docks — sense pull, status LED, transient handover cuts and explicit
+      <code>FORCE=1</code> overrides are left alone — and the check is a host-side memory read,
+      so a consistent chain costs no LED traffic at all.</li>
   <li>The supply is left alone at <code>klippy:ready</code> — every board is alive by then, and
       nothing may be switched off before the auto-detect has established which dock is empty.</li>
 </ul>

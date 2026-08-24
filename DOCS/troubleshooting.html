@@ -314,10 +314,18 @@ fix.</p>
     (<code>dock_power_invert</code>). Klipper then starts normally.</p>
     <p><strong>Why it happened:</strong> normal operation cannot produce this state —
     <code>RESTART</code> and <code>FIRMWARE_RESTART</code> are wrapped to energize every dock
-    first, and every failure path of a fetch restores the supply. Suspect a hard
-    <code>M112</code>/power loss mid-change, or a manual
-    <code>VORTAC_DOCK_POWER … VALUE=0 FORCE=1</code>. If it repeats without either, that is a
-    bug worth reporting.</p>
+    first, and every failure path of a fetch restores the supply. Suspect one of:</p>
+    <ul>
+      <li>a manual <code>SET_LED</code> that raised the supply channel, followed by a
+          <em>service</em> restart (<code>systemctl restart klipper</code>) — the restart guard
+          only covers the gcode commands; a service restart kills the host without running any
+          klippy code. The dock power watchdog reverts such tampering within
+          <code>dock_power_watchdog</code> seconds (default 5), so this window is nearly closed
+          on current firmware;</li>
+      <li>a hard <code>M112</code>/power loss mid-change;</li>
+      <li>a manual <code>VORTAC_DOCK_POWER … VALUE=0 FORCE=1</code>.</li>
+    </ul>
+    <p>If it repeats without any of these, that is a bug worth reporting.</p>
     <div class="callout warn">
     <p>Check <code>initial_RED: 0.0</code> in the <code>[neopixel]</code> dock section. A
     non-zero value means &ldquo;supply cut&rdquo; on Vortac hardware and would starve every tool

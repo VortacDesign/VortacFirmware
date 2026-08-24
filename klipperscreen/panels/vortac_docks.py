@@ -411,9 +411,11 @@ class Panel(ScreenPanel):
         power = self.manager.get("dock_power") or {}
         if dock not in power:
             return ""
+        # U+FE0E forces text presentation: a color-emoji ⚡ ignores the
+        # foreground colour, so on/off would render identically.
         if power[dock]:
-            return "<small><span foreground='#7fd6a0'>⚡</span></small>"
-        return "<small><span foreground='#4a5568'>⚡</span></small>"
+            return "<small><span foreground='#7fd6a0'>⚡︎</span></small>"
+        return "<small><span foreground='#4a5568'>⚡︎</span></small>"
 
     def _update_tile(self, dock, tool_id, held, reserved_for=None):
         tile = self.tiles.get(dock)

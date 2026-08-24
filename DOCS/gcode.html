@@ -39,6 +39,7 @@ the overview table down.</p>
 <tr><td class="cmd"><code>VORTAC_DOCK_POWER</code></td><td>manager</td><td>report the supply state of every dock</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_POWER DOCK=dockN VALUE=0|1 [ONLY=1] [FORCE=1]</code></td><td>manager</td><td>override one dock's supply; <code>ONLY=1</code> sets every other dock the opposite way (UUID isolation), <code>FORCE=1</code> is required to de-energize a dock that holds a tool <em>or whose occupancy is not trustworthy</em> (no detection yet, or an unresolved dock) &mdash; cutting a parked board's supply drops it off the CAN bus and shuts klippy down</td></tr>
 <tr><td class="cmd"><code>VORTAC_STATUS_LED [MODE=sense|power|detected]</code></td><td>manager</td><td>report or switch what the dock status LED shows (runtime only; <code>argb_status_mode</code> is the persistent setting)</td></tr>
+<tr><td class="cmd"><code>_VORTAC_DOCK_POWER_SYNC</code></td><td>manager</td><td>internal (used by the dock power watchdog): re-assert the supply channel against the policy; safe to run manually</td></tr>
 <tr><td class="cmd"><code>VORTAC_GANTRY_FLAT</code> / <code>VORTAC_GANTRY_TILT</code></td><td>qgl_state</td><td>toggle gantry between frame-flat and bed-flat</td></tr>
 <tr><td class="cmd"><code>VORTAC_QGL_STATUS</code></td><td>qgl_state</td><td>report gantry state and stored QGL deltas</td></tr>
 <tr><td class="cmd"><code>VORTAC_CALIBRATE [DIR=cw|ccw|both]</code></td><td>grabber</td><td>populate the AS5047D LUT (default: both directions, reports backlash)</td></tr>

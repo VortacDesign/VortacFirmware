@@ -72,9 +72,10 @@
   /* dock holds a tool but its supply is off — strands the tool board */
   .dock.nopower { border-color: #e5484d; border-width: 2px; }
   .dock.nopower .tname { color: #e5484d; }
-  .dock .bolt { font-size: 11px; margin-left: 4px; }
+  .dock .bolt { margin-left: 4px; }
+  .dock .bolt svg { width: 9px; height: 12px; vertical-align: -2px; }
   .dock .bolt.on { color: var(--green); }
-  .dock .bolt.off { color: #4a5568; }
+  .dock .bolt.off { color: #3a4453; }
   .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
     background: #3a4657; margin: 0 2px 1px 6px; }
   .dot.on { background: #5aa9e8; box-shadow: 0 0 5px #5aa9e8; }
@@ -300,11 +301,16 @@ function powerFaults() {
 }
 
 // Supply glyph. Empty string when the manager does not manage the supply at
-// all, so the tile degrades silently instead of lying.
+// all, so the tile degrades silently instead of lying. Inline SVG instead of
+// the ⚡ emoji: color emoji ignore CSS `color`, so on/off would render
+// identically and the glyph would lie about the supply state.
+const BOLT_SVG =
+  '<svg viewBox="0 0 10 14" aria-hidden="true">' +
+  '<path d="M6.2 0 L0.5 8.2 H4.2 L3.4 14 L9.5 5.6 H5.4 Z" fill="currentColor"/></svg>';
 function boltMarkup(dock) {
   const power = state.manager.dock_power || {};
   if (!(dock in power)) return "";
-  return `<span class="bolt ${power[dock] ? "on" : "off"}">⚡</span>`;
+  return `<span class="bolt ${power[dock] ? "on" : "off"}" title="${power[dock] ? "dock powered" : "dock supply off"}">${BOLT_SVG}</span>`;
 }
 
 function tileClick(dock) {

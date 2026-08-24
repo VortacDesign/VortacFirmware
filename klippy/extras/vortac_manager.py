@@ -137,6 +137,15 @@ class VortacManager:
             'dock_power_invert', default=True)
         self.dock_power_settle = config.getfloat(
             'dock_power_settle', default=0.25, minval=0.0)
+        # A manual SET_LED that raises the supply channel on an occupied
+        # dock is only corrected at the next sense-dependent operation — but
+        # a service restart (systemctl / SIGTERM) can happen first, and THAT
+        # path no klippy code can intercept: the WS2812 latches the tampered
+        # state and the board is dark at the next mcu_identify. The watchdog
+        # closes the window by re-asserting the supply channel against the
+        # policy every few seconds. 0 disables it.
+        self.dock_power_watchdog = config.getfloat(
+            'dock_power_watchdog', default=5.0, minval=0.0)
         # Channel names are only dereferenced at runtime (_channel_index),
         # and the klippy:ready reconcile downgrades that failure to a log
         # warning — validate here so a typo is a startup error instead of a
@@ -204,6 +213,8 @@ class VortacManager:
         # Transient supply overrides during a handover, dock -> bool. Takes
         # precedence over the occupancy-derived policy.
         self.dock_power_override = {}
+        # Debounce for the watchdog: at most one fix in flight at a time.
+        self._watchdog_fix_pending = False
         # Set once if the dock's sense pull turns out to die with the dock
         # supply — then dock_sense cannot be trusted while the dock is dead
         # and the dead-break half of the handover is disabled.
@@ -243,6 +254,10 @@ class VortacManager:
             'VORTAC_STATUS_LED', self.cmd_VORTAC_STATUS_LED,
             desc="Switch what the dock status LED shows "
                  "(MODE=sense|power|detected)")
+        gcode.register_command(
+            '_VORTAC_DOCK_POWER_SYNC', self.cmd_VORTAC_DOCK_POWER_SYNC,
+            desc="Re-assert the dock supply channel against the policy "
+                 "(used by the dock power watchdog)")
         gcode.register_command(
             'VORTAC_SELECT_DOCK', self.cmd_VORTAC_SELECT_DOCK,
             desc="Detect/select a dock for calibration")
@@ -432,7 +447,15 @@ class VortacManager:
         Only a full power cycle clears the latch by itself, so the graceful
         restart paths are wrapped here.
 
-        Limitation worth knowing: in a SHUTDOWN state this guard is a no-op.
+        Limitation worth knowing: this guard only exists on the gcode path.
+        A service restart (systemctl restart klipper / SIGTERM — the standard
+        step after every git pull) kills the host process without running any
+        klippy code, so nothing can energize the docks on that path. The
+        policy keeps every occupied dock on at rest, so the only way to be
+        bitten is a supply tampered with shortly before the service restart —
+        and the dock power watchdog reverts exactly that within seconds.
+
+        Also: in a SHUTDOWN state this guard is a no-op.
         SET_LED is not registered when_not_ready, so the write is refused and
         _force_all_docks_powered swallows it (deliberately — recovering the
         printer beats switching an LED). It therefore covers the graceful
@@ -518,13 +541,23 @@ class VortacManager:
         # supply stays untouched here — every tool board is alive by now
         # (klippy:mcu_identify has passed) and nothing may be switched off
         # before the auto-detect below has established which dock is empty.
-        self._check_led_channels()
         try:
             self._ensure_sense_active()
         except self.printer.command_error as e:
             logging.warning(
                 "vortac_manager: could not enable dock sense channels "
                 "at startup: %s", e)
+        self._start_power_watchdog()
+        # Purely diagnostic, so it runs AFTER the functional reconcile and
+        # can never break startup: an exception here would otherwise abort
+        # klippy:ready, leaving the sense pull at its initial_* value (off)
+        # and the auto-detect below unscheduled — i.e. a printer that finds
+        # no tools, caused by a cosmetic check.
+        try:
+            self._check_led_channels()
+        except Exception:
+            logging.exception(
+                "vortac_manager: LED channel check failed (diagnostic only)")
         if self.auto_detect:
             # Deferred a few seconds so the tool boards' button callbacks
             # have delivered their first sense readings. Runs through the
@@ -758,6 +791,89 @@ class VortacManager:
     def _dock_power_map(self):
         return {self._dock_name(i): self._policy_power(self._dock_name(i))
                 for i in range(self.dock_count)}
+
+    # --------------------------------------------------------------------
+    # Dock power watchdog
+    # --------------------------------------------------------------------
+
+    def _power_mismatches(self):
+        """Dock indices whose supply channel does not match the policy.
+        Reads the neopixel's host-side color_data — no mcu traffic."""
+        if self._power_index() is None:
+            return []
+        colors = self._get_led_color_data()
+        idx = self._power_index()
+        return [i for i in range(self.dock_count)
+                if abs(colors[i][idx]
+                       - self._power_value(
+                           self._policy_power(self._dock_name(i)))) > 1e-6]
+
+    def _start_power_watchdog(self):
+        if self._power_index() is None or self.dock_power_watchdog <= 0.0:
+            return
+        reactor = self.printer.get_reactor()
+        reactor.register_timer(
+            self._watchdog_timer_cb,
+            reactor.monotonic() + self.dock_power_watchdog)
+        logging.info(
+            "vortac_manager: dock power watchdog armed (every %.1fs)",
+            self.dock_power_watchdog)
+
+    def _watchdog_timer_cb(self, eventtime):
+        """Timer half: detect only — timers must not block. The fix runs as
+        a gcode command through the queue, so it serializes behind any tool
+        change or detection instead of interleaving with it (the handler
+        recomputes under the mutex, so it never applies a stale view)."""
+        reactor = self.printer.get_reactor()
+        try:
+            mismatched = self._power_mismatches()
+        except Exception:
+            # Broken LED lookup would spam this every period — say it once
+            # and stand down; config validation should have caught it.
+            logging.exception(
+                "vortac_manager: dock power watchdog cannot read the LED "
+                "state — watchdog disabled")
+            return reactor.NEVER
+        if mismatched and not self._watchdog_fix_pending:
+            self._watchdog_fix_pending = True
+            reactor.register_callback(self._watchdog_fix_cb)
+        return eventtime + self.dock_power_watchdog
+
+    def _watchdog_fix_cb(self, eventtime):
+        try:
+            gcode = self.printer.lookup_object('gcode')
+            gcode.run_script('_VORTAC_DOCK_POWER_SYNC')
+        except Exception:
+            logging.exception("vortac_manager: dock power watchdog fix "
+                              "failed")
+        finally:
+            self._watchdog_fix_pending = False
+
+    def cmd_VORTAC_DOCK_POWER_SYNC(self, gcmd):
+        """Re-assert the supply channel against the policy. Writes ONLY the
+        power channel of mismatched docks — sense pull and status LED stay
+        untouched, so a running VORTAC_DOCK_STROBE debug session is not
+        disturbed. The re-check runs under the gcode mutex, i.e. against the
+        CURRENT policy, never a view from before a queued tool change."""
+        mismatched = self._power_mismatches()
+        if not mismatched:
+            return
+        colors = self._get_led_color_data()
+        idx = self._power_index()
+        out = {}
+        for i in mismatched:
+            color = list(colors[i])
+            color[idx] = self._power_value(
+                self._policy_power(self._dock_name(i)))
+            out[i] = tuple(color)
+        self._write_dock_colors(out)
+        names = ', '.join(self._dock_name(i) for i in mismatched)
+        msg = (f"Vortac: dock supply channel on {names} did not match the "
+               f"policy (manual SET_LED?) — restored. A tampered supply that "
+               f"survives into a service restart strands the tool board, so "
+               f"the watchdog reverts it.")
+        gcmd.respond_info(msg)
+        logging.warning(msg)
 
     def _report(self, gcmd, msg):
         if gcmd is not None:

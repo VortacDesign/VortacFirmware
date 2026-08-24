@@ -270,8 +270,12 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   re-energizes, and
   `RESTART`/`FIRMWARE_RESTART` are wrapped to power all docks first
   (`_install_restart_guard` — WS2812 latch across a restart, and
-  `mcu_identify` runs before the LED is ever programmed). A full power cycle
-  clears the latch and is the unconditional recovery.
+  `mcu_identify` runs before the LED is ever programmed; a SERVICE restart
+  via systemctl bypasses klippy entirely and cannot be intercepted). A
+  watchdog (`dock_power_watchdog`, default 5 s) re-asserts the supply
+  channel against the policy, so a manual SET_LED that cuts an occupied
+  dock is reverted before a service restart can strand the board. A full
+  power cycle clears the latch and is the unconditional recovery.
   `_power_off_before_backout` probes whether `dock_sense` survives the cut;
   if it does not, the release check would read a false "released", so the
   supply is restored and the dead-break is disabled for the session
