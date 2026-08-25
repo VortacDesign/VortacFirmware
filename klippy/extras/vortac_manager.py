@@ -17,9 +17,13 @@
 #       move the docks. The live adjustment (current offset minus the
 #       leaving tool's configured offset, i.e. babystepping) is captured
 #       here and re-applied in step 6 so it survives the change.
+#   2c. suspend bed mesh                   -- the mesh is a move transform on
+#       every G1 and would shift the dock Z by the (edge-clamped) mesh value
+#       at the dock XY; a bed-tilted mesh is invalid frame-flat anyway.
 #   3. _park_at_dock(current)              -- if a tool is held
 #   4. _fetch_from_dock(target)            -- if target is not None
 #   5. VORTAC_GANTRY_TILT                  -- bed-flat geometry for printing
+#   5b. restore bed mesh (suspended in 2c)
 #   6. SET_GCODE_OFFSET to target's offsets (+ captured live adjustment)
 #   7. tool_activate_gcode (target tool, if any)
 #
@@ -237,6 +241,9 @@ class VortacManager:
         # were actually applied — after a mid-change abort or a manual
         # VORTAC_SET_CURRENT_TOOL they are not.
         self.offsets_applied = False
+        # Bed mesh suspended for dock motion (step 2b). Held on self so an
+        # aborted change can still restore it on the next attempt.
+        self.suspended_mesh = None
         self.dock_occupancy = {}    # dock_name -> tool_id or None
         self.park_dock = {}         # tool_id -> dock to return the held
                                     # tool to (set on fetch / by detection)
@@ -1266,6 +1273,13 @@ class VortacManager:
     def _change_to(self, target, gcmd):
         if self.current_tool is target:
             tid = target.tool_id if target else 'None'
+            if self.suspended_mesh is not None:
+                # Mesh stranded by an aborted change — hand it back.
+                bed_mesh = self.printer.lookup_object('bed_mesh', None)
+                if bed_mesh is not None:
+                    bed_mesh.set_mesh(self.suspended_mesh)
+                self.suspended_mesh = None
+                gcmd.respond_info("Vortac: restored suspended bed mesh")
             if target is not None and not self.offsets_applied:
                 # A previous change aborted between fetch and step 6: the
                 # tool is on the carriage but its offsets never came back.
@@ -1326,6 +1340,20 @@ class VortacManager:
                 f"across the tool change")
         gcode.run_script_from_command('SET_GCODE_OFFSET X=0 Y=0 Z=0 MOVE=0')
         self.offsets_applied = False
+
+        # 2c. Suspend the bed mesh: it is a move transform on every G1, so
+        # it would shift the dock Z by the (edge-clamped) mesh value at the
+        # dock XY — and a mesh probed bed-tilted is invalid frame-flat
+        # anyway. set_mesh() caches the gcode position around the transform
+        # change, so this is jump-free. Restored after VORTAC_GANTRY_TILT.
+        bed_mesh = self.printer.lookup_object('bed_mesh', None)
+        if bed_mesh is not None:
+            mesh = bed_mesh.get_mesh()
+            if mesh is not None:
+                # Keep an already-suspended mesh from a previous aborted
+                # change; never overwrite it with None.
+                self.suspended_mesh = mesh
+                bed_mesh.set_mesh(None)
 
         # 3. Park the held tool (if any). Dock resolution: detection map ->
         # "where I fetched it from" -> optional manual home_dock.
@@ -1426,6 +1454,13 @@ class VortacManager:
         # 5. Bed-flat geometry for printing
         if self.qgl_state is not None:
             gcode.run_script_from_command('VORTAC_GANTRY_TILT')
+
+        # 5b. Restore the mesh suspended in 2c (valid again now that the
+        # gantry is back bed-tilted). Also picks up a mesh stranded by a
+        # previous aborted change.
+        if self.suspended_mesh is not None and bed_mesh is not None:
+            bed_mesh.set_mesh(self.suspended_mesh)
+            self.suspended_mesh = None
 
         # 6. Switch active extruder, apply target offsets, run activate gcode
         if target is not None:

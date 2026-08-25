@@ -169,9 +169,11 @@ catches the detectable leftovers.</p>
 → tool_deactivate_gcode
 → VORTAC_GANTRY_FLAT
 → SET_GCODE_OFFSET X=0 Y=0 Z=0 (capture live adjustment, zero for dock motion)
+→ suspend bed mesh (move transform — would shift dock Z)
 → _park_at_dock(current)
 → _fetch_from_dock(target)
 → VORTAC_GANTRY_TILT
+→ restore bed mesh
 → ACTIVATE_EXTRUDER EXTRUDER=&lt;extruder_name&gt; (automatic)
 → SET_GCODE_OFFSET (per-tool offsets + captured live adjustment)
 → tool_activate_gcode</code></pre>
@@ -182,7 +184,10 @@ catches the detectable leftovers.</p>
   (<code>toolhead.get_position()</code>), but the dock routines run as <code>G1</code> moves —
   which the G-code offset would shift. The manager therefore zeroes the offset before any dock
   motion: neither saved per-tool offsets, hand-set <code>SET_GCODE_OFFSET</code> values nor live
-  Z babystepping ever move the docks. The <em>live adjustment</em> — whatever the offset carried
+  Z babystepping ever move the docks. The <strong>bed mesh</strong> is suspended for the same
+  reason — it is a move transform on every <code>G1</code> that would shift the dock Z by the
+  edge-clamped mesh value at the dock XY (and a mesh probed bed-tilted is invalid frame-flat
+  anyway); it is restored right after <code>VORTAC_GANTRY_TILT</code>, jump-free. The <em>live adjustment</em> — whatever the offset carried
   beyond the leaving tool's configured values (i.e. babystepping) — is captured and re-applied
   on top of the target tool's offsets after the change, so a first-layer tweak survives a
   multi-tool print. If a change aborts mid-motion the offsets stay zeroed — the safe state for
