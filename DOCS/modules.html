@@ -168,12 +168,31 @@ catches the detectable leftovers.</p>
 <pre><code>_ensure_sense_active (reconcile all dock LEDs: sense pull, supply, status)
 → tool_deactivate_gcode
 → VORTAC_GANTRY_FLAT
+→ SET_GCODE_OFFSET X=0 Y=0 Z=0 (capture live adjustment, zero for dock motion)
 → _park_at_dock(current)
 → _fetch_from_dock(target)
 → VORTAC_GANTRY_TILT
 → ACTIVATE_EXTRUDER EXTRUDER=&lt;extruder_name&gt; (automatic)
-→ SET_GCODE_OFFSET (per-tool offsets)
+→ SET_GCODE_OFFSET (per-tool offsets + captured live adjustment)
 → tool_activate_gcode</code></pre>
+
+<div class="callout">
+  <span class="callout-title">Dock motion is offset-free</span>
+  <p>Dock positions are taught in kinematic coordinates
+  (<code>toolhead.get_position()</code>), but the dock routines run as <code>G1</code> moves —
+  which the G-code offset would shift. The manager therefore zeroes the offset before any dock
+  motion: neither saved per-tool offsets, hand-set <code>SET_GCODE_OFFSET</code> values nor live
+  Z babystepping ever move the docks. The <em>live adjustment</em> — whatever the offset carried
+  beyond the leaving tool's configured values (i.e. babystepping) — is captured and re-applied
+  on top of the target tool's offsets after the change, so a first-layer tweak survives a
+  multi-tool print. If a change aborts mid-motion the offsets stay zeroed — the safe state for
+  manual recovery. The manager tracks whether the held tool's offsets are actually active
+  (<code>offsets_applied</code>): after an abort the next change treats the whole remaining
+  offset as live adjustment instead of mis-subtracting config values, re-issuing
+  <code>T&lt;n&gt;</code> for the already-held tool re-applies its offsets, and
+  <code>VORTAC_SET_CURRENT_TOOL</code> / <code>VORTAC_DETECT</code> reset the flag when they
+  (re)declare the held tool.</p>
+</div>
 
 <h3 id="probe-guard">Probe guard</h3>
 <p>At <code>klippy:connect</code> the manager wraps the <code>[probe]</code> object's entry
@@ -484,6 +503,16 @@ behavior (rename table, overrides, skip lists, pretty names) is documented in
       created the section
       (persisted <code>params_*</code> dock positions), the injection MERGES into it —
       calibration data is preserved.</li>
+  <li><strong>Status mirror (UI visibility):</strong> Klipper freezes the raw config
+      snapshot (<code>printer.configfile.config</code>) in <code>read_main_config()</code>,
+      BEFORE extras run — runtime-injected sections would be invisible to it, and Mainsail,
+      Fluidd and KlipperScreen all derive their tool/heater/fan/LED lists (and KlipperScreen
+      its <code>printer.extruders.count</code> menu gates) from exactly that dict. So after
+      each <code>read_dict</code> the injected section is mirrored into
+      <code>configfile.status_raw_config</code> with the same merge semantics (autosave-seeded
+      <code>params_*</code> keys survive). <code>status_raw_config</code> is not public Klipper
+      API; if an update moves it, include_with logs a warning and everything still works —
+      the UIs just stop listing the injected sections.</li>
   <li><strong>Value rewrite:</strong> any <code>&lt;from&gt;:</code> pin token in option values
       becomes <code>&lt;to&gt;:</code>; whole-string section refs
       (<code>heater: extruder</code> → <code>heater: extruder1</code>) are fixed up.</li>

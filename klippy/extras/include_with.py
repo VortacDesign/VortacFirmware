@@ -81,6 +81,7 @@
 import os
 import re
 import json
+import logging
 
 
 DEFAULT_SINGLETON_SKIP = ('resonance_tester', 'input_shaper', 'shaketune')
@@ -391,6 +392,27 @@ def include_with_remap(printer, parent_config, filepath, namespace,
         # sections only ever holds params_* keys, which no template
         # provides, so nothing here overwrites persisted data.
         parent_config.fileconfig.read_dict({new_sect: new_items})
+        # Mirror the injected section into configfile's raw status
+        # (printer.configfile.config). That snapshot is frozen in
+        # read_main_config() BEFORE extras run, so runtime-injected
+        # sections are invisible to it — and Mainsail, Fluidd and
+        # KlipperScreen all derive their tool/heater/fan/LED lists from
+        # exactly that dict (KlipperScreen even gates whole menus on
+        # printer.extruders.count). status_raw_config is not public
+        # Klipper API, so degrade to a warning if an update moves it:
+        # everything still WORKS, the UIs just don't list the section.
+        raw_status = getattr(
+            printer.lookup_object('configfile'), 'status_raw_config', None)
+        if raw_status is not None:
+            # update(), not assign: SAVE_CONFIG's autosave block may have
+            # pre-seeded [vortac_tool <namespace>] with params_* keys that
+            # are already in the snapshot — same merge as read_dict above.
+            raw_status.setdefault(new_sect, {}).update(
+                {k: str(v) for k, v in new_items.items()})
+        else:
+            logging.warning(
+                "include_with: configfile.status_raw_config not found -- "
+                "UIs will not list injected section [%s]", new_sect)
         printer.load_object(parent_config, new_sect, default=None)
 
     return rename_map
