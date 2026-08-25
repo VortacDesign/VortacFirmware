@@ -9,10 +9,18 @@
 # Tool change sequence:
 #   1. tool_deactivate_gcode (current tool, if any)
 #   2. VORTAC_GANTRY_FLAT                  -- frame-flat geometry for docks
+#   2b. SET_GCODE_OFFSET X=0 Y=0 Z=0       -- dock motion is OFFSET-FREE:
+#       dock positions are taught in kinematic coordinates
+#       (toolhead.get_position in _save_dock_pos) but the dock routines run
+#       as G1 moves, which the gcode offset shifts. Neither saved tool
+#       offsets, hand-set SET_GCODE_OFFSET values nor live babystepping may
+#       move the docks. The live adjustment (current offset minus the
+#       leaving tool's configured offset, i.e. babystepping) is captured
+#       here and re-applied in step 6 so it survives the change.
 #   3. _park_at_dock(current)              -- if a tool is held
 #   4. _fetch_from_dock(target)            -- if target is not None
 #   5. VORTAC_GANTRY_TILT                  -- bed-flat geometry for printing
-#   6. SET_GCODE_OFFSET to target's offsets
+#   6. SET_GCODE_OFFSET to target's offsets (+ captured live adjustment)
 #   7. tool_activate_gcode (target tool, if any)
 #
 # VORTAC_DETECT uses ARGB strobe-by-subtraction to populate the dock
@@ -222,6 +230,13 @@ class VortacManager:
         # State (populated at klippy:connect)
         self.tools = {}             # tool_id -> VortacTool
         self.current_tool = None    # VortacTool or None
+        # True only while current_tool's configured gcode offsets are known
+        # to be active in homing_origin (set in step 6, cleared when step 2b
+        # zeroes them). Guards the live-adjustment math: subtracting the
+        # tool's config offsets from homing_origin is only valid if they
+        # were actually applied — after a mid-change abort or a manual
+        # VORTAC_SET_CURRENT_TOOL they are not.
+        self.offsets_applied = False
         self.dock_occupancy = {}    # dock_name -> tool_id or None
         self.park_dock = {}         # tool_id -> dock to return the held
                                     # tool to (set on fetch / by detection)
@@ -1095,6 +1110,10 @@ class VortacManager:
             self.dock_occupancy = detected
             self.dock_detection_valid = True
             if len(grabbed_ids) == 1:
+                if self.current_tool is not self.tools[grabbed_ids[0]]:
+                    # homing_origin (if anything) holds the offsets of the
+                    # tool we THOUGHT was held — not this one's.
+                    self.offsets_applied = False
                 self.current_tool = self.tools[grabbed_ids[0]]
                 self._assign_park_dock(self.current_tool, detected, gcmd)
             elif len(grabbed_ids) == 0:
@@ -1247,6 +1266,23 @@ class VortacManager:
     def _change_to(self, target, gcmd):
         if self.current_tool is target:
             tid = target.tool_id if target else 'None'
+            if target is not None and not self.offsets_applied:
+                # A previous change aborted between fetch and step 6: the
+                # tool is on the carriage but its offsets never came back.
+                # Catch up here instead of printing on zeroed offsets.
+                gcode = self.printer.lookup_object('gcode')
+                gcode_move = self.printer.lookup_object('gcode_move')
+                live = gcode_move.get_status()['homing_origin']
+                gcode.run_script_from_command(
+                    f'SET_GCODE_OFFSET '
+                    f'X={target.gcode_offset_x + live[0]:.6f} '
+                    f'Y={target.gcode_offset_y + live[1]:.6f} '
+                    f'Z={target.gcode_offset_z + live[2]:.6f} MOVE=0')
+                self.offsets_applied = True
+                gcmd.respond_info(
+                    f"Already on {tid} — re-applied its gcode offsets "
+                    f"(previous change aborted before they were set)")
+                return
             gcmd.respond_info(f"Already on {tid}")
             return
 
@@ -1266,6 +1302,30 @@ class VortacManager:
         # 2. Frame-flat geometry for dock approach
         if self.qgl_state is not None:
             gcode.run_script_from_command('VORTAC_GANTRY_FLAT')
+
+        # 2b. Offset-free dock motion (see sequence comment at the top).
+        # Capture the live adjustment — whatever the current offset carries
+        # beyond the leaving tool's configured offset (babystepping, manual
+        # SET_GCODE_OFFSET) — then zero everything before any dock move.
+        # If the change aborts mid-motion the offsets stay zeroed: that is
+        # the safe state for the manual recovery that follows anyway.
+        gcode_move = self.printer.lookup_object('gcode_move')
+        live = gcode_move.get_status()['homing_origin']
+        # Subtract the leaving tool's config offsets only if step 6 really
+        # applied them — after a mid-change abort (or a manual
+        # VORTAC_SET_CURRENT_TOOL) homing_origin never contained them, and
+        # subtracting would inject -cfg as a phantom "babystep".
+        cur = self.current_tool if self.offsets_applied else None
+        adjust = (live[0] - (cur.gcode_offset_x if cur else 0.0),
+                  live[1] - (cur.gcode_offset_y if cur else 0.0),
+                  live[2] - (cur.gcode_offset_z if cur else 0.0))
+        if any(abs(a) > 1e-6 for a in adjust):
+            gcmd.respond_info(
+                f"Vortac: carrying live offset adjustment "
+                f"X={adjust[0]:.4f} Y={adjust[1]:.4f} Z={adjust[2]:.4f} "
+                f"across the tool change")
+        gcode.run_script_from_command('SET_GCODE_OFFSET X=0 Y=0 Z=0 MOVE=0')
+        self.offsets_applied = False
 
         # 3. Park the held tool (if any). Dock resolution: detection map ->
         # "where I fetched it from" -> optional manual home_dock.
@@ -1380,13 +1440,18 @@ class VortacManager:
                         f"for {target.tool_id} not found, active extruder "
                         f"unchanged")
             gcode.run_script_from_command(
-                f'SET_GCODE_OFFSET X={target.gcode_offset_x} '
-                f'Y={target.gcode_offset_y} Z={target.gcode_offset_z} MOVE=0')
+                f'SET_GCODE_OFFSET '
+                f'X={target.gcode_offset_x + adjust[0]:.6f} '
+                f'Y={target.gcode_offset_y + adjust[1]:.6f} '
+                f'Z={target.gcode_offset_z + adjust[2]:.6f} MOVE=0')
+            self.offsets_applied = True
             self._render(target.tool_activate_gcode,
                          tool=target, dock=None, gcmd=gcmd)
         else:
             gcode.run_script_from_command(
-                'SET_GCODE_OFFSET X=0 Y=0 Z=0 MOVE=0')
+                f'SET_GCODE_OFFSET X={adjust[0]:.6f} Y={adjust[1]:.6f} '
+                f'Z={adjust[2]:.6f} MOVE=0')
+            self.offsets_applied = True
 
     # --------------------------------------------------------------------
     # Dock motion (hardcoded geometry — see constants at top of file)
@@ -1912,6 +1977,9 @@ class VortacManager:
         if tool_arg is None:
             raise gcmd.error("Missing TOOL=<name>|Tn or CLEAR=1")
         self.current_tool = self._get_tool(tool_arg, gcmd)
+        # Manually declared — nothing applied this tool's offsets, so the
+        # next change must not subtract them from homing_origin.
+        self.offsets_applied = False
         gcmd.respond_info(
             f"Set current Vortac tool to {self.current_tool.tool_id} "
             f"(no motion performed)")

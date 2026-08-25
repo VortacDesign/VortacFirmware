@@ -189,7 +189,20 @@ params: {"script":"VORTAC_DETECT"}</code></pre>
           is held. Park the tool first, then probe.</li>
       <li><strong>The temperature panel shows <code>extruder</code>, <code>extruder1</code>, …</strong> —
           Klipper's multi-extruder naming is hardwired; namespaced hardware (fans, LEDs) shows the
-          display name. See <a href="configuration.html#pretty-names">pretty names</a>.</li>
+          display name. See <a href="configuration.html#pretty-names">pretty names</a>. (This
+          relies on include_with's <a href="modules.html#include-with">status mirror</a> —
+          without it, injected sections are invisible to the config snapshot and KlipperScreen
+          hides the Temperature/Extrude/Print menus entirely because
+          <code>printer.extruders.count</code> reads 0.)</li>
+      <li><strong>The Extrude panel's tool selector runs a REAL tool change</strong> — its
+          extruder buttons send <code>T&lt;n&gt;</code>, which vortac_manager registers as a
+          full dock swap with motion. To switch only the logical extruder (e.g. to prime a
+          docked tool), use <code>ACTIVATE_EXTRUDER EXTRUDER=extruder1</code> or
+          <code>VORTAC_SET_CURRENT_TOOL</code> in the console instead.</li>
+      <li><strong>Heating a docked tool works only while its dock is powered</strong> — with
+          <code>dock_power_mode: occupancy/handover</code> occupied docks stay energized, so
+          this is the normal case; a dock the manager de-energized (positively known empty)
+          has no tool to heat anyway. Check the bolt glyph on the Vortac panel.</li>
       <li><strong>The Input Shaper button is missing</strong> — its <code>enable:</code> guard
           checks for the <code>[input_shaper]</code> singleton, which the tool configs
           <code>skip_sections:</code>. Declare it in <code>printer.cfg</code> if you want the

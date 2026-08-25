@@ -224,6 +224,15 @@ reference tool: the paper drag should be the same. Fine-tune live with
 <h2 id="tool-offsets">4 — Per-tool offsets</h2>
 <p>Each tool carries three numbers on its <code>[vortac_tool]</code> section; the manager applies
 them with <code>SET_GCODE_OFFSET … MOVE=0</code> on every tool change:</p>
+<div class="callout tip">
+  <span class="callout-title">Offsets never move the docks — and babystepping survives</span>
+  <p>During the dock routines of a tool change all G-code offsets are zeroed, so neither these
+  values nor live <code>SET_GCODE_OFFSET</code>/babystep adjustments shift the taught dock
+  positions. Any <em>live</em> adjustment beyond the leaving tool's configured offsets (your
+  first-layer babystep) is carried across the change and re-applied on top of the new tool's
+  offsets — you'll see a <code>carrying live offset adjustment</code> console note when that
+  happens.</p>
+</div>
 <div class="table-wrap">
 <table>
 <thead><tr><th>Option</th><th>Default</th><th>Meaning</th></tr></thead>
