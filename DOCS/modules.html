@@ -242,6 +242,7 @@ defaults — they apply unless the config overrides them. Feedrates are mm/min
 <tr><td><code>dock_retries</code></td><td>3</td><td>1 … 10</td><td>re-seat + retry attempts before aborting</td></tr>
 <tr><td><code>dock_contact_settle</code></td><td>1.0</td><td>0 … 10</td><td>s to wait for <code>dock_sense</code> after the seat press</td></tr>
 <tr><td><code>sense_settle</code></td><td><code>dock_strobe_time</code> (0.10)</td><td>0.01 … 2</td><td>s pause after each checked step before the sense pins are read</td></tr>
+<tr><td><code>retreat_z</code></td><td>unset</td><td>—</td><td>Z to drop to after a dock operation, out of the dock plane; unset = no Z move</td></tr>
 </tbody>
 </table>
 </div>
@@ -276,6 +277,36 @@ avoids.</p>
 <p>The approach ends with a <code>wait_moves()</code> so the queued corner blending cannot
 start the Y slide-in while the approach is still running — and so the dock supply switching
 in <code>handover</code> mode still happens with the carriage standing still.</p>
+
+<h3 id="dock-retreat">Leaving the dock area (retreat)</h3>
+<p>Every dock routine <em>ends</em> on the safe line at
+<code>(dock_x, dock_y + dock_y_safe)</code>, at the clearance height. The next move belongs to
+whoever called the tool change — a slicer travel, a prime line, a macro — and as a single
+<code>G1</code> it takes the diagonal, which at dock height runs straight along (or through)
+the other tools.</p>
+<p><code>_retreat_from_dock()</code> closes the sequence as step 4b of the tool change, and it
+is the <strong>exact mirror of <code>_approach_dock()</code></strong>. The approach raises Z
+<em>last</em>, once X and Y already sit on the dock; the retreat puts it straight back down to
+<code>retreat_z</code>. Standing on the safe line the column below the carriage is clear by
+construction — that is what <code>dock_y_safe</code> buys — which makes the drop the move that
+can always be made here, the way Y-out always can on the way in.</p>
+<div class="callout tip">
+  <span class="callout-title">One move, and the carriage is free</span>
+  <p>The docks sit at the top of the Z travel. Drop below them and the dock row is simply not
+  in the plane of motion any more, so whatever diagonal the next <code>G1</code> takes cannot
+  touch anything. That is why there is no X/Y retreat to configure: the dock routine already
+  ends <code>dock_y_safe</code> clear of every tool, and dropping out of the dock plane
+  releases the carriage to go anywhere.</p>
+</div>
+<p><strong>Unset by default</strong>, and unset means Z is not moved: the carriage stays at the
+clearance height and the calling macro owns the first move. Nothing is derived from the bed
+size — the manager knows where the docks are, not where the print wants to begin. Pick a height
+below the docks and above the tallest print you run.</p>
+<p>The drop uses <code>dock_approach_feedrate</code>, the same feedrate the approach raised Z
+with, so both halves of the trip are symmetric in speed as well as in order. It runs while the
+G-code offsets are still zeroed and the bed mesh still suspended, so it is a pure kinematic move
+in the same frame the dock positions were taught in — and it runs on a plain unload (no target
+tool) too, so <code>VORTAC_UNLOAD</code> leaves the carriage clear as well.</p>
 
 <h3 id="hook-verification">Checked hook / unhook (sense-verified Z phases)</h3>
 <p>Both Z phases at the dock are stepwise and sense-verified with the same

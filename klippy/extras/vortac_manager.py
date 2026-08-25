@@ -24,6 +24,12 @@
 #   4. _fetch_from_dock(target)            -- if target is not None; starts
 #       with a VERIFIED disengage (_ensure_disengaged) so an engaged or
 #       half-turned key can never travel into the dock
+#   4b. retreat: drop straight down to retreat_z -- the mirror of the
+#       approach, which raises Z last. Below the frame-mounted docks the
+#       dock row is out of the plane of motion, so the diagonal the next G1
+#       takes cannot touch it. Unset by default; no X/Y retreat is needed
+#       because the dock routine already ends dock_y_safe clear of every
+#       tool.
 #   5. VORTAC_GANTRY_TILT                  -- bed-flat geometry for printing
 #   5b. restore bed mesh (suspended in 2c)
 #   6. SET_GCODE_OFFSET to target's offsets (+ captured live adjustment)
@@ -171,6 +177,33 @@ class VortacManager:
             'dock_lift_feedrate', default=40.0, minval=5.0, maxval=1200.0)
         self.dock_backout_feedrate = config.getfloat(
             'dock_backout_feedrate', default=40.0, minval=5.0, maxval=1200.0)
+
+        # --- retreat after a dock operation ----------------------------
+        # Every dock routine ends on the safe line (dock_x, dock_y +
+        # dock_y_safe) at the clearance height. The NEXT move is whatever the
+        # print/macro wants, and as a single G1 it takes the diagonal — which
+        # at dock height runs straight along (or through) the other tools.
+        #
+        # retreat_z closes the trip as the exact mirror of the approach: the
+        # approach ends by raising Z last, once X and Y already sit on the
+        # dock, so the retreat starts by putting it straight back down. The
+        # column below the safe line is clear by construction — that is what
+        # dock_y_safe buys — so the drop is the one move that can always be
+        # made here, the way Y-out always can on the way in.
+        #
+        # That single move is the whole retreat: the docks sit at the top of
+        # the Z travel, so below them the dock row is not in the plane of
+        # motion any more and the diagonal the next G1 takes cannot touch it.
+        # No X/Y safe position is needed — the dock routine already ends
+        # dock_y_safe clear of every tool, and dropping out of the dock plane
+        # releases the carriage to go anywhere.
+        #
+        # Unset by default = no Z move, the clearance height stands and the
+        # calling macro owns the first move. Nothing is derived from the bed
+        # size: the manager knows where the docks are, not where the print
+        # wants to begin. The drop uses dock_approach_feedrate, the same
+        # feedrate the approach raised Z with.
+        self.retreat_z = config.getfloat('retreat_z', default=None)
 
         # --- hook/unhook verification ----------------------------------
         self.dock_check_zstep = config.getfloat(
@@ -1492,6 +1525,11 @@ class VortacManager:
             # Remember the origin so the tool returns to the same dock.
             self.park_dock[target.tool_id] = dock
 
+        # 4b. Get out of the dock lane before anything else moves. Runs
+        # while the offsets are still zeroed and the mesh suspended, i.e. in
+        # the same frame the dock positions were taught in.
+        self._retreat_from_dock()
+
         self.current_tool = target
 
         # 5. Bed-flat geometry for printing
@@ -1572,6 +1610,35 @@ class VortacManager:
         # The dock geometry below relies on being exactly on X/Y/Z before the
         # slide: without this the queued corner blending would start the
         # slide-in while the approach is still running.
+        toolhead.wait_moves()
+
+    def _retreat_from_dock(self):
+        """Drop straight down out of the dock plane, mirroring the approach.
+
+        _approach_dock ends by raising Z last, once X and Y already sit on
+        the dock; this undoes exactly that. Standing on the safe line the
+        column below the carriage is clear by construction (that is what
+        dock_y_safe buys), so the drop is the move that can always be made
+        here, the way Y-out always can on the way in.
+
+        With the docks at the top of the Z travel, that one move is the whole
+        retreat: below them the dock row is no longer in the plane of motion,
+        so whatever diagonal the next G1 takes cannot touch it. Hence no X/Y
+        retreat — the dock routine already ends dock_y_safe clear of every
+        tool.
+
+        Unset retreat_z = no-op: the carriage stays at the clearance height
+        and the calling macro owns the first move.
+        """
+        if self.retreat_z is None:
+            return
+        toolhead = self.printer.lookup_object('toolhead')
+        if abs(toolhead.get_position()[2] - self.retreat_z) <= 1e-6:
+            return
+        gcode = self.printer.lookup_object('gcode')
+        gcode.run_script_from_command(
+            'G90\n'
+            f'G1 Z{self.retreat_z:.3f} F{self.dock_approach_feedrate}')
         toolhead.wait_moves()
 
     def _park_at_dock(self, tool, dock_name, gcmd):
