@@ -21,7 +21,9 @@
 #       every G1 and would shift the dock Z by the (edge-clamped) mesh value
 #       at the dock XY; a bed-tilted mesh is invalid frame-flat anyway.
 #   3. _park_at_dock(current)              -- if a tool is held
-#   4. _fetch_from_dock(target)            -- if target is not None
+#   4. _fetch_from_dock(target)            -- if target is not None; starts
+#       with a VERIFIED disengage (_ensure_disengaged) so an engaged or
+#       half-turned key can never travel into the dock
 #   5. VORTAC_GANTRY_TILT                  -- bed-flat geometry for printing
 #   5b. restore bed mesh (suspended in 2c)
 #   6. SET_GCODE_OFFSET to target's offsets (+ captured live adjustment)
@@ -1608,7 +1610,7 @@ class VortacManager:
             gcode.run_script_from_command(
                 f'G1 Z{z} F{self.dock_lift_feedrate}')
             self._seat_press(tool, z, gcmd)
-            self.grabber.disengage(gcmd=gcmd)
+            self._release_at_dock(tool, dock_name, gcmd)
             gcode.run_script_from_command(
                 f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
             return
@@ -1665,7 +1667,7 @@ class VortacManager:
                 f"engaged. Check the dock seat and pogo pins; reduce "
                 f"dock_seat_press if the press exceeds the dock board's "
                 f"spring travel.")
-        self.grabber.disengage(gcmd=gcmd)
+        self._release_at_dock(tool, dock_name, gcmd)
         gcode.run_script_from_command(
             f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
         self._wait_sense()
@@ -1680,6 +1682,21 @@ class VortacManager:
                 f"Vortac: {tool.tool_id} still reports grabbed after "
                 f"disengage and backout at {dock_name}. Stopped; check "
                 f"the grabber before continuing.")
+
+    def _release_at_dock(self, tool, dock_name, gcmd):
+        """Let go of a seated tool. disengage() raises when the key does not
+        reach its position, and here that must not be swallowed: backing out
+        with a key still in the tool drags it out of the dock. Adds the dock
+        context to the grabber's own message."""
+        try:
+            self.grabber.disengage(gcmd=gcmd)
+        except Exception as e:
+            raise self.printer.command_error(
+                f"Vortac: could not release {tool.tool_id} at {dock_name}: "
+                f"{e} The tool is seated in its dock but still on the "
+                f"grabber — stopped without backing out (that would drag it "
+                f"out). Free the key manually (VORTAC_DISENGAGE), then "
+                f"VORTAC_DETECT.")
 
     def _wait_dock_contact(self, tool):
         """Give dock_sense up to dock_contact_settle to report contact after
@@ -1751,10 +1768,26 @@ class VortacManager:
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
         gcode = self.printer.lookup_object('gcode')
+        # The key must be verified OUT before anything moves toward the dock.
+        # A successful park leaves it disengaged, but nothing else does: an
+        # aborted tool change, a manual VORTAC_ENGAGE/VORTAC_MOVE, a
+        # calibration run or a klippy restart all leave the grabber wherever
+        # it happened to stand, and an engaged (or half-turned) key rams the
+        # tool on the Y slide-in.
+        self._ensure_disengaged(gcmd)
         self._approach_dock(x, y, z)
         gcode.run_script_from_command(
             f'G1 Y{y} F{self.dock_slide_feedrate}')
-        self.grabber.engage(gcmd=gcmd)
+        # engage() raises if the key does not reach engage_pos — lifting on a
+        # half-turned key would either drop the tool or bend the hooks.
+        try:
+            self.grabber.engage(gcmd=gcmd)
+        except Exception as e:
+            raise self.printer.command_error(
+                f"Vortac: could not engage {tool.tool_id} at {dock_name}: "
+                f"{e} Stopped with the carriage slid into the dock — do not "
+                f"jog X/Y from here; free the key (VORTAC_DISENGAGE) and "
+                f"back out in Y first.")
 
         if not tool.sense_ready():
             # No sense feedback available — blind unhook, but slow. The
@@ -1799,6 +1832,29 @@ class VortacManager:
                     logging.exception(
                         "vortac_manager: could not re-energize %s after a "
                         "failed fetch", dock_name)
+
+    def _ensure_disengaged(self, gcmd=None):
+        """Drive the grabber key out before the carriage goes anywhere near
+        a dock.
+
+        The arrival check is the grabber's own job: engage()/disengage()
+        raise when the closed loop does not land within move_tol, so a key
+        that never turned (stalled stepper, bad angle reading) can never
+        travel into the dock, and this is a plain call without a follow-up
+        check.
+
+        Safe by construction: every caller runs with nothing on the grabber
+        (the tool change parks first, and the fetch path refuses outright
+        while any tool reads grabbed), so this can never drop a tool. The
+        grabbed check below is a second lock on that, not the primary one."""
+        grabbed = [tid for tid, t in sorted(self.tools.items())
+                   if t.is_grabbed()]
+        if grabbed:
+            raise self.printer.command_error(
+                f"Vortac: refusing to disengage — grab_sense says "
+                f"{', '.join(grabbed)} is in the grabber; disengaging now "
+                f"would drop it.")
+        return self.grabber.disengage(gcmd=gcmd)
 
     def _fetch_unhook_loop(self, tool, dock_name, y, z, gcmd):
         """Unhook retry loop of _fetch_from_dock. Returns normally once the
@@ -1865,7 +1921,17 @@ class VortacManager:
         # is still closing.
         self._wait_sense()
         self._set_dock_power(dock_name, True)
-        self.grabber.disengage(gcmd=gcmd)
+        # If the release itself fails, do NOT back out — that would drag the
+        # tool out of its dock. Report both: the unhook failure that got us
+        # here and the stuck key that is the more urgent problem.
+        try:
+            self.grabber.disengage(gcmd=gcmd)
+        except Exception as e:
+            raise self.printer.command_error(
+                f"Vortac: failed to unhook {tool.tool_id} from {dock_name} "
+                f"after {self.dock_retries} attempts, AND the grabber did "
+                f"not release: {e} Stopped at the dock without backing out "
+                f"(that would drag the tool out). Intervene manually.")
         gcode.run_script_from_command(
             f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
         raise self.printer.command_error(

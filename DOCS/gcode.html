@@ -45,8 +45,8 @@ the overview table down.</p>
 <tr><td class="cmd"><code>VORTAC_CALIBRATE [DIR=cw|ccw|both]</code></td><td>grabber</td><td>populate the AS5047D LUT (default: both directions, reports backlash)</td></tr>
 <tr><td class="cmd"><code>VORTAC_SET_ZERO</code></td><td>grabber</td><td>store the current LUT-corrected angle as zero offset</td></tr>
 <tr><td class="cmd"><code>VORTAC_MOVE TARGET=deg [MODE=…]</code></td><td>grabber</td><td>closed-loop move to an absolute true angle</td></tr>
-<tr><td class="cmd"><code>VORTAC_ENGAGE [ANGLE=deg]</code></td><td>grabber</td><td>closed-loop move to <code>engage_pos</code> (or ANGLE)</td></tr>
-<tr><td class="cmd"><code>VORTAC_DISENGAGE</code></td><td>grabber</td><td>closed-loop move to <code>disengage_pos</code></td></tr>
+<tr><td class="cmd"><code>VORTAC_ENGAGE [ANGLE=deg] [CHECK=0|1]</code></td><td>grabber</td><td>closed-loop move to <code>engage_pos</code> (or ANGLE); errors if not reached</td></tr>
+<tr><td class="cmd"><code>VORTAC_DISENGAGE [CHECK=0|1]</code></td><td>grabber</td><td>closed-loop move to <code>disengage_pos</code>; errors if not reached</td></tr>
 <tr><td class="cmd"><code>VORTAC_SIMPLE_READ</code></td><td>grabber</td><td>print raw and true angle once</td></tr>
 <tr><td class="cmd"><code>VORTAC_MESURE [SAMPLES=n]</code></td><td>grabber</td><td>diagnostic LUT sweep dump for plotting</td></tr>
 </tbody>
@@ -83,12 +83,13 @@ the overview table down.</p>
 <tr><td><code>TARGET</code></td><td>0.0</td><td>target true angle (deg)</td></tr>
 <tr><td><code>MODE</code></td><td>shortest</td><td><code>shortest</code>, <code>cw</code>, or <code>ccw</code></td></tr>
 <tr><td><code>SPEED</code></td><td>config <code>speed</code></td><td>move speed (deg/s)</td></tr>
-<tr><td><code>TOL</code></td><td>2.0</td><td>acceptance tolerance (deg, shortest-distance)</td></tr>
+<tr><td><code>TOL</code></td><td>config <code>move_tol</code> (2.0)</td><td>acceptance tolerance (deg, shortest-distance)</td></tr>
 <tr><td><code>BACKOFF</code></td><td>0.5·TOL</td><td>cw/ccw only: minimum stop-short distance per pass (clamped &lt; TOL)</td></tr>
 <tr><td><code>GUARD_FRAC</code></td><td>0.05</td><td>cw/ccw only: stop short by this fraction of the remaining distance</td></tr>
 <tr><td><code>MAX_ITERS</code></td><td>10</td><td>maximum measure/move passes</td></tr>
 <tr><td><code>READS</code></td><td>2</td><td>sensor reads per measurement (circular median)</td></tr>
 <tr><td><code>READ_SETTLE</code></td><td>0.010</td><td>dwell (s) before each measurement</td></tr>
+<tr><td><code>CHECK</code></td><td>1</td><td>error out if the target was not reached within <code>TOL</code>; <code>CHECK=0</code> only reports (manual/debug)</td></tr>
 </tbody>
 </table>
 </div>
@@ -98,6 +99,11 @@ the overview table down.</p>
 <code>disengage_pos</code>, using the configured <code>engage_mode</code> /
 <code>disengage_mode</code> as the direction constraint. Equivalent to
 <code>VORTAC_MOVE TARGET=&lt;pos&gt;</code> with that mode.</p>
+<p>Both <strong>fail loudly</strong>: not landing within <code>move_tol</code> raises an error
+instead of reporting the angle it ended up at. That is what makes the tool change safe — the
+manager calls <code>disengage()</code> before every dock entry and <code>engage()</code> before
+every lift and does not have to re-check the angle itself. <code>CHECK=0</code> downgrades the
+error to a report for manual work on the grabber.</p>
 
 <h3 id="set-zero"><code>VORTAC_SET_ZERO</code></h3>
 <p>Stores the current LUT-corrected angle as <code>zero_pos_offset</code> — run

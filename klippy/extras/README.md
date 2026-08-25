@@ -305,6 +305,12 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   positions are the hooked/engage position; load uses saved Z then lifts to
   `Z + dock_z_clearance`, and unload approaches at `Z + dock_z_clearance`
   before dropping to saved Z.
+- **Disengage before every dock entry:** a fetch drives the key to
+  `disengage_pos` before the approach even starts. Only a successful park
+  leaves the key out; an aborted change, a manual `VORTAC_ENGAGE`, a
+  calibration run or a restart do not. Arrival is enforced by the grabber:
+  `engage()`/`disengage()` raise unless the closed loop lands within
+  `move_tol`.
 - **Detection:** `VORTAC_DETECT` turns all dock Tool_id channels off, strobes
   one dock's configured LED channel on at a time, and assigns the dock to any
   tool whose cached `dock_sense_pin` reads LOW. Every LED's original RGBW value
