@@ -70,7 +70,7 @@ T0</code></pre>
   </label>
   <label class="check"><input type="checkbox" data-ck="slicer">
     <span class="check-text"><span class="check-title">Slicer profile set up</span>
-    <span class="check-sub">One extruder per tool, per-tool temps, prime/purge on change.</span></span>
+    <span class="check-sub">One extruder per tool, indexed temperature placeholders, prime tower on.</span></span>
   </label>
 </div>
 
@@ -101,7 +101,7 @@ T0                        # manager: FLAT -> fetch -> TILT -> offsets -> activat
 gcode:
     {% set bed = params.BED|default(60)|float %}
     {% set hotend = params.HOTEND|default(240)|float %}
-    {% set tool = params.TOOL|default('T0') %}
+    {% set tool = params.TOOL|default(0)|int %}
 
     M140 S{bed}                         # bed up first
     G28                                 # homing works with a tool held (sensorless Z, no probe)
@@ -110,9 +110,19 @@ gcode:
     QUAD_GANTRY_LEVEL                   # leaves the gantry tilted — do NOT re-home Z after this
     BED_MESH_PROFILE LOAD=default
     VORTAC_DETECT
-    {tool}                              # pick the printing tool up
+    T{tool}                             # pick the printing tool up
     M109 S{hotend}                      # heat the hotend that is now on the carriage
     # prime / purge line here</code></pre>
+
+<div class="callout danger">
+  <span class="callout-title">This skeleton heats exactly one tool</span>
+  <p><code>PRINT_START</code> receives a single <code>HOTEND</code> value, and <code>M109</code>
+  applies it to the <em>active</em> extruder. Every other tool is still cold when the first
+  <code>T&lt;n&gt;</code> happens mid-print, and the slicer's first extrusion after it dies with
+  <code>Extrude below minimum temp</code>. A multi-tool print therefore needs one of the two
+  mechanisms in <a href="#orca-temps">Temperatures and ooze</a> — the shipped
+  <code>macros.example.cfg</code> implements both.</p>
+</div>
 
 <div class="callout warn">
   <span class="callout-title">Two ordering traps</span>
@@ -164,14 +174,34 @@ not a filament changer.</p>
 <h3 id="orca-gcode">Machine G-code</h3>
 <p><strong>Machine start G-code</strong> — one line; everything else lives in the
 <code>PRINT_START</code> macro (<code>vortac_configs/macros.example.cfg</code>):</p>
-<pre><code>PRINT_START BED=[bed_temperature_initial_layer_single] HOTEND=[nozzle_temperature_initial_layer] TOOL={initial_extruder}</code></pre>
+<pre><code>PRINT_START BED=[bed_temperature_initial_layer_single] TOOL={initial_extruder} HOTEND={nozzle_temperature_initial_layer[initial_extruder]} TEMPS={nozzle_temperature_initial_layer[0]},{nozzle_temperature_initial_layer[1]}</code></pre>
+<p>Note the <em>indexed</em> placeholders. <code>nozzle_temperature_initial_layer</code> is a
+vector — one entry per extruder — so it has to be indexed explicitly, otherwise a two-material
+print can hand <code>PRINT_START</code> the wrong tool's temperature.
+<code>TEMPS</code> carries the first-layer temperature of <strong>every</strong> extruder, in
+extruder order; add an entry when you add a tool. That is what lets the macro preheat the tools
+it is not starting with. Verify after slicing: the first line of the G-code must read
+<code>PRINT_START BED=110 TOOL=1 HOTEND=270 TEMPS=270,265</code> — plain numbers, no commas
+inside <code>HOTEND</code>.</p>
 <p><strong>Machine end G-code</strong>:</p>
 <pre><code>PRINT_END</code></pre>
-<p><strong>Tool change G-code</strong> — the plain tool command is the entire sequence.
-The manager owns park, fetch, gantry state and offsets:</p>
-<pre><code>T{next_extruder}</code></pre>
-<p><strong>Change filament G-code</strong> — leave empty. That field is for single-nozzle
-MMU machines and would fire on top of the real tool change.</p>
+<p><strong>Change filament G-code</strong> — <strong>leave it empty.</strong> This is Orca's
+tool-change hook (PrusaSlicer calls the same field "Tool change G-code"), and empty is the
+correct setting here, not an oversight: with nothing in it the slicer emits the bare
+<code>T&lt;n&gt;</code> itself, and that single command already <em>is</em> the whole sequence —
+<code>vortac_manager</code> turns it into park, fetch, gantry state and offsets.</p>
+<p>Check it in a sliced file: at the tool change you will find a lone <code>T0</code> between the
+ramming block and the wipe tower, with no custom lines around it. That is what it should look
+like.</p>
+<div class="callout warn">
+  <span class="callout-title">If you do put something in that field</span>
+  <p>Then it has to contain the tool command itself — the slicer only adds its own
+  <code>T&lt;n&gt;</code> when your block does not already carry one. A block with extra commands
+  but no <code>T&lt;n&gt;</code> gives you a print with no tool changes at all. There is no reason
+  to fill it for a Vortac; every per-tool action belongs in
+  <code>tool_activate_gcode</code>/<code>tool_deactivate_gcode</code>, which run inside the change
+  where the machine state is actually known (see <a href="#tool-hooks">the park / pick hooks</a>).</p>
+</div>
 <p><strong>Before layer change G-code</strong> (optional, gives Mainsail a live progress
 estimate):</p>
 <pre><code>;BEFORE_LAYER_CHANGE
@@ -188,19 +218,95 @@ SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}</code></pre>
 </div>
 
 <h3 id="orca-temps">Temperatures and ooze</h3>
+<p>This is where a working single-tool setup breaks the moment it becomes a multi-tool one, so
+it is worth being precise about who heats what.</p>
+
+<div class="callout danger">
+  <span class="callout-title">Nothing heats the tools you are not starting with — unless you make it</span>
+  <p>Orca only emits <code>M104</code>/<code>M109</code> for the other extruders when
+  <strong>Emit temperature commands automatically</strong> (Printer Settings → Machine G-code)
+  is on. With it off — and it is off in many Klipper toolchanger profiles — the entire G-code
+  file contains no temperature command at all, and the only heating in the whole print is the
+  <code>M109</code> inside <code>PRINT_START</code>, which reaches the starting tool only.
+  The first tool change then lands on a cold nozzle:
+  <code>"extruder" not hot enough / Extrude below minimum temp</code>.</p>
+  <p>Check it yourself: slice, open the <code>.gcode</code>, search for <code>M104</code>.</p>
+</div>
+
+<p>Two independent mechanisms close that hole. Use both — they cover different failure modes.</p>
+<div class="callout warn">
+  <span class="callout-title">Leave the auto-emission OFF and pass <code>TEMPS=</code> instead</span>
+  <p>Turning it on would also work as a bare fix for the cold nozzle, but it fights the standby
+  temperature below: Orca re-sends the full print temperature for <em>every</em> extruder at the
+  start of the second layer, overriding the drop of the tool that is parked at that moment. It
+  also puts both hotends at full temperature before <code>PRINT_START</code> even runs, so they
+  drip into the docks throughout homing, levelling and meshing.</p>
+  <p>The trade-off of leaving it off: nothing switches from the first-layer temperature to the
+  normal one either, so the print runs at whatever <code>TEMPS=</code> carried. Set both to the
+  same value in the filament profile — that is the usual case anyway.</p>
+</div>
 <ul>
-  <li><strong>Per-tool filament profiles.</strong> Orca emits <code>M104 T&lt;n&gt; S…</code>
-      ahead of a tool change; Klipper applies that to <code>extruder&lt;n&gt;</code> without
-      activating it. That is exactly what you want — the tool is already at temperature when
-      the grabber picks it up.</li>
-  <li><strong>Decide the standby temperature deliberately.</strong> A parked tool keeps its
-      board powered (an occupied dock is never de-energized), so it <em>can</em> hold heat.
-      Whether it <em>should</em> is a property of your dock, not of the firmware.</li>
-  <li><strong>Prime tower / wipe tower: on.</strong> With two hotends the tower is what
-      absorbs the ooze of the tool that was idle. Place it clear of the dock approach lane.</li>
-  <li><strong>Ooze prevention</strong> (temperature drop while parked) works, but costs a
-      heat-up wait on every change. Try the prime tower alone first.</li>
+  <li><strong><code>TEMPS=</code> in the start G-code</strong> (see above). <code>PRINT_START</code>
+      stores one print temperature per tool, keeps every nozzle at <code>soak_temp</code> while
+      it homes, levels and meshes, and brings the idle tools to standby afterwards. This is what
+      makes the first change fast instead of a cold start.</li>
+  <li><strong>The park/pick hooks</strong> — <code>_VORTAC_TOOL_PARK</code> /
+      <code>_VORTAC_TOOL_PICK</code>, wired into each tool via
+      <a href="configuration.html">include_with overrides</a>.
+      <code>_VORTAC_TOOL_PICK</code> <em>always</em> waits for the arriving tool to reach
+      temperature before anything is extruded, so a cold nozzle is structurally impossible
+      regardless of what the slicer emitted. If no temperature is known at all it aborts with
+      that reason instead of a cryptic extrusion error.</li>
 </ul>
+
+<h3 id="orca-standby">Standby temperature</h3>
+<p>A parked tool keeps its board powered — an occupied dock is never de-energized — so it holds
+whatever target it had. At ABS temperatures that means it drips into its dock for the whole
+print. <code>_VORTAC_TOOL_PARK</code> drops the nozzle by <code>standby_delta</code> kelvin the
+moment the tool is parked and <code>_VORTAC_TOOL_PICK</code> brings it back and waits.</p>
+<p>The price is heat-up time on every change: the manager cannot preheat the next tool, because
+when it parks one it does not yet know which one is coming. 40–60 K is the useful range — enough
+to stop the dripping, quick enough to come back. <code>standby_delta: 0</code> turns the drop off
+and leaves the temperature wait in place.</p>
+<p>Orca's own <strong>Ooze prevention</strong> does the same thing from the slicer side. Do not
+run both — pick one, and the firmware side is the one that also protects manual
+<code>T&lt;n&gt;</code> commands.</p>
+
+<h3 id="temp-changes">Temperature changes during the print</h3>
+<p><code>TEMPS=</code> is a starting point, not a lock. The hooks track changes rather than
+overwriting them:</p>
+<ul>
+  <li><strong>Changed while the tool is printing</strong> (temperature tower, per-object
+      temperature, a slider pull in Mainsail — all of which hit the <em>active</em> extruder):
+      <code>_VORTAC_TOOL_PARK</code> reads the live target when the tool is parked and memorises
+      <em>that</em>. The new value is what comes back on the next pickup.</li>
+  <li><strong>Changed while the tool is parked:</strong> <code>_VORTAC_TOOL_PICK</code> works out
+      the standby value it would have left behind. If the live target is something else, that is
+      a deliberate change — it wins, it is kept, and the console says so.</li>
+  <li><strong>Below <code>soak_temp</code> never counts as deliberate.</strong> That is
+      <code>PRINT_START</code> holding the nozzles down while it homes, levels and meshes;
+      coming back up from it is exactly what the pick hook is for.</li>
+</ul>
+<div class="callout tip">
+  <span class="callout-title">Temperature towers</span>
+  <p>A tower is a single-tool calibration print, so the standby mechanism never comes into play —
+  nothing gets parked. If Orca does not emit the tower's <code>M104</code> with auto-emission
+  switched off, just switch it back on for that one print; without a second tool there is nothing
+  for it to collide with. Either way the check is the same: search the sliced file for
+  <code>M104</code>.</p>
+</div>
+
+<h3 id="orca-retract">Retraction around the change</h3>
+<p>The slicer retracts before it emits <code>T&lt;n&gt;</code>. Everything after that — the travel
+to the dock row, the stepwise hook-in, the fetch of the next tool — runs on the manager's clock,
+and that is where the long ooze happens. <code>park_retract</code> in
+<code>_VORTAC_PRINT_VARS</code> adds a retraction on top for exactly that window and gives it back
+(plus <code>extra_prime</code>) on pickup. Set <code>retract_length_toolchange</code> per extruder
+in Orca as well.</p>
+
+<h3 id="orca-tower">Prime tower</h3>
+<p>Keep it on. With two hotends the tower is what absorbs the ooze of the tool that was idle.
+Place it clear of the dock approach lane — the approach moves Y, then X, then Z.</p>
 
 <h3 id="orca-first">Start small</h3>
 <p>Two tools, a tall two-colour cube, one change per layer. That tells you more about
@@ -234,8 +340,39 @@ drop the <code>.example</code>, and include it <em>after</em> <code>tools.cfg</c
       otherwise a cancelled print leaves a tool on the carriage and the next
       <code>PRINT_START</code> cannot probe.</li>
 </ul>
-<p>Everything tunable (soak, prime line, park position) sits in
-<code>[gcode_macro _VORTAC_PRINT_VARS]</code>. Edit the variables, not the macros.</p>
+<p>Everything tunable (soak, standby delta, tool-change retract, prime line, park position)
+sits in <code>[gcode_macro _VORTAC_PRINT_VARS]</code>. Edit the variables, not the macros.</p>
+
+<h3 id="tool-hooks">The park / pick hooks</h3>
+<p>The same file ships the two per-tool hooks. They are not wired up automatically — add these
+two lines to the <code>overrides:</code> block of every tool file:</p>
+<pre><code>overrides:
+  vortac_tool TN.tool_deactivate_gcode: _VORTAC_TOOL_PARK EXTRUDER={tool.extruder_name} IDX={tool.tool_index}
+  vortac_tool TN.tool_activate_gcode: _VORTAC_TOOL_PICK EXTRUDER={tool.extruder_name} IDX={tool.tool_index}</code></pre>
+<p><code>overrides</code> parses one line per entry, which is why the logic lives in a macro
+rather than inline. What runs when, and why it has to be that way:</p>
+<div class="filterbox" data-target="hook-table"></div>
+<table id="hook-table">
+  <thead><tr><th>Hook</th><th>Runs</th><th>State at that moment</th><th>Does</th></tr></thead>
+  <tbody>
+    <tr><td><code>_VORTAC_TOOL_PARK</code></td><td>first step of a change, before any motion</td>
+        <td>old tool still the active extruder, its offsets still applied, mesh still active,
+            toolhead still at the print position</td>
+        <td>extra retract (only if the nozzle can actually extrude), memorise the print
+            temperature, drop to standby</td></tr>
+    <tr><td><code>_VORTAC_TOOL_PICK</code></td><td>last step, after the fetch</td>
+        <td>new tool active (<code>ACTIVATE_EXTRUDER</code> done), its offsets applied, gantry
+            tilted back, mesh restored</td>
+        <td>restore the print temperature, <strong>wait</strong>, give the retract back plus
+            <code>extra_prime</code></td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <span class="callout-title">Why the retract cannot live in the slicer</span>
+  <p><code>tool_deactivate_gcode</code> is the only place that reaches the <em>old</em> hotend
+  after the slicer has handed control over. One step later the gantry goes flat, the gcode
+  offset is zeroed and the carriage is on its way to the dock.</p>
+</div>
 <div class="callout tip">
   <span class="callout-title">Check the PAUSE park position</span>
   <p>Mainsail/Fluidd park in a corner on <code>PAUSE</code>, and that corner may be a dock.
