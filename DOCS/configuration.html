@@ -272,6 +272,14 @@ overrides:
       <code>VORTAC_UNLOAD</code>.</li>
   <li><strong>Tool changes handle FLAT/TILT automatically</strong>: the manager flattens the
       gantry for the dock motion and re-tilts afterwards — no re-probing needed.</li>
+  <li><strong>The toggle switches the whole coordinate system</strong>, not just the gantry:
+      <code>VORTAC_GANTRY_FLAT</code> suspends the bed mesh and parks the gcode offset
+      (dock frame), <code>VORTAC_GANTRY_TILT</code> hands both back (print frame). So a
+      manual FLAT — from the console or the <em>Flatten</em> button in the Vortac panel —
+      puts you straight into the coordinate system the docks are taught in. See
+      <a href="modules.html#vortac-qgl-state">vortac_qgl_state</a>; set
+      <code>manage_coordinate_system: False</code> on
+      <code>[vortac_qgl_state]</code> to keep the toggle gantry-only.</li>
 </ul>
 <p>Typical print start (no tool held yet):</p>
 <pre><code>G28                  # top-home -> flat

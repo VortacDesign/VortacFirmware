@@ -423,6 +423,26 @@ fix.</p>
 </details>
 
 <details class="fold">
+  <summary>No bed mesh / gcode offset gone after a manual VORTAC_GANTRY_FLAT</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> that is the dock coordinate system doing its job —
+    <code>VORTAC_GANTRY_FLAT</code> parks the bed mesh and the gcode offset because both are
+    bed-referenced and invalid frame-flat (see
+    <a href="modules.html#vortac-qgl-state">two coordinate systems</a>).
+    <code>VORTAC_QGL_STATUS</code> shows <code>frame: dock</code>, the parked offset and
+    whether a mesh is suspended.</p>
+    <p><strong>Fix:</strong> <code>VORTAC_GANTRY_TILT</code> (or the panel's <em>Tilt</em>
+    button) hands both back — the offset is <em>added</em> on top of whatever is live, so
+    babystepping done in the dock frame survives too. A <code>QUAD_GANTRY_LEVEL</code> does
+    it as well, since QGL ends bed-tilted by definition.</p>
+    <p><strong>Lost for good only across a restart:</strong> the parked values are RAM, like
+    <code>homing_origin</code> itself. Re-run <code>QUAD_GANTRY_LEVEL</code> and
+    <code>BED_MESH_PROFILE LOAD=…</code>. If you would rather keep the toggle gantry-only,
+    set <code>manage_coordinate_system: False</code> on <code>[vortac_qgl_state]</code>.</p>
+  </div>
+</details>
+
+<details class="fold">
   <summary><code>VORTAC_DOCK_CAL_SAVE</code> / <code>VORTAC_DOCK_SAVE_POS</code> refuses</summary>
   <div class="fold-body">
     <ul>

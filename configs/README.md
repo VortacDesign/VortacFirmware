@@ -193,7 +193,11 @@ If Z was re-homed mid-session while a tool is held: `VORTAC_UNLOAD`, then
 ## Calibrating a dock position
 
 ```
-VORTAC_GANTRY_FLAT
+VORTAC_GANTRY_FLAT            # frame reference AND dock coordinate system:
+                              # bed mesh and gcode offset are parked, so the
+                              # jogging below happens in the frame the docks
+                              # are taught in. VORTAC_GANTRY_TILT (or the
+                              # panel's Tilt button) hands both back.
 G28                           # if not homed
 VORTAC_SELECT_DOCK DOCK=dock0 # detects the tool in dock0 and selects it
 # jog toolhead to the exact hooked/engage position in the dock
@@ -230,8 +234,8 @@ SAVE_CONFIG
 | `VORTAC_SET_CURRENT_TOOL TOOL=<name>\|Tn` | manager | set logical current tool without movement |
 | `VORTAC_SET_CURRENT_TOOL CLEAR=1` | manager | clear logical current tool |
 | `VORTAC_DOCK_SAVE_POS TOOL=<name>\|Tn DOCK=dockN` | manager | save current hooked/engage XYZ as tool's pos for `name` |
-| `VORTAC_GANTRY_FLAT` / `VORTAC_GANTRY_TILT` | qgl_state | toggle gantry between frame- and bed-flat |
-| `VORTAC_QGL_STATUS` | qgl_state | report gantry state and stored QGL deltas |
+| `VORTAC_GANTRY_FLAT` / `VORTAC_GANTRY_TILT` | qgl_state | toggle gantry between frame- and bed-flat — and with it the coordinate system (FLAT parks bed mesh + gcode offset, TILT hands them back) |
+| `VORTAC_QGL_STATUS` | qgl_state | report gantry state, stored QGL deltas, active frame and parked offset |
 | `VORTAC_SENSE_STATUS` | manager | raw cached dock/grab sense pin states per tool |
 | `VORTAC_SENSE_MONITOR [DURATION=s]` | manager | poll sense states live, report transitions |
 | `VORTAC_DOCK_STROBE DOCK=dockN VALUE=0..1` | manager | manually set one dock strobe channel (debug) |

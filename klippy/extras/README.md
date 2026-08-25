@@ -92,9 +92,23 @@ position in the operating direction if you use cw/ccw modes.
 ### `vortac_qgl_state.py` — `[vortac_qgl_state]`
 
 Toggle the gantry between **frame-flat** (dock geometry valid) and
-**bed-flat** (printing geometry valid) without re-probing.
+**bed-flat** (printing geometry valid) without re-probing — and with it the
+whole coordinate system, so the printer effectively has two: one for the docks
+and one for printing.
 
 - **Gcode:** `VORTAC_GANTRY_FLAT`, `VORTAC_GANTRY_TILT`, `VORTAC_QGL_STATUS`.
+- **Two coordinate systems (`manage_coordinate_system`, default on):**
+  everything derived from probing the *bed* is wrong frame-flat, and dock
+  moves must be offset- and mesh-free. So FLAT enters the **dock frame** —
+  bed mesh suspended, gcode offset captured and zeroed — and TILT restores
+  the **print frame**: mesh handed back (never clobbering one loaded or
+  probed in the meantime) and the captured offset ADDED back on top of
+  whatever is live, so babystepping done inside the dock frame survives too.
+  An offset that is taken out of the way always comes back. The probe's own
+  `z_offset` is not part of this (not a move transform, applies only while
+  probing). During a tool change `vortac_manager` takes the captured offset
+  over via `take_saved_offset()` and applies the *arriving* tool's offsets
+  plus the carried babystep itself.
 - **Mechanic:** at `klippy:ready`, hooks `quad_gantry_level.z_helper.adjust_steppers`
   to capture each delta vector into `stored_deltas`. FLAT replays
   `-stored_deltas`, TILT replays `+stored_deltas`. Wraps `QUAD_GANTRY_LEVEL`
@@ -248,10 +262,15 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   `VORTAC_DOCK_POWER [DOCK=dockN VALUE=0|1 [ONLY=1] [FORCE=1]]`,
   `VORTAC_STATUS_LED [MODE=sense|power|detected]`.
 - **Tool change sequence** in `_change_to`:
-  `tool_deactivate_gcode` → `VORTAC_GANTRY_FLAT` → `_park_at_dock(current)`
-  → `_fetch_from_dock(target)` → `VORTAC_GANTRY_TILT` →
+  `tool_deactivate_gcode` → `VORTAC_GANTRY_FLAT` (dock frame: mesh suspended,
+  gcode offset parked and taken over) → `_park_at_dock(current)`
+  → `_fetch_from_dock(target)` → `VORTAC_GANTRY_TILT` (print frame) →
   `ACTIVATE_EXTRUDER EXTRUDER=<extruder_name>` → `SET_GCODE_OFFSET`
-  → `tool_activate_gcode`.
+  (arriving tool's offsets + the carried babystep) → `tool_activate_gcode`.
+  Without `[vortac_qgl_state]` the manager does the zeroing and the mesh
+  suspension itself. The carried adjustment lives on the manager
+  (`pending_offset_adjust`), so a change that aborts before the final
+  `SET_GCODE_OFFSET` still re-applies it on the next attempt.
 - **Dock power (`dock_power_mode`: off | occupancy | handover):** the dock
   LED's red channel gates the parked tool board's supply, INVERTED (red HIGH
   cuts it, 0.0 = powered). The supply is switched around the *Y* moves at the

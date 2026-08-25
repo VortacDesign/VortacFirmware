@@ -419,6 +419,13 @@ Every element maps to data that <code>get_status</code> already exports.</p>
      transform="scale(-1)" />
 </svg> Detect</div>
     <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 12 V52 M52 12 V52"/>
+    <path d="M10 52 H54"/>
+    <path d="M10 16 L54 26"/>
+  </g>
+</svg> Tilt</div>
+    <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   
   <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
     
@@ -465,7 +472,10 @@ Every element maps to data that <code>get_status</code> already exports.</p>
 </div>
 
 <h3 id="panel-icons">Custom icons</h3>
-<p>Engage/Disengage use custom SVGs from <code>klipperscreen/icons/</code> — the grabber key in
+<p>The gantry toggle uses <code>vortac_gantry_flat.svg</code> /
+<code>vortac_gantry_tilt.svg</code> — the frame (uprights plus bed) with the gantry beam
+either level with the frame or tilted onto the bed, whichever state the button moves to.
+Engage/Disengage use custom SVGs from <code>klipperscreen/icons/</code> — the grabber key in
 both positions: the <em>target</em> position solid (with the sensor hole), the <em>start</em>
 position ghosted at 50% opacity, plus a small arrow showing the direction of rotation. The
 cleaned monochrome <strong>Vortac logo</strong> (right; source export kept as
@@ -564,7 +574,9 @@ the button falls back to a stock icon.</p>
 <ul>
   <li><strong>Header:</strong> held tool (<code>current_tool</code>, or "Carriage empty"),
       gantry state (<code>qgl_state</code> — green when TILTED, amber when FLAT during
-      printing hours), and a detection-freshness chip (<code>dock_detection_valid</code>) that
+      printing hours, with a "· dock frame" suffix while the bed mesh and gcode offset are
+      parked, see <a href="modules.html#vortac-qgl-state">two coordinate systems</a>), and a
+      detection-freshness chip (<code>dock_detection_valid</code>) that
       turns amber after a restart until <code>VORTAC_DETECT</code> ran, followed by a
       <em>Power: n/m</em> counter of energized docks (only when the manager actually manages the
       dock supply, see <a href="modules.html#dock-power">Dock power</a>).</li>
@@ -599,12 +611,21 @@ the button falls back to a stock icon.</p>
       fail), greyed
       out otherwise (then the dock tiles are the way to load); icon plus a short generic
       label ("Park"/"Load") like the other buttons — the confirm dialog names the concrete
-      tool — plus Detect, Engage, Disengage and
+      tool — plus Detect, a contextual <strong>gantry toggle</strong>, Engage, Disengage and
       Save Dock. <em>Confirm policy:</em> Detect runs immediately (harmless — LEDs are
       restored); everything that moves the machine or writes config confirms first.
       Disengage keeps its confirm deliberately: disengaging mid-air drops the tool.</li>
-  <li><strong>Calibration and grabber details stay in the menu</strong> (LUT sweep, set zero,
-      QGL flat/tilt) — the panel is for daily operation, the menu for commissioning.</li>
+  <li><strong>Gantry toggle:</strong> shows the state it moves <em>to</em> — "Tilt" (beam
+      tilted onto the bed) while flat, "Flatten" (beam level with the frame) while tilted.
+      It is the whole coordinate-system switch, not just a gantry move: FLAT parks the bed
+      mesh and the gcode offset, TILT hands both back (see
+      <a href="modules.html#vortac-qgl-state">vortac_qgl_state</a>). That is what makes
+      hand-teaching a dock safe — press <em>Flatten</em>, jog, <em>Save Dock</em>,
+      <em>Tilt</em>. The confirm dialog spells out both halves, and the button is greyed
+      out while a print is running — pressing it there would drop the print onto raw
+      kinematic Z. Tool changes call FLAT/TILT internally, that path is unaffected.</li>
+  <li><strong>Calibration and grabber details stay in the menu</strong> (LUT sweep, set zero)
+      — the panel is for daily operation, the menu for commissioning.</li>
 </ul>
 
 <div class="callout tip">

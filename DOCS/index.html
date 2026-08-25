@@ -153,7 +153,9 @@ docks keep it on so the sense logic stays valid.</p>
       activate/deactivate hooks.</li>
   <li><strong><a href="modules.html#vortac-qgl-state">vortac_qgl_state</a></strong> — toggles the
       four-Z gantry between <em>frame-flat</em> (dock geometry valid) and <em>bed-flat</em>
-      (print geometry valid) without re-probing.</li>
+      (print geometry valid) without re-probing — and with it the coordinate system: bed mesh
+      and gcode offset are parked frame-flat and handed back bed-flat, so the docks and the
+      print each have their own frame.</li>
   <li><strong><a href="modules.html#include-with">include_with</a></strong> — instantiates one
       shared toolboard PCB template N times under remapped MCU namespaces.</li>
 </ul>

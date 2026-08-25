@@ -8,30 +8,35 @@
 #
 # Tool change sequence:
 #   1. tool_deactivate_gcode (current tool, if any)
-#   2. VORTAC_GANTRY_FLAT                  -- frame-flat geometry for docks
-#   2b. SET_GCODE_OFFSET X=0 Y=0 Z=0       -- dock motion is OFFSET-FREE:
-#       dock positions are taught in kinematic coordinates
-#       (toolhead.get_position in _save_dock_pos) but the dock routines run
-#       as G1 moves, which the gcode offset shifts. Neither saved tool
-#       offsets, hand-set SET_GCODE_OFFSET values nor live babystepping may
-#       move the docks. The live adjustment (current offset minus the
-#       leaving tool's configured offset, i.e. babystepping) is captured
-#       here and re-applied in step 6 so it survives the change.
-#   2c. suspend bed mesh                   -- the mesh is a move transform on
-#       every G1 and would shift the dock Z by the (edge-clamped) mesh value
-#       at the dock XY; a bed-tilted mesh is invalid frame-flat anyway.
+#   2. VORTAC_GANTRY_FLAT                  -- frame-flat geometry for docks,
+#       and with it the DOCK COORDINATE SYSTEM: [vortac_qgl_state] suspends
+#       the bed mesh and zeroes the gcode offset as part of the toggle (see
+#       its header). Dock motion is OFFSET-FREE and MESH-FREE: dock positions
+#       are taught in kinematic coordinates (toolhead.get_position in
+#       _save_dock_pos) but the dock routines run as G1 moves, which both the
+#       offset and the mesh transform shift. Neither saved tool offsets,
+#       hand-set SET_GCODE_OFFSET values nor live babystepping may move the
+#       docks.
+#   2b. take the parked offset over from qgl_state -- the live adjustment
+#       (parked offset minus the leaving tool's configured offset, i.e.
+#       babystepping) is captured here and re-applied in step 6 so it
+#       survives the change. TILT must not hand the LEAVING tool's offset
+#       back, so ownership moves to the manager here.
+#       Without [vortac_qgl_state] the manager does the zeroing and the mesh
+#       suspension itself (same effect, no gantry toggle).
 #   3. _park_at_dock(current)              -- if a tool is held
 #   4. _fetch_from_dock(target)            -- if target is not None; starts
 #       with a VERIFIED disengage (_ensure_disengaged) so an engaged or
 #       half-turned key can never travel into the dock
-#   4b. retreat: drop straight down to retreat_z -- the mirror of the
-#       approach, which raises Z last. Below the frame-mounted docks the
-#       dock row is out of the plane of motion, so the diagonal the next G1
-#       takes cannot touch it. Defaults to 150 mm; no X/Y retreat is needed
-#       because the dock routine already ends dock_y_safe clear of every
-#       tool.
-#   5. VORTAC_GANTRY_TILT                  -- bed-flat geometry for printing
-#   5b. restore bed mesh (suspended in 2c)
+#   4b. retreat: drop straight down by retreat_drop -- the mirror of the
+#       approach, which raises Z last. Relative to the clearance height the
+#       dock routine leaves behind, so no absolute reference is needed.
+#       Below the frame-mounted docks the dock row is out of the plane of
+#       motion, so the diagonal the next G1 takes cannot touch it. No X/Y
+#       retreat is needed because the dock routine already ends dock_y_safe
+#       clear of every tool.
+#   5. VORTAC_GANTRY_TILT                  -- bed-flat geometry for printing,
+#       and back to the print coordinate system (qgl_state restores the mesh)
 #   6. SET_GCODE_OFFSET to target's offsets (+ captured live adjustment)
 #   7. tool_activate_gcode (target tool, if any)
 #
@@ -184,7 +189,7 @@ class VortacManager:
         # print/macro wants, and as a single G1 it takes the diagonal — which
         # at dock height runs straight along (or through) the other tools.
         #
-        # retreat_z closes the trip as the exact mirror of the approach: the
+        # retreat_drop closes the trip as the exact mirror of the approach: the
         # approach ends by raising Z last, once X and Y already sit on the
         # dock, so the retreat starts by putting it straight back down. The
         # column below the safe line is clear by construction — that is what
@@ -198,13 +203,16 @@ class VortacManager:
         # dock_y_safe clear of every tool, and dropping out of the dock plane
         # releases the carriage to go anywhere.
         #
-        # Defaults to 150 mm: below the docks, above the tallest print most
-        # builds run. It is the one number in this module that IS invented,
-        # so it is worth checking against your own geometry — it must clear
-        # the docks on the way down and the work on the way across. The drop
-        # uses dock_approach_feedrate, the same feedrate the approach raised
-        # Z with.
-        self.retreat_z = config.getfloat('retreat_z', default=150.0)
+        # RELATIVE, not an absolute height. At retreat time the carriage
+        # stands on the dock clearance height by construction, so the drop is
+        # measured from there and nothing has to be invented or kept in sync
+        # with the dock positions: move the docks and the retreat follows.
+        # Clamped to the Z axis minimum so an oversized value cannot turn
+        # into an out-of-range error mid-print. 0 disables the retreat. The
+        # drop uses dock_approach_feedrate, the same feedrate the approach
+        # raised Z with.
+        self.retreat_drop = config.getfloat(
+            'retreat_drop', default=150.0, minval=0.0)
 
         # --- hook/unhook verification ----------------------------------
         self.dock_check_zstep = config.getfloat(
@@ -317,6 +325,13 @@ class VortacManager:
         # Bed mesh suspended for dock motion (step 2b). Held on self so an
         # aborted change can still restore it on the next attempt.
         self.suspended_mesh = None
+        # Live offset adjustment (babystepping / hand-set SET_GCODE_OFFSET)
+        # taken out of the way for dock motion in step 2b and added back on
+        # top of the arriving tool's offsets in step 6. Held on self, never
+        # in a local: an offset that is removed must always come back, so a
+        # change aborting between the two still has it for the recovery
+        # branch (or the next change) to re-apply.
+        self.pending_offset_adjust = (0.0, 0.0, 0.0)
         self.dock_occupancy = {}    # dock_name -> tool_id or None
         self.park_dock = {}         # tool_id -> dock to return the held
                                     # tool to (set on fetch / by detection)
@@ -1350,6 +1365,31 @@ class VortacManager:
     def _change_to(self, target, gcmd):
         if self.current_tool is target:
             tid = target.tool_id if target else 'None'
+            if (self.qgl_state is not None
+                    and self.qgl_state.in_dock_frame()):
+                # Dock frame we are sitting in with nothing to change — an
+                # aborted change, or a manual VORTAC_GANTRY_FLAT followed by
+                # asking for the tool that is already on the carriage. Hand
+                # the mesh back and put the parked offset back EXACTLY as it
+                # was before FLAT (it is the complete value, tool config
+                # included whenever that was applied), added on top of
+                # anything babystepped in the meantime. qgl_state must not do
+                # it itself: if the offsets were never applied, the catch-up
+                # below still has to add the tool's config on top.
+                parked = self.qgl_state.take_saved_offset()
+                self.qgl_state.restore_print_frame(apply_offset=False)
+                if parked is not None:
+                    gcode_move = self.printer.lookup_object('gcode_move')
+                    origin = gcode_move.get_status()['homing_origin']
+                    self.printer.lookup_object('gcode') \
+                        .run_script_from_command(
+                            f'SET_GCODE_OFFSET '
+                            f'X={parked[0] + origin[0]:.6f} '
+                            f'Y={parked[1] + origin[1]:.6f} '
+                            f'Z={parked[2] + origin[2]:.6f} MOVE=0')
+                gcmd.respond_info(
+                    "Vortac: left the dock coordinate system "
+                    "(bed mesh and gcode offset restored)")
             if self.suspended_mesh is not None:
                 # Mesh stranded by an aborted change — hand it back.
                 bed_mesh = self.printer.lookup_object('bed_mesh', None)
@@ -1363,13 +1403,19 @@ class VortacManager:
                 # Catch up here instead of printing on zeroed offsets.
                 gcode = self.printer.lookup_object('gcode')
                 gcode_move = self.printer.lookup_object('gcode_move')
-                live = gcode_move.get_status()['homing_origin']
+                # Whatever is live now (should be zero after an abort in the
+                # dock frame) plus whatever the aborted change still owes.
+                origin = gcode_move.get_status()['homing_origin']
+                owed = self.pending_offset_adjust
+                live = (origin[0] + owed[0], origin[1] + owed[1],
+                        origin[2] + owed[2])
                 gcode.run_script_from_command(
                     f'SET_GCODE_OFFSET '
                     f'X={target.gcode_offset_x + live[0]:.6f} '
                     f'Y={target.gcode_offset_y + live[1]:.6f} '
                     f'Z={target.gcode_offset_z + live[2]:.6f} MOVE=0')
                 self.offsets_applied = True
+                self.pending_offset_adjust = (0.0, 0.0, 0.0)
                 gcmd.respond_info(
                     f"Already on {tid} — re-applied its gcode offsets "
                     f"(previous change aborted before they were set)")
@@ -1390,47 +1436,65 @@ class VortacManager:
             self._render(self.current_tool.tool_deactivate_gcode,
                          tool=self.current_tool, dock=None, gcmd=gcmd)
 
-        # 2. Frame-flat geometry for dock approach
+        # 2. Frame-flat geometry for dock approach. With [vortac_qgl_state]
+        # this is the whole coordinate-system switch: the toggle suspends the
+        # bed mesh and parks the gcode offset (see that module's header).
+        managed_frame = (self.qgl_state is not None
+                         and self.qgl_state.manage_frame)
         if self.qgl_state is not None:
             gcode.run_script_from_command('VORTAC_GANTRY_FLAT')
 
         # 2b. Offset-free dock motion (see sequence comment at the top).
-        # Capture the live adjustment — whatever the current offset carries
-        # beyond the leaving tool's configured offset (babystepping, manual
-        # SET_GCODE_OFFSET) — then zero everything before any dock move.
+        # Capture the live adjustment — whatever the offset carried beyond
+        # the leaving tool's configured offset (babystepping, manual
+        # SET_GCODE_OFFSET) — so step 6 can put it back. In the managed case
+        # the offset was already parked and zeroed by FLAT, so it is taken
+        # over from there (and dropped there, so TILT does not restore the
+        # LEAVING tool's offsets over the arriving tool's).
         # If the change aborts mid-motion the offsets stay zeroed: that is
         # the safe state for the manual recovery that follows anyway.
-        gcode_move = self.printer.lookup_object('gcode_move')
-        live = gcode_move.get_status()['homing_origin']
+        if managed_frame:
+            live = (self.qgl_state.take_saved_offset()
+                    or (0.0, 0.0, 0.0))
+        else:
+            gcode_move = self.printer.lookup_object('gcode_move')
+            live = gcode_move.get_status()['homing_origin']
         # Subtract the leaving tool's config offsets only if step 6 really
         # applied them — after a mid-change abort (or a manual
         # VORTAC_SET_CURRENT_TOOL) homing_origin never contained them, and
         # subtracting would inject -cfg as a phantom "babystep".
         cur = self.current_tool if self.offsets_applied else None
-        adjust = (live[0] - (cur.gcode_offset_x if cur else 0.0),
-                  live[1] - (cur.gcode_offset_y if cur else 0.0),
-                  live[2] - (cur.gcode_offset_z if cur else 0.0))
+        # Add whatever a previously aborted change still owes (normally
+        # zero): after such an abort the offsets are already parked at zero,
+        # so `live` no longer carries the adjustment — only pending does.
+        owed = self.pending_offset_adjust
+        adjust = (live[0] - (cur.gcode_offset_x if cur else 0.0) + owed[0],
+                  live[1] - (cur.gcode_offset_y if cur else 0.0) + owed[1],
+                  live[2] - (cur.gcode_offset_z if cur else 0.0) + owed[2])
+        self.pending_offset_adjust = adjust
         if any(abs(a) > 1e-6 for a in adjust):
             gcmd.respond_info(
                 f"Vortac: carrying live offset adjustment "
                 f"X={adjust[0]:.4f} Y={adjust[1]:.4f} Z={adjust[2]:.4f} "
                 f"across the tool change")
-        gcode.run_script_from_command('SET_GCODE_OFFSET X=0 Y=0 Z=0 MOVE=0')
-        self.offsets_applied = False
-
-        # 2c. Suspend the bed mesh: it is a move transform on every G1, so
-        # it would shift the dock Z by the (edge-clamped) mesh value at the
-        # dock XY — and a mesh probed bed-tilted is invalid frame-flat
-        # anyway. set_mesh() caches the gcode position around the transform
-        # change, so this is jump-free. Restored after VORTAC_GANTRY_TILT.
         bed_mesh = self.printer.lookup_object('bed_mesh', None)
-        if bed_mesh is not None:
-            mesh = bed_mesh.get_mesh()
-            if mesh is not None:
-                # Keep an already-suspended mesh from a previous aborted
-                # change; never overwrite it with None.
-                self.suspended_mesh = mesh
-                bed_mesh.set_mesh(None)
+        if not managed_frame:
+            # No qgl_state (or frame management switched off): do the dock
+            # frame ourselves. Zero the offset and suspend the bed mesh —
+            # the mesh is a move transform on every G1, so it would shift
+            # the dock Z by the (edge-clamped) mesh value at the dock XY.
+            # set_mesh() caches the gcode position around the transform
+            # change, so this is jump-free. Restored in step 5b.
+            gcode.run_script_from_command(
+                'SET_GCODE_OFFSET X=0 Y=0 Z=0 MOVE=0')
+            if bed_mesh is not None:
+                mesh = bed_mesh.get_mesh()
+                if mesh is not None:
+                    # Keep an already-suspended mesh from a previous aborted
+                    # change; never overwrite it with None.
+                    self.suspended_mesh = mesh
+                    bed_mesh.set_mesh(None)
+        self.offsets_applied = False
 
         # 3. Park the held tool (if any). Dock resolution: detection map ->
         # "where I fetched it from" -> optional manual home_dock.
@@ -1537,9 +1601,9 @@ class VortacManager:
         if self.qgl_state is not None:
             gcode.run_script_from_command('VORTAC_GANTRY_TILT')
 
-        # 5b. Restore the mesh suspended in 2c (valid again now that the
-        # gantry is back bed-tilted). Also picks up a mesh stranded by a
-        # previous aborted change.
+        # 5b. Restore a mesh the manager suspended itself (unmanaged frame,
+        # or one stranded by an aborted change from before). In the managed
+        # case VORTAC_GANTRY_TILT above already handed the mesh back.
         if self.suspended_mesh is not None and bed_mesh is not None:
             bed_mesh.set_mesh(self.suspended_mesh)
             self.suspended_mesh = None
@@ -1562,6 +1626,8 @@ class VortacManager:
                 f'Y={target.gcode_offset_y + adjust[1]:.6f} '
                 f'Z={target.gcode_offset_z + adjust[2]:.6f} MOVE=0')
             self.offsets_applied = True
+            # Back in homing_origin — the debt is settled.
+            self.pending_offset_adjust = (0.0, 0.0, 0.0)
             self._render(target.tool_activate_gcode,
                          tool=target, dock=None, gcmd=gcmd)
         else:
@@ -1569,6 +1635,7 @@ class VortacManager:
                 f'SET_GCODE_OFFSET X={adjust[0]:.6f} Y={adjust[1]:.6f} '
                 f'Z={adjust[2]:.6f} MOVE=0')
             self.offsets_applied = True
+            self.pending_offset_adjust = (0.0, 0.0, 0.0)
 
     # --------------------------------------------------------------------
     # Dock motion (hardcoded geometry — see constants at top of file)
@@ -1628,17 +1695,28 @@ class VortacManager:
         retreat — the dock routine already ends dock_y_safe clear of every
         tool.
 
-        retreat_z defaults to 150 mm. Already being there is a no-op.
+        The drop is RELATIVE to where the dock routine left the carriage —
+        the clearance height — so it needs no absolute reference and follows
+        the docks if they ever move. retreat_drop: 0 disables it.
         """
-        if self.retreat_z is None:
+        if self.retreat_drop <= 0.0:
             return
         toolhead = self.printer.lookup_object('toolhead')
-        if abs(toolhead.get_position()[2] - self.retreat_z) <= 1e-6:
+        cur_z = toolhead.get_position()[2]
+        target_z = cur_z - self.retreat_drop
+        # Clamp rather than fail: a retreat_drop larger than the travel would
+        # otherwise abort the tool change with an out-of-range move, and
+        # "as far down as the machine goes" is exactly what was asked for.
+        z_min = toolhead.get_status(
+            self.printer.get_reactor().monotonic())['axis_minimum'][2]
+        if target_z < z_min:
+            target_z = z_min
+        if abs(cur_z - target_z) <= 1e-6:
             return
         gcode = self.printer.lookup_object('gcode')
         gcode.run_script_from_command(
             'G90\n'
-            f'G1 Z{self.retreat_z:.3f} F{self.dock_approach_feedrate}')
+            f'G1 Z{target_z:.3f} F{self.dock_approach_feedrate}')
         toolhead.wait_moves()
 
     def _park_at_dock(self, tool, dock_name, gcmd):

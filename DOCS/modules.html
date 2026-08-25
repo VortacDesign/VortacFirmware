@@ -242,7 +242,7 @@ defaults — they apply unless the config overrides them. Feedrates are mm/min
 <tr><td><code>dock_retries</code></td><td>3</td><td>1 … 10</td><td>re-seat + retry attempts before aborting</td></tr>
 <tr><td><code>dock_contact_settle</code></td><td>1.0</td><td>0 … 10</td><td>s to wait for <code>dock_sense</code> after the seat press</td></tr>
 <tr><td><code>sense_settle</code></td><td><code>dock_strobe_time</code> (0.10)</td><td>0.01 … 2</td><td>s pause after each checked step before the sense pins are read</td></tr>
-<tr><td><code>retreat_z</code></td><td>150</td><td>—</td><td>Z to drop to after a dock operation, out of the dock plane</td></tr>
+<tr><td><code>retreat_drop</code></td><td>150</td><td>0 … —</td><td>mm to drop from the clearance height after a dock operation; 0 disables</td></tr>
 </tbody>
 </table>
 </div>
@@ -286,8 +286,8 @@ whoever called the tool change — a slicer travel, a prime line, a macro — an
 the other tools.</p>
 <p><code>_retreat_from_dock()</code> closes the sequence as step 4b of the tool change, and it
 is the <strong>exact mirror of <code>_approach_dock()</code></strong>. The approach raises Z
-<em>last</em>, once X and Y already sit on the dock; the retreat puts it straight back down to
-<code>retreat_z</code>. Standing on the safe line the column below the carriage is clear by
+<em>last</em>, once X and Y already sit on the dock; the retreat lowers it straight back down by
+<code>retreat_drop</code>. Standing on the safe line the column below the carriage is clear by
 construction — that is what <code>dock_y_safe</code> buys — which makes the drop the move that
 can always be made here, the way Y-out always can on the way in.</p>
 <div class="callout tip">
@@ -298,10 +298,13 @@ can always be made here, the way Y-out always can on the way in.</p>
   ends <code>dock_y_safe</code> clear of every tool, and dropping out of the dock plane
   releases the carriage to go anywhere.</p>
 </div>
-<p><strong>Defaults to 150 mm</strong>, so the retreat happens without configuring anything.
-This is the one number in the module that is invented rather than measured, so check it against
-your own geometry: it has to clear the docks on the way down, and the tallest print you run on
-the way across.</p>
+<p><strong>The drop is relative, not an absolute height.</strong> At retreat time the carriage
+stands on the dock clearance height by construction, so the move is measured from there — nothing
+has to be invented or kept in sync with the dock positions, and moving the docks moves the retreat
+with them. It defaults to 150&nbsp;mm and is clamped to the Z axis minimum, so an oversized value
+lands on the endstop instead of aborting the tool change with an out-of-range move;
+<code>retreat_drop: 0</code> disables the retreat entirely. Pick a value deep enough to clear the
+docks and shallow enough to stay above the tallest print you run.</p>
 <p>The drop uses <code>dock_approach_feedrate</code>, the same feedrate the approach raised Z
 with, so both halves of the trip are symmetric in speed as well as in order. It runs while the
 G-code offsets are still zeroed and the bed mesh still suspended, so it is a pure kinematic move
@@ -520,7 +523,40 @@ refuses unless the gantry state is <code>flat</code>.</p>
 
 <h2 id="vortac-qgl-state">vortac_qgl_state — [vortac_qgl_state]</h2>
 <p>Toggles the gantry between <strong>frame-flat</strong> (dock geometry valid) and
-<strong>bed-flat</strong> (printing geometry valid) without re-probing.</p>
+<strong>bed-flat</strong> (printing geometry valid) without re-probing — and with it the
+whole coordinate system, so the printer effectively has two: one for the docks and one
+for printing.</p>
+<div class="callout tip">
+  <p><strong>Two coordinate systems.</strong> The gantry orientation is only half of the
+  frame change. Everything derived from probing the <em>bed</em> is valid bed-flat and
+  wrong frame-flat, so <code>VORTAC_GANTRY_FLAT</code> enters the <strong>dock
+  frame</strong> and <code>VORTAC_GANTRY_TILT</code> restores the <strong>print
+  frame</strong>:</p>
+  <ul>
+    <li><strong>Bed mesh</strong> — a move transform on every <code>G1</code>; it would
+        shift the dock Z by the (edge-clamped) mesh value at the dock XY, and a mesh
+        probed bed-tilted is meaningless frame-flat. Suspended on FLAT, handed back on
+        TILT (a mesh loaded or probed in the meantime is never clobbered).</li>
+    <li><strong>Gcode offset</strong> — tool offsets, hand-set
+        <code>SET_GCODE_OFFSET</code> and live babystepping all shift <code>G1</code>
+        moves, and dock positions are taught in kinematic coordinates. Captured and
+        zeroed on FLAT, <em>added back on top of whatever is live</em> on TILT — an
+        offset that is taken out of the way always comes back, and babystepping done
+        inside the dock frame survives too.</li>
+    <li><strong>Probe <code>z_offset</code></strong> is <em>not</em> part of this: it is
+        not a move transform, it only applies while probing. Nothing to switch.</li>
+  </ul>
+  <p>This makes the toggle a complete frame switch for manual use as well — dock teaching
+  right after a hand-triggered <code>VORTAC_GANTRY_FLAT</code> records clean kinematic
+  positions. Set <code>manage_coordinate_system: False</code> to keep the toggle
+  gantry-only (the manager then does the zeroing and mesh suspension itself during a tool
+  change, as before).</p>
+</div>
+<p>During a tool change <code>vortac_manager</code> delegates the frame switch to this
+module and <em>takes the captured offset over</em>: TILT must not restore the leaving
+tool's offsets, the manager applies the arriving tool's offsets plus the carried
+babystep in its final step. That debt is held on the manager (not in a local), so a
+change that aborts between the two still re-applies it on the next attempt.</p>
 <ul>
   <li><strong>Mechanic:</strong> at <code>klippy:ready</code>, hooks
       <code>quad_gantry_level.z_helper.adjust_steppers</code> to capture each delta vector into
@@ -534,6 +570,17 @@ refuses unless the gantry state is <code>flat</code>.</p>
       invalidates it; the user must re-run QGL.</li>
   <li><strong>Manager dependency:</strong> <code>VORTAC_DOCK_SAVE_POS</code> refuses unless
       <code>state == 'flat'</code>.</li>
+  <li><strong>QGL ends tilted by definition</strong>, so the wrapped
+      <code>QUAD_GANTRY_LEVEL</code> also restores the print frame — a QGL run out of a
+      hand-triggered FLAT never leaves a silently suspended mesh behind.</li>
+  <li><strong>The frame survives a Z home:</strong> <code>home_rails_end</code> resets the
+      deltas and the state, but deliberately leaves the parked mesh and offset alone —
+      dropping them would lose them for good, and the next TILT hands them back regardless
+      of how Z was homed. Both are RAM only, like the gantry state itself.</li>
+  <li><strong>Status:</strong> <code>frame</code> (<code>print</code>|<code>dock</code>),
+      <code>saved_offset</code>, <code>mesh_suspended</code> and
+      <code>manages_frame</code> are exported alongside <code>state</code> /
+      <code>stored_deltas</code>; <code>VORTAC_QGL_STATUS</code> prints all of it.</li>
 </ul>
 
 <h2 id="include-with">include_with — [include_with &lt;namespace&gt; &lt;filename&gt;]</h2>

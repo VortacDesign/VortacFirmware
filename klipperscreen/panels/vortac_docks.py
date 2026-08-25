@@ -130,6 +130,27 @@ class Panel(ScreenPanel):
         actions.add(self.btn_primary)
         actions.add(self._action_button(
             "refresh", "Detect", None, "VORTAC_DETECT"))
+        # Contextual gantry toggle: shows the state it moves TO. FLAT is the
+        # frame reference the docks are taught in (bed mesh and gcode offset
+        # are parked with it), TILTED is the bed reference for printing.
+        self.pix_gantry_flat = self._load_pixbuf("vortac_gantry_flat.svg")
+        self.pix_gantry_tilt = self._load_pixbuf("vortac_gantry_tilt.svg")
+        self.btn_gantry = Gtk.Button()
+        self.btn_gantry.set_can_focus(False)
+        if self.pix_gantry_flat is not None and self.pix_gantry_tilt is not None:
+            self.img_gantry = Gtk.Image.new_from_pixbuf(self.pix_gantry_flat)
+            self.lbl_gantry_btn = Gtk.Label(label="Flatten")
+            gbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+                           halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+            gbox.add(self.img_gantry)
+            gbox.add(self.lbl_gantry_btn)
+            self.btn_gantry.add(gbox)
+        else:
+            self.img_gantry = None
+            self.lbl_gantry_btn = None
+            self.btn_gantry.set_label("Flatten")
+        self.btn_gantry.connect("clicked", self._gantry_clicked)
+        actions.add(self.btn_gantry)
         actions.add(self._icon_button(
             "vortac_engage.svg", "Engage",
             "Rotate the grabber to the engage position?", "VORTAC_ENGAGE"))
@@ -245,16 +266,20 @@ class Panel(ScreenPanel):
 
         self._update_primary_button(held)
 
-        qgl = self.manager.get("qgl_state") or self.qgl.get("state")
+        qgl = self._gantry_state()
+        # " · dock frame" = bed mesh and gcode offset are parked, i.e. we are
+        # in the dock coordinate system, not the print one.
+        frame = (" · dock frame" if self.qgl.get("frame") == "dock" else "")
         if qgl == "tilted":
             self.lbl_gantry.set_markup(
-                "Gantry: <span foreground='#7fd6a0'>TILTED</span>")
+                "Gantry: <span foreground='#7fd6a0'>TILTED</span>%s" % frame)
         elif qgl:
             self.lbl_gantry.set_markup(
-                "Gantry: <span foreground='#e8b45a'>%s</span>"
-                % GLib.markup_escape_text(str(qgl).upper()))
+                "Gantry: <span foreground='#e8b45a'>%s</span>%s"
+                % (GLib.markup_escape_text(str(qgl).upper()), frame))
         else:
-            self.lbl_gantry.set_label("Gantry: –")
+            self.lbl_gantry.set_label("Gantry: –%s" % frame)
+        self._update_gantry_button(qgl)
 
         if self.manager.get("dock_detection_valid"):
             detect = "Detection: <span foreground='#7fd6a0'>OK</span>"
@@ -322,6 +347,50 @@ class Panel(ScreenPanel):
         else:
             self.btn_primary.set_label(label)
         self.btn_primary.set_sensitive(sensitive)
+
+    def _gantry_state(self):
+        return self.manager.get("qgl_state") or self.qgl.get("state")
+
+    def _printing(self):
+        # The toggle takes the bed mesh and the gcode offset with it, so
+        # pressing it mid-print would drop the print onto raw kinematic Z.
+        # Tool changes call FLAT/TILT internally — that path is unaffected.
+        try:
+            printer = (getattr(self, "_printer", None)
+                       or getattr(self._screen, "printer", None))
+            return printer.get_stat("print_stats", "state") == "printing"
+        except Exception:
+            # Older/newer KlipperScreen internals: never block the button on
+            # a lookup we cannot do — the confirm dialog still guards it.
+            return False
+
+    def _update_gantry_button(self, qgl):
+        flat = (qgl == "flat")
+        pix = self.pix_gantry_tilt if flat else self.pix_gantry_flat
+        label = "Tilt" if flat else "Flatten"
+        if self.img_gantry is not None:
+            self.img_gantry.set_from_pixbuf(pix)
+            self.lbl_gantry_btn.set_label(label)
+        else:
+            self.btn_gantry.set_label(label)
+        # No [vortac_qgl_state] → no FLAT/TILT commands to send.
+        self.btn_gantry.set_sensitive(bool(qgl) and not self._printing())
+
+    def _gantry_clicked(self, widget):
+        if self._gantry_state() == "flat":
+            self._confirm_script(
+                widget,
+                "Tilt the gantry back onto the bed reference?\n"
+                "Replays the stored QGL deltas and restores the bed mesh "
+                "and gcode offset.",
+                "VORTAC_GANTRY_TILT")
+        else:
+            self._confirm_script(
+                widget,
+                "Flatten the gantry to the frame reference?\n"
+                "Replays the stored QGL deltas inverted and parks the bed "
+                "mesh and gcode offset (dock coordinate system).",
+                "VORTAC_GANTRY_FLAT")
 
     def _primary_clicked(self, widget):
         held = self.manager.get("current_tool")

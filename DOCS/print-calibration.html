@@ -158,6 +158,11 @@ VORTAC_QGL_STATUS      # should now report tilted, with four stored deltas</code
     (back to bed-parallel). No re-probing is needed, which is exactly what makes a mid-print tool
     change affordable. Re-running <code>QUAD_GANTRY_LEVEL</code> while flat zeroes the stored
     deltas first, so the new measurement starts clean.</p>
+    <p>The toggle carries the <strong>coordinate system</strong> along: FLAT suspends the bed
+    mesh and parks the gcode offset (both are bed-referenced and meaningless frame-flat),
+    TILT hands them back on top of whatever is live. So the dock frame is always
+    mesh-free and offset-free, and nothing probed off the bed ever reaches a dock move —
+    see <a href="modules.html#vortac-qgl-state">vortac_qgl_state</a>.</p>
   </div>
 </details>
 

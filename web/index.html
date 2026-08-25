@@ -81,7 +81,8 @@
   .dot.on { background: #5aa9e8; box-shadow: 0 0 5px #5aa9e8; }
   .dot.grab { background: var(--accent); box-shadow: 0 0 5px var(--accent); }
   /* ---- actions ---- */
-  #actions { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; flex: 0 0 auto; }
+  #actions { display: grid; gap: 8px; flex: 0 0 auto;
+    grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); }
   .btn {
     border-radius: 10px; background: var(--panel2); border: 1px solid var(--border);
     color: var(--text); font: inherit; font-size: 12px; font-weight: 700;
@@ -133,6 +134,10 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="#e8e8e8" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 11-3-6.7M21 3v6h-6"/></svg>
     Detect
   </button>
+  <button class="btn" id="btn-gantry">
+    <svg id="ico-gantry" viewBox="0 0 64 64" fill="none" stroke="#e8e8e8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></svg>
+    <span id="lbl-gantry">Gantry</span>
+  </button>
   <button class="btn" id="btn-engage">
     <svg viewBox="0 0 64 64" fill="none" stroke="#e8e8e8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
       <g transform="translate(30 33) rotate(-30)" opacity="0.45"><rect x="-16.5" y="-7" width="33" height="14" rx="7"/></g>
@@ -179,7 +184,7 @@ const pending = {};
 
 const state = {
   connected: false, klippyReady: false,
-  dockCount: 0, manager: {}, qgl: {}, toolStatus: {},
+  dockCount: 0, manager: {}, qgl: {}, printStats: {}, toolStatus: {},
   subscribedTools: "",
 };
 
@@ -232,7 +237,8 @@ async function init() {
 }
 
 async function subscribeAll() {
-  const objects = { vortac_manager: null, vortac_qgl_state: null };
+  const objects = { vortac_manager: null, vortac_qgl_state: null,
+                    print_stats: ["state"] };
   for (const t of (state.manager.tools || [])) objects["vortac_tool " + t] = null;
   state.subscribedTools = (state.manager.tools || []).join(",");
   const r = await rpc("printer.objects.subscribe", { objects });
@@ -241,7 +247,8 @@ async function subscribeAll() {
 
 function mergeStatus(st) {
   for (const [k, v] of Object.entries(st)) {
-    if (k === "vortac_manager") Object.assign(state.manager, v);
+    if (k === "print_stats") Object.assign(state.printStats, v);
+    else if (k === "vortac_manager") Object.assign(state.manager, v);
     else if (k === "vortac_qgl_state") Object.assign(state.qgl, v);
     else if (k.startsWith("vortac_tool ")) {
       const id = k.slice(12);
@@ -276,7 +283,29 @@ function loadableTools() {
 }
 const toolIndex = (t) => (state.toolStatus[t] || {}).tool_index;
 
+// Gantry glyphs: the frame (uprights + bed) with the gantry beam either
+// level with the frame (FLAT, dock reference) or tilted onto the bed
+// (TILTED, print reference). Each button shows the state it moves TO.
+const FLAT_ICON = `<path d="M12 12 V52 M52 12 V52"/><path d="M10 52 H54"/>
+  <path d="M10 20 H54"/>`;
+const TILT_ICON = `<path d="M12 12 V52 M52 12 V52"/><path d="M10 52 H54"/>
+  <path d="M10 16 L54 26"/>`;
+
 document.getElementById("btn-detect").onclick = () => gcode("VORTAC_DETECT");
+document.getElementById("btn-gantry").onclick = () => {
+  const flat = gantryState() === "flat";
+  if (flat)
+    confirmThen(
+      "Tilt the gantry back onto the bed reference? Replays the stored QGL " +
+      "deltas and restores the bed mesh and gcode offset.",
+      "VORTAC_GANTRY_TILT");
+  else
+    confirmThen(
+      "Flatten the gantry to the frame reference? Replays the stored QGL " +
+      "deltas inverted and parks the bed mesh and gcode offset (dock " +
+      "coordinate system).",
+      "VORTAC_GANTRY_FLAT");
+};
 document.getElementById("btn-engage").onclick = () =>
   confirmThen("Rotate the grabber to the engage position?", "VORTAC_ENGAGE");
 document.getElementById("btn-disengage").onclick = () =>
@@ -367,6 +396,12 @@ function dockNames() {
   return [...names].sort((a, b) => a.length - b.length || (a < b ? -1 : 1));
 }
 
+const gantryState = () => state.manager.qgl_state || state.qgl.state;
+// The toggle takes the bed mesh and the gcode offset with it, so pressing it
+// mid-print would drop the print onto raw kinematic Z. Tool changes call
+// FLAT/TILT internally — that path is unaffected.
+const printing = () => state.printStats.state === "printing";
+
 function render() {
   const m = state.manager;
   const held = m.current_tool;
@@ -376,9 +411,10 @@ function render() {
   hold.innerHTML = held
     ? `Holding: <b>${esc(held)}${toolIndex(held) != null ? " (T" + toolIndex(held) + ")" : ""}</b>`
     : "Carriage empty";
-  const qgl = m.qgl_state || state.qgl.state;
+  const qgl = gantryState();
   const qchip = document.getElementById("chip-qgl");
-  qchip.textContent = "Gantry: " + (qgl ? qgl.toUpperCase() : "–");
+  qchip.textContent = "Gantry: " + (qgl ? qgl.toUpperCase() : "–")
+    + (state.qgl.frame === "dock" ? " · dock frame" : "");
   qchip.className = "chip " + (qgl === "tilted" ? "ok" : qgl ? "warn" : "");
   const dchip = document.getElementById("chip-detect");
   dchip.textContent = m.dock_detection_valid ? "Detection: OK" : "Detection: stale — run Detect";
@@ -445,8 +481,23 @@ function render() {
   const l = loadableTools();
   if (held) { ico.innerHTML = PARK_ICON; lbl.textContent = "Park"; btn.disabled = !ready; }
   else { ico.innerHTML = LOAD_ICON; lbl.textContent = "Load"; btn.disabled = !ready || l.length !== 1; }
-  for (const id of ["btn-detect", "btn-engage", "btn-disengage", "btn-save"])
+  // gantry toggle — labelled with the state it switches TO
+  const gico = document.getElementById("ico-gantry");
+  const glbl = document.getElementById("lbl-gantry");
+  const flat = gantryState() === "flat";
+  gico.innerHTML = flat ? TILT_ICON : FLAT_ICON;
+  glbl.textContent = flat ? "Tilt" : "Flatten";
+
+  for (const id of ["btn-detect", "btn-gantry", "btn-engage",
+                    "btn-disengage", "btn-save"])
     document.getElementById(id).disabled = !ready;
+  // No [vortac_qgl_state] → no FLAT/TILT commands to send.
+  const gb = document.getElementById("btn-gantry");
+  gb.disabled = gb.disabled || !qgl || printing();
+  gb.title = !qgl ? "[vortac_qgl_state] not configured"
+    : printing() ? "not while printing — the toggle parks the bed mesh and "
+                   + "the gcode offset"
+    : "";
 }
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));

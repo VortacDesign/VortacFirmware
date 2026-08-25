@@ -117,7 +117,12 @@ slope 1 (one clean wrap at the 360° seam). The sweep starts at the current posi
 is offset — <strong>the slope is what matters</strong>.</p>
 
 <h2 id="dock-positions">4 — Calibrate dock positions</h2>
-<p>Per dock, with the tool parked in it and the gantry frame-flat:</p>
+<p>Per dock, with the tool parked in it and the gantry frame-flat. The FLAT toggle (console
+or the panel's <em>Flatten</em> button) also switches into the <strong>dock coordinate
+system</strong> — bed mesh and gcode offset are parked, so the jogging below happens in
+exactly the frame the dock positions are replayed in; <code>VORTAC_GANTRY_TILT</code> hands
+both back afterwards (see
+<a href="modules.html#vortac-qgl-state">two coordinate systems</a>):</p>
 <pre><code>VORTAC_GANTRY_FLAT
 G28                           # if not homed
 VORTAC_SELECT_DOCK DOCK=dock0 # detects the tool in dock0 and selects it
