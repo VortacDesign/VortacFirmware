@@ -130,8 +130,8 @@ SAVE_CONFIG</code></pre>
   <li><code>VORTAC_DOCK_CAL_SAVE</code> refuses if the gantry is <code>tilted</code>
       (dock geometry is only valid frame-flat) or no dock/tool was selected.</li>
   <li>The saved Z is the <strong>hooked/engage height</strong>. Tool loading uses that saved Z
-      directly, then lifts by <code>DOCK_Z_CLEARANCE</code>; unloading approaches at saved
-      Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code>, drops to saved Z, then disengages.</li>
+      directly, then lifts by <code>dock_z_clearance</code>; unloading approaches at saved
+      Z&nbsp;+&nbsp;<code>dock_z_clearance</code>, drops to saved Z, then disengages.</li>
 </ul>
 <p>Manual fallback (saves the current position without the detection context —
 <code>TOOL=</code> accepts the tool name, case-insensitive, <code>T&lt;n&gt;</code>, or a bare

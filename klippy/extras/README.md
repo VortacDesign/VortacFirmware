@@ -294,12 +294,16 @@ display names like `miniGrey`. `TOOL=` parameters accept the tool name
   grabbed). Reason: the probe touch point sits above the nozzle tip when
   a tool is grabbed, so the nozzle would hit the bed before the probe
   triggers. Park the tool (`VORTAC_UNLOAD`) before probing.
-- **Dock motion** is hardcoded (constants at top of file):
-  `DOCK_Y_SAFE = 50.0`, `DOCK_Z_CLEARANCE = 4.5`, `DOCK_APPROACH_F = 2000`,
-  `DOCK_SLIDE_F = 500`. Edit there for global geometry tweaks; per-tool
+- **Dock motion** is fully configurable on `[vortac_manager]` — geometry
+  (`dock_y_safe` 50.0, `dock_z_clearance` 5.0, `dock_approach_hop` 5.0),
+  feedrates in mm/min (`dock_approach_feedrate` 2000, `dock_slide_feedrate`
+  400, `dock_lift_feedrate` 40, `dock_backout_feedrate` 40) and the checked
+  phases (`dock_check_zstep` 1.0, `dock_check_ystep` 2.0, `dock_check_steps`
+  1, `dock_retries` 3, `dock_contact_settle` 1.0, `sense_settle` =
+  `dock_strobe_time`). The listed values are the defaults; per-tool
   tweaks belong in `tool_activate_gcode` / `tool_deactivate_gcode`. Saved dock
   positions are the hooked/engage position; load uses saved Z then lifts to
-  `Z + DOCK_Z_CLEARANCE`, and unload approaches at `Z + DOCK_Z_CLEARANCE`
+  `Z + dock_z_clearance`, and unload approaches at `Z + dock_z_clearance`
   before dropping to saved Z.
 - **Detection:** `VORTAC_DETECT` turns all dock Tool_id channels off, strobes
   one dock's configured LED channel on at a time, and assigns the dock to any

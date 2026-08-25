@@ -349,7 +349,7 @@ fix.</p>
   <summary><code>still hooked at dockN (attempt 3/3)</code> although nothing is stuck</summary>
   <div class="fold-body">
     <p><strong>Meaning:</strong> after the checked Z lift the manager backs out by
-    <code>DOCK_UNHOOK_STEP</code> in Y and expects <code>dock_sense</code> to go HIGH &mdash; the
+    <code>dock_check_ystep</code> in Y and expects <code>dock_sense</code> to go HIGH &mdash; the
     pogo pin sliding off its landing pad is what signals a clean release. It stayed LOW, so the
     verdict is &ldquo;hooks did not release&rdquo;, the tool is re-seated and the attempt repeats.</p>
     <p><strong>Telling a false positive from a real bind:</strong> a real bind usually clears on
@@ -360,10 +360,11 @@ fix.</p>
     riding at the top of its travel at that moment), not the pin's own spring travel.</p>
     <p><strong>Fix:</strong> read the checkpoints in <code>klippy.log</code>
     (<code>vortac unhook &lt;tool&gt;: backout +2.000mm dock=LOW grab=LOW</code>) and raise
-    <code>DOCK_UNHOOK_STEP</code> in <a href="modules.html#hook-verification"><code>vortac_manager.py</code></a>
+    <code>dock_check_ystep</code> in <code>[vortac_manager]</code> (see
+    <a href="modules.html#dock-motion-options">Dock motion options</a>)
     until <code>dock</code> reads HIGH on the first step. Raising
-    <code>DOCK_UNHOOK_CHECK_STEPS</code> instead gives the pin several steps to clear the pad
-    before a verdict is passed. The backout happens at Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code>
+    <code>dock_check_steps</code> instead gives the pin several steps to clear the pad
+    before a verdict is passed. The backout happens at Z&nbsp;+&nbsp;<code>dock_z_clearance</code>
     with the tool off the hooks, so a longer step is not in itself risky.</p>
   </div>
 </details>

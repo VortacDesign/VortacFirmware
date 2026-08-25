@@ -86,17 +86,14 @@ import re
 
 # Hook-on-screws dock geometry. Saved dock positions are the hooked/engage
 # position (grabber inside the tool at dock height). The clearance position is
-# Z + DOCK_Z_CLEARANCE, used to lift a grabbed tool off the dock screws or
+# Z + dock_z_clearance, used to lift a grabbed tool off the dock screws or
 # approach with a held tool before dropping it into the dock.
 # The approach to that clearance position is always axis-by-axis in the fixed
 # order Y -> X -> Z, never the shortest diagonal — see _approach_dock().
-DOCK_Y_SAFE      = 50.0    # mm, Y clearance for approach/depart
-DOCK_Z_CLEARANCE = 5.0     # mm, lift from saved hooked Z to clearance Z
-DOCK_APPROACH_F  = 2000    # mm/min, fast move to dock front
-DOCK_APPROACH_HOP = 5.0    # mm, relative Z hop before the Y/X travel when the
-                           # carriage sits below the approach height
-DOCK_SLIDE_F     = 400     # mm/min, Y slide-in/out only (Z drop/lift at the
-                           # dock is always the checked DOCK_UNHOOK_* phase)
+# All geometry and feedrates of the routine are config options of
+# [vortac_manager] (dock_y_safe, dock_z_clearance, dock_approach_feedrate,
+# dock_approach_hop, dock_slide_feedrate); the Z drop/lift at the dock is
+# always the checked dock_lift_feedrate/dock_backout_feedrate phase below.
 
 # Hook/unhook verification (used by BOTH park and fetch: the checked
 # stepwise Z drop when hooking in mirrors the checked lift when unhooking,
@@ -112,21 +109,12 @@ DOCK_SLIDE_F     = 400     # mm/min, Y slide-in/out only (Z drop/lift at the
 # follows) and only goes HIGH on the Y backout when the pin slides off the
 # pad. Therefore:
 #   - dock HIGH *during the lift*  -> tool is tilting/binding, contact lost
-#     -> stop within one DOCK_UNHOOK_ZSTEP, before the pogos tear off.
+#     -> stop within one dock_check_zstep, before the pogos tear off.
 #   - dock LOW *after a backward step* -> hooks did not release -> stop,
 #     re-seat, retry.
 #   - grab HIGH at any checkpoint -> grabber lost the tool -> freeze, error.
-DOCK_UNHOOK_LIFT_F      = 40    # mm/min, slow Z lift off the dock screws
-DOCK_UNHOOK_BACK_F      = 40    # mm/min, checked backward steps
-DOCK_UNHOOK_ZSTEP       = 1.0   # mm per checked lift step
-DOCK_UNHOOK_STEP        = 2.0   # mm per checked backward step — must exceed
-                                # the Y extent of the dock's landing pad, or
-                                # the pogo pin still sits on it and the clean
-                                # release reads as 'hooked'
-DOCK_UNHOOK_CHECK_STEPS = 1     # backward steps for dock decoupling check
-DOCK_UNHOOK_RETRIES     = 3     # re-seat + lift attempts before reversing
-DOCK_CONTACT_SETTLE     = 1.0   # s to wait for dock_sense to report contact
-                                # again after the seat press
+# Tunables: dock_check_zstep, dock_check_ystep, dock_check_steps,
+# dock_retries, dock_contact_settle, sense_settle.
 
 
 class VortacManager:
@@ -151,6 +139,55 @@ class VortacManager:
             'argb_status_dim', default=0.15, minval=0.0, maxval=1.0)
         self.dock_strobe_time = config.getfloat(
             'dock_strobe_time', default=0.10, above=0.0)
+        # Settle time after each checked dock step before the cached
+        # dock/grab sense states are read (_wait_sense). This is the pause
+        # that makes park/fetch stepwise: motion is fully drained
+        # (wait_moves), then the reactor runs for this long so the button
+        # callbacks of the tool mcu can land. Anything below ~50 ms risks
+        # reading the state from before the step.
+        self.sense_settle = config.getfloat(
+            'sense_settle', default=self.dock_strobe_time,
+            minval=0.01, maxval=2.0)
+
+        # --- dock routine geometry / feedrates --------------------------
+        # Saved dock positions are the hooked/engage position; everything
+        # here is relative to them. Feedrates are mm/min (they go straight
+        # into the G1 F word).
+        self.dock_y_safe = config.getfloat(
+            'dock_y_safe', default=50.0, minval=1.0, maxval=200.0)
+        self.dock_z_clearance = config.getfloat(
+            'dock_z_clearance', default=5.0, minval=0.5, maxval=50.0)
+        self.dock_approach_hop = config.getfloat(
+            'dock_approach_hop', default=5.0, minval=0.0, maxval=50.0)
+        self.dock_approach_feedrate = config.getfloat(
+            'dock_approach_feedrate', default=2000.0,
+            minval=60.0, maxval=30000.0)
+        self.dock_slide_feedrate = config.getfloat(
+            'dock_slide_feedrate', default=400.0,
+            minval=10.0, maxval=6000.0)
+        self.dock_lift_feedrate = config.getfloat(
+            'dock_lift_feedrate', default=40.0, minval=5.0, maxval=1200.0)
+        self.dock_backout_feedrate = config.getfloat(
+            'dock_backout_feedrate', default=40.0, minval=5.0, maxval=1200.0)
+
+        # --- hook/unhook verification ----------------------------------
+        self.dock_check_zstep = config.getfloat(
+            'dock_check_zstep', default=1.0, above=0.0, maxval=10.0)
+        # Must exceed the Y extent of the dock's landing pad, or the pogo
+        # pin still sits on it and a clean release reads as 'hooked'.
+        self.dock_check_ystep = config.getfloat(
+            'dock_check_ystep', default=2.0, above=0.0, maxval=20.0)
+        self.dock_check_steps = config.getint(
+            'dock_check_steps', default=1, minval=1, maxval=10)
+        self.dock_retries = config.getint(
+            'dock_retries', default=3, minval=1, maxval=10)
+        self.dock_contact_settle = config.getfloat(
+            'dock_contact_settle', default=1.0, minval=0.0, maxval=10.0)
+        if self.dock_check_ystep * self.dock_check_steps > self.dock_y_safe:
+            raise config.error(
+                "vortac_manager: dock_check_ystep * dock_check_steps "
+                "exceeds dock_y_safe — the checked backout would overshoot "
+                "the safe line")
 
         # --- dock power (dark power management) -------------------------
         #   off       = never touch the power channel
@@ -174,7 +211,7 @@ class VortacManager:
         # Overtravel below the hooked Z after a seated hook-in, to press
         # the hooks the last hair into their seat before the grabber lets
         # go. Park (way down) only — the unhook already overtravels up to
-        # Z + DOCK_Z_CLEARANCE. 0 disables the press.
+        # Z + dock_z_clearance. 0 disables the press.
         self.dock_seat_press = config.getfloat(
             'dock_seat_press', default=0.0, minval=0.0, maxval=2.0)
         # A manual SET_LED that raises the supply channel on an occupied
@@ -1028,11 +1065,15 @@ class VortacManager:
             for tid, tool in sorted(self.tools.items()))
         return f"dock[{dock}] grab[{grab}]"
 
-    def _dwell_for_sense(self):
+    def _dwell_for_sense(self, delay=None):
         # Use reactor time so LED updates and button callbacks can be processed
         # inside this gcode command before we read cached sense states.
+        # delay=None means the detection strobe dwell (dock_strobe_time);
+        # the dock routines pass sense_settle.
         reactor = self.printer.get_reactor()
-        reactor.pause(reactor.monotonic() + self.dock_strobe_time)
+        if delay is None:
+            delay = self.dock_strobe_time
+        reactor.pause(reactor.monotonic() + delay)
 
     def _detect_tools(self, gcmd=None):
         debug = bool(gcmd and gcmd.get_int('DEBUG', 0, minval=0, maxval=1))
@@ -1493,7 +1534,7 @@ class VortacManager:
     # --------------------------------------------------------------------
 
     def _approach_dock(self, x, y, z):
-        """Drive to the dock front (x, y + DOCK_Y_SAFE, z) one axis at a time,
+        """Drive to the dock front (x, y + dock_y_safe, z) one axis at a time,
         always in the order Y -> X -> Z.
 
         A single combined G1 takes the shortest diagonal, and that diagonal
@@ -1507,7 +1548,7 @@ class VortacManager:
           X  across at the safe line, clear of every dock.
           Z  last, with X/Y already on the dock.
 
-        Ahead of all three, a DOCK_APPROACH_HOP lift if the carriage sits
+        Ahead of all three, a dock_approach_hop lift if the carriage sits
         below the approach height, so a held tool does not scrape over the
         tool plate or catch on the print on its way to the front. It is a
         small relative hop, not a lift to the approach height: going all the
@@ -1519,10 +1560,12 @@ class VortacManager:
         moves = ['G90']
         if cur_z < z - 1e-6:
             moves.append(
-                f'G91\nG1 Z{DOCK_APPROACH_HOP:.3f} F{DOCK_APPROACH_F}\nG90')
-        moves.append(f'G1 Y{y + DOCK_Y_SAFE:.3f} F{DOCK_APPROACH_F}')
-        moves.append(f'G1 X{x:.3f} F{DOCK_APPROACH_F}')
-        moves.append(f'G1 Z{z:.3f} F{DOCK_APPROACH_F}')
+                f'G91\nG1 Z{self.dock_approach_hop:.3f} '
+                f'F{self.dock_approach_feedrate}\nG90')
+        moves.append(
+            f'G1 Y{y + self.dock_y_safe:.3f} F{self.dock_approach_feedrate}')
+        moves.append(f'G1 X{x:.3f} F{self.dock_approach_feedrate}')
+        moves.append(f'G1 Z{z:.3f} F{self.dock_approach_feedrate}')
         gcode.run_script_from_command('\n'.join(moves))
         # The dock geometry below relies on being exactly on X/Y/Z before the
         # slide: without this the queued corner blending would start the
@@ -1548,13 +1591,13 @@ class VortacManager:
         y = tool.get_dock_pos(dock_name, 'y')
         z = tool.get_dock_pos(dock_name, 'z')
         gcode = self.printer.lookup_object('gcode')
-        self._approach_dock(x, y, z + DOCK_Z_CLEARANCE)
+        self._approach_dock(x, y, z + self.dock_z_clearance)
         # Energize NOW, with the pogos still separated (see docstring) —
         # switching on after the slide, into the grabber-fed tool, trips
         # the dock fuse.
         self._power_on_before_slide(dock_name)
         gcode.run_script_from_command(
-            f'G1 Y{y} F{DOCK_SLIDE_F}')
+            f'G1 Y{y} F{self.dock_slide_feedrate}')
 
         if not tool.sense_ready():
             # No sense feedback available — blind hook-in, but slow.
@@ -1563,15 +1606,15 @@ class VortacManager:
                     f"Vortac: {tool.tool_id} sense pins not ready, "
                     f"hooking in blind")
             gcode.run_script_from_command(
-                f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
+                f'G1 Z{z} F{self.dock_lift_feedrate}')
             self._seat_press(tool, z, gcmd)
             self.grabber.disengage(gcmd=gcmd)
             gcode.run_script_from_command(
-                f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+                f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
             return
 
         self._ensure_sense_active(gcmd)
-        for attempt in range(1, DOCK_UNHOOK_RETRIES + 1):
+        for attempt in range(1, self.dock_retries + 1):
             result = self._try_hook(tool, z)
             if result == 'seated':
                 break
@@ -1586,9 +1629,9 @@ class VortacManager:
                 gcmd.respond_info(
                     f"Vortac: {tool.tool_id} shows no dock contact at the "
                     f"hooked position of {dock_name}, lifting to retry "
-                    f"(attempt {attempt}/{DOCK_UNHOOK_RETRIES})")
+                    f"(attempt {attempt}/{self.dock_retries})")
             gcode.run_script_from_command(
-                f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_UNHOOK_LIFT_F}')
+                f'G1 Z{z + self.dock_z_clearance} F{self.dock_lift_feedrate}')
         else:
             # Never seated — keep holding the tool, back out lifted. The
             # tool leaves with the grabber, so de-energize first and let the
@@ -1597,7 +1640,7 @@ class VortacManager:
             self._wait_sense()
             self._set_dock_power(dock_name, False)
             gcode.run_script_from_command(
-                f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+                f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
             # Hand the dock back to the occupancy policy once the tool is
             # clear: a sticky False override would outlive this failure and
             # strand any tool that later reaches this dock outside the
@@ -1607,7 +1650,7 @@ class VortacManager:
             self._release_dock_power(dock_name)
             raise self.printer.command_error(
                 f"Vortac: failed to seat {tool.tool_id} in {dock_name} "
-                f"after {DOCK_UNHOOK_RETRIES} attempts (no dock contact); "
+                f"after {self.dock_retries} attempts (no dock contact); "
                 f"tool is still held by the grabber, backed out lifted. "
                 f"Check dock calibration and pogo pins.")
 
@@ -1624,9 +1667,9 @@ class VortacManager:
                 f"spring travel.")
         self.grabber.disengage(gcmd=gcmd)
         gcode.run_script_from_command(
-            f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+            f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
         self._wait_sense()
-        self._log_unhook_checkpoint(tool, 'park-backout', DOCK_Y_SAFE)
+        self._log_unhook_checkpoint(tool, 'park-backout', self.dock_y_safe)
         if not tool.is_docked():
             raise self.printer.command_error(
                 f"Vortac: dock contact for {tool.tool_id} at {dock_name} "
@@ -1639,18 +1682,18 @@ class VortacManager:
                 f"the grabber before continuing.")
 
     def _wait_dock_contact(self, tool):
-        """Give dock_sense up to DOCK_CONTACT_SETTLE to report contact after
+        """Give dock_sense up to dock_contact_settle to report contact after
         the seat press — the contact can bounce while the hooks settle, and
         the tool board's button report rides the CAN bus, so one immediate
         sample is not enough for a fatal verdict."""
         reactor = self.printer.get_reactor()
-        deadline = reactor.monotonic() + DOCK_CONTACT_SETTLE
+        deadline = reactor.monotonic() + self.dock_contact_settle
         while True:
             if tool.is_docked():
                 return True
             if reactor.monotonic() >= deadline:
                 return False
-            reactor.pause(reactor.monotonic() + self.dock_strobe_time)
+            reactor.pause(reactor.monotonic() + self.sense_settle)
 
     def _seat_press(self, tool, z, gcmd):
         """Press the tool onto the dock screws: overtravel dock_seat_press
@@ -1665,8 +1708,8 @@ class VortacManager:
             return
         gcode = self.printer.lookup_object('gcode')
         gcode.run_script_from_command(
-            f'G1 Z{z - self.dock_seat_press:.3f} F{DOCK_UNHOOK_LIFT_F}\n'
-            f'G1 Z{z:.3f} F{DOCK_UNHOOK_LIFT_F}')
+            f'G1 Z{z - self.dock_seat_press:.3f} F{self.dock_lift_feedrate}\n'
+            f'G1 Z{z:.3f} F{self.dock_lift_feedrate}')
         self._wait_sense()
         self._log_unhook_checkpoint(tool, 'press', -self.dock_seat_press)
 
@@ -1680,11 +1723,11 @@ class VortacManager:
         contact after the full drop), or 'lost_grab'. Leaves the toolhead
         at the hooked position (or wherever grab was lost)."""
         gcode = self.printer.lookup_object('gcode')
-        cur_z = z + DOCK_Z_CLEARANCE
+        cur_z = z + self.dock_z_clearance
         while cur_z > z + 1e-6:
-            cur_z = max(cur_z - DOCK_UNHOOK_ZSTEP, z)
+            cur_z = max(cur_z - self.dock_check_zstep, z)
             gcode.run_script_from_command(
-                f'G1 Z{cur_z:.3f} F{DOCK_UNHOOK_LIFT_F}')
+                f'G1 Z{cur_z:.3f} F{self.dock_lift_feedrate}')
             self._wait_sense()
             self._log_unhook_checkpoint(tool, 'drop', cur_z - z)
             if not tool.is_grabbed():
@@ -1710,7 +1753,7 @@ class VortacManager:
         gcode = self.printer.lookup_object('gcode')
         self._approach_dock(x, y, z)
         gcode.run_script_from_command(
-            f'G1 Y{y} F{DOCK_SLIDE_F}')
+            f'G1 Y{y} F{self.dock_slide_feedrate}')
         self.grabber.engage(gcmd=gcmd)
 
         if not tool.sense_ready():
@@ -1723,8 +1766,8 @@ class VortacManager:
                     f"Vortac: {tool.tool_id} sense pins not ready, "
                     f"unhooking blind")
             gcode.run_script_from_command(
-                f'G1 Z{z + DOCK_Z_CLEARANCE} F{DOCK_UNHOOK_LIFT_F}\n'
-                f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+                f'G1 Z{z + self.dock_z_clearance} F{self.dock_lift_feedrate}\n'
+                f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
             return
 
         if not tool.is_grabbed() and gcmd is not None:
@@ -1761,11 +1804,11 @@ class VortacManager:
         """Unhook retry loop of _fetch_from_dock. Returns normally once the
         tool is out of the dock and confirmed grabbed; raises otherwise."""
         gcode = self.printer.lookup_object('gcode')
-        for attempt in range(1, DOCK_UNHOOK_RETRIES + 1):
+        for attempt in range(1, self.dock_retries + 1):
             result = self._try_unhook(tool, dock_name, y, z, gcmd)
             if result == 'released':
                 gcode.run_script_from_command(
-                    f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+                    f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
                 self._wait_sense()
                 if not tool.is_grabbed():
                     raise self.printer.command_error(
@@ -1789,9 +1832,9 @@ class VortacManager:
                         f"Vortac: {tool.tool_id} dock contact lost during "
                         f"lift at {dock_name} (tilt/bind suspected), "
                         f"lowering to re-seat "
-                        f"(attempt {attempt}/{DOCK_UNHOOK_RETRIES})")
+                        f"(attempt {attempt}/{self.dock_retries})")
                 gcode.run_script_from_command(
-                    f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
+                    f'G1 Z{z} F{self.dock_lift_feedrate}')
                 self._wait_sense()
                 self._log_unhook_checkpoint(tool, 'reseat', 0.0)
                 if not tool.is_docked():
@@ -1806,10 +1849,10 @@ class VortacManager:
             if gcmd is not None:
                 gcmd.respond_info(
                     f"Vortac: {tool.tool_id} still hooked at {dock_name} "
-                    f"(attempt {attempt}/{DOCK_UNHOOK_RETRIES}), re-seating")
+                    f"(attempt {attempt}/{self.dock_retries}), re-seating")
             gcode.run_script_from_command(
-                f'G1 Y{y} F{DOCK_UNHOOK_BACK_F}\n'
-                f'G1 Z{z} F{DOCK_UNHOOK_LIFT_F}')
+                f'G1 Y{y} F{self.dock_backout_feedrate}\n'
+                f'G1 Z{z} F{self.dock_lift_feedrate}')
 
         # All retries failed — reverse everything: tool stays in its dock,
         # release the grabber and back out empty. Nothing cut the supply on
@@ -1824,10 +1867,10 @@ class VortacManager:
         self._set_dock_power(dock_name, True)
         self.grabber.disengage(gcmd=gcmd)
         gcode.run_script_from_command(
-            f'G1 Y{y + DOCK_Y_SAFE} F{DOCK_SLIDE_F}')
+            f'G1 Y{y + self.dock_y_safe} F{self.dock_slide_feedrate}')
         raise self.printer.command_error(
             f"Vortac: failed to unhook {tool.tool_id} from {dock_name} "
-            f"after {DOCK_UNHOOK_RETRIES} attempts; tool left in dock, "
+            f"after {self.dock_retries} attempts; tool left in dock, "
             f"grabber disengaged")
 
     def _try_unhook(self, tool, dock_name, y, z, gcmd):
@@ -1848,10 +1891,11 @@ class VortacManager:
         Leaves the toolhead wherever the last checked step ended."""
         gcode = self.printer.lookup_object('gcode')
         cur_z = z
-        while cur_z < z + DOCK_Z_CLEARANCE - 1e-6:
-            cur_z = min(cur_z + DOCK_UNHOOK_ZSTEP, z + DOCK_Z_CLEARANCE)
+        while cur_z < z + self.dock_z_clearance - 1e-6:
+            cur_z = min(cur_z + self.dock_check_zstep,
+                        z + self.dock_z_clearance)
             gcode.run_script_from_command(
-                f'G1 Z{cur_z:.3f} F{DOCK_UNHOOK_LIFT_F}')
+                f'G1 Z{cur_z:.3f} F{self.dock_lift_feedrate}')
             self._wait_sense()
             self._log_unhook_checkpoint(tool, 'lift', cur_z - z)
             if not tool.is_grabbed():
@@ -1859,10 +1903,10 @@ class VortacManager:
             if not tool.is_docked():
                 return 'tilt'
         cur_y = y
-        for _ in range(DOCK_UNHOOK_CHECK_STEPS):
-            cur_y += DOCK_UNHOOK_STEP
+        for _ in range(self.dock_check_steps):
+            cur_y += self.dock_check_ystep
             gcode.run_script_from_command(
-                f'G1 Y{cur_y:.3f} F{DOCK_UNHOOK_BACK_F}')
+                f'G1 Y{cur_y:.3f} F{self.dock_backout_feedrate}')
             self._wait_sense()
             self._log_unhook_checkpoint(tool, 'backout', cur_y - y)
             if not tool.is_grabbed():
@@ -1885,7 +1929,7 @@ class VortacManager:
         cached dock/grab states reflect the new position."""
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.wait_moves()
-        self._dwell_for_sense()
+        self._dwell_for_sense(self.sense_settle)
 
     def _dock_holding(self, tool_id):
         for dock, tid in self.dock_occupancy.items():

@@ -209,27 +209,39 @@ grabbed). Reason: the probe touch point sits above the nozzle tip when a tool is
 nozzle would hit the bed before the probe triggers. Park the tool
 (<code>VORTAC_UNLOAD</code>) before probing.</p>
 
-<h3>Dock motion constants</h3>
-<p>Hardcoded at the top of <code>vortac_manager.py</code>:</p>
+<h3 id="dock-motion-options">Dock motion options</h3>
+<p>All of the dock routine's geometry, feedrates and check parameters are
+options of <code>[vortac_manager]</code>. The values below are the built-in
+defaults — they apply unless the config overrides them. Feedrates are mm/min
+(they go straight into the <code>G1 F</code> word).</p>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
+<thead><tr><th>Option</th><th>Default</th><th>Range</th><th>Meaning</th></tr></thead>
 <tbody>
-<tr><td><code>DOCK_Y_SAFE</code></td><td>50.0</td><td>safe Y line in front of the docks</td></tr>
-<tr><td><code>DOCK_Z_CLEARANCE</code></td><td>5.0</td><td>lift above the saved (hooked/engage) Z</td></tr>
-<tr><td><code>DOCK_APPROACH_F</code></td><td>2000</td><td>approach feedrate (mm/min)</td></tr>
-<tr><td><code>DOCK_APPROACH_HOP</code></td><td>5.0</td><td>relative Z hop before the Y/X travel when below the approach height</td></tr>
-<tr><td><code>DOCK_SLIDE_F</code></td><td>400</td><td>Y slide in/out feedrate (mm/min) — Y only</td></tr>
-<tr><td><code>DOCK_UNHOOK_LIFT_F</code></td><td>40</td><td>checked Z lift/drop feedrate (mm/min)</td></tr>
-<tr><td><code>DOCK_UNHOOK_ZSTEP</code></td><td>1.0</td><td>Z per checked step (hook and unhook)</td></tr>
+<tr><td><code>dock_y_safe</code></td><td>50.0</td><td>1 … 200</td><td>safe Y line in front of the docks</td></tr>
+<tr><td><code>dock_z_clearance</code></td><td>5.0</td><td>0.5 … 50</td><td>lift above the saved (hooked/engage) Z</td></tr>
+<tr><td><code>dock_approach_hop</code></td><td>5.0</td><td>0 … 50</td><td>relative Z hop before the Y/X travel when below the approach height</td></tr>
+<tr><td><code>dock_approach_feedrate</code></td><td>2000</td><td>60 … 30000</td><td>approach feedrate</td></tr>
+<tr><td><code>dock_slide_feedrate</code></td><td>400</td><td>10 … 6000</td><td>Y slide in/out feedrate — Y only</td></tr>
+<tr><td><code>dock_lift_feedrate</code></td><td>40</td><td>5 … 1200</td><td>checked Z lift/drop feedrate</td></tr>
+<tr><td><code>dock_backout_feedrate</code></td><td>40</td><td>5 … 1200</td><td>checked Y backout feedrate</td></tr>
+<tr><td><code>dock_check_zstep</code></td><td>1.0</td><td>&gt;0 … 10</td><td>Z per checked step (hook and unhook)</td></tr>
+<tr><td><code>dock_check_ystep</code></td><td>2.0</td><td>&gt;0 … 20</td><td>Y per checked backout step — must exceed the landing pad</td></tr>
+<tr><td><code>dock_check_steps</code></td><td>1</td><td>1 … 10</td><td>number of checked backout steps</td></tr>
+<tr><td><code>dock_retries</code></td><td>3</td><td>1 … 10</td><td>re-seat + retry attempts before aborting</td></tr>
+<tr><td><code>dock_contact_settle</code></td><td>1.0</td><td>0 … 10</td><td>s to wait for <code>dock_sense</code> after the seat press</td></tr>
+<tr><td><code>sense_settle</code></td><td><code>dock_strobe_time</code> (0.10)</td><td>0.01 … 2</td><td>s pause after each checked step before the sense pins are read</td></tr>
 </tbody>
 </table>
 </div>
-<p>Edit there for global geometry tweaks; per-tool tweaks belong in
+<p><code>dock_check_ystep × dock_check_steps</code> must stay within
+<code>dock_y_safe</code>, otherwise the checked backout would overshoot the
+safe line — that combination is rejected at startup.</p>
+<p>Per-tool tweaks belong in
 <code>tool_activate_gcode</code> / <code>tool_deactivate_gcode</code>. Saved dock positions are
 the hooked/engage position; load uses saved Z then lifts to
-Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code>, and unload approaches at
-Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> before dropping to saved Z.</p>
+Z&nbsp;+&nbsp;<code>dock_z_clearance</code>, and unload approaches at
+Z&nbsp;+&nbsp;<code>dock_z_clearance</code> before dropping to saved Z.</p>
 
 <h3 id="dock-approach">Sequential (axis-by-axis) dock approach</h3>
 <p>The move to the dock front is never a single combined <code>G1 X Y Z</code>. A
@@ -239,13 +251,13 @@ arrives at the target dock at an angle instead of head-on. Every approach
 (<code>_approach_dock()</code>) is therefore split into axis-aligned moves, always
 in the same order:</p>
 <ol>
-  <li><strong>Y</strong> out to the safe line (<code>y + DOCK_Y_SAFE</code>) — the
+  <li><strong>Y</strong> out to the safe line (<code>y + dock_y_safe</code>) — the
       slide-out direction, the one move that can always be made, whether the carriage
       stands in a dock or out in the printer.</li>
   <li><strong>X</strong> across at the safe line, clear of every dock.</li>
   <li><strong>Z</strong> last, with X/Y already on the dock.</li>
 </ol>
-<p>Ahead of those three, a relative <code>DOCK_APPROACH_HOP</code> (5&nbsp;mm) lift runs
+<p>Ahead of those three, a relative <code>dock_approach_hop</code> lift runs
 if the carriage sits below the approach height, so a held tool does not scrape over the
 tool plate or catch on the print during the Y/X travel. It is deliberately a small hop and
 not a lift all the way to the approach height — that would be the Z-before-Y order this
@@ -256,8 +268,11 @@ in <code>handover</code> mode still happens with the carriage standing still.</p
 
 <h3 id="hook-verification">Checked hook / unhook (sense-verified Z phases)</h3>
 <p>Both Z phases at the dock are stepwise and sense-verified with the same
-<code>DOCK_UNHOOK_ZSTEP</code>/<code>DOCK_UNHOOK_LIFT_F</code> constants; only the Y slides use
-<code>DOCK_SLIDE_F</code>. Every step waits for motion, lets the sense callbacks settle, and logs
+<code>dock_check_zstep</code>/<code>dock_lift_feedrate</code>; the checked Y backout steps use
+<code>dock_check_ystep</code>/<code>dock_backout_feedrate</code>, the free Y slides
+<code>dock_slide_feedrate</code>. Every step drains the motion queue
+(<code>wait_moves()</code>), pauses <code>sense_settle</code> seconds so the tool mcu's button
+callbacks land, and logs
 a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
 <ul>
   <li><strong>Fetch (unhook):</strong> engage, then checked lift — <code>dock_sense</code> must
@@ -267,14 +282,14 @@ a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
       during either phase &mdash; in <code>handover</code> mode it is cut afterwards, at the safe
       line, so the release check runs against an untouched dock
       (<a href="#dock-power">Dock power</a>). The backward step must be longer than the Y extent
-      of the dock's landing pad (<code>DOCK_UNHOOK_STEP</code>), or the pogo pin still sits on the
+      of the dock's landing pad (<code>dock_check_ystep</code>), or the pogo pin still sits on the
       pad after the step and a clean release reads as <em>still hooked</em>.</li>
   <li><strong>Park (hook-in):</strong> slide in lifted — this is where the pogos mate, so
       <code>dock_sense</code> is checked here with the dock still dead and the supply is switched
       on before anything moves again — then the checked drop from
-      Z&nbsp;+&nbsp;<code>DOCK_Z_CLEARANCE</code> to the hooked Z, where <code>dock_sense</code>
+      Z&nbsp;+&nbsp;<code>dock_z_clearance</code> to the hooked Z, where <code>dock_sense</code>
       must be LOW <em>before</em> the grabber disengages; no contact
-      → lift back up and retry (<code>DOCK_UNHOOK_RETRIES</code>), final failure de-energizes the
+      → lift back up and retry (<code>dock_retries</code>), final failure de-energizes the
       dock and backs out with the tool still held. With <code>dock_seat_press</code> set, a slow
       overtravel below the hooked Z presses the hooks into their seat after the drop — sense
       checks are deliberately not fatal during the press (the hook unloads the grabber for a

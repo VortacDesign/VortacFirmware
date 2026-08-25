@@ -290,10 +290,16 @@ T0                   # manager: FLAT -> fetch -> TILT, applies offsets
 <ul>
   <li><strong>XYZ approach/depart</strong> is axis-by-axis, never a diagonal
       (see <a href="modules.html#dock-approach">Sequential dock approach</a>), and
-      hardcoded in <code>vortac_manager.py</code>
-      (constants at the top of the file): <code>DOCK_Y_SAFE = 50.0</code>,
-      <code>DOCK_Z_CLEARANCE = 5.0</code>, <code>DOCK_APPROACH_F = 2000</code>,
-      <code>DOCK_SLIDE_F = 400</code>. Edit there for global geometry tweaks.</li>
+      configured on <code>[vortac_manager]</code>: <code>dock_y_safe</code>,
+      <code>dock_z_clearance</code>, <code>dock_approach_hop</code>,
+      <code>dock_approach_feedrate</code>, <code>dock_slide_feedrate</code>. The checked
+      Z/Y phases add <code>dock_lift_feedrate</code>, <code>dock_backout_feedrate</code>,
+      <code>dock_check_zstep</code>, <code>dock_check_ystep</code>,
+      <code>dock_check_steps</code>, <code>dock_retries</code>,
+      <code>dock_contact_settle</code> and <code>sense_settle</code>. Every one of them has a
+      built-in default — see
+      <a href="modules.html#dock-motion-options">Dock motion options</a> for values and
+      ranges.</li>
   <li><strong>Per-tool warm-up / cool-down</strong> → <code>tool_activate_gcode</code> /
       <code>tool_deactivate_gcode</code> on <code>[vortac_tool &lt;name&gt;]</code> (set via
       include_with overrides: <code>vortac_tool TN.tool_activate_gcode: …</code>) — those run on
