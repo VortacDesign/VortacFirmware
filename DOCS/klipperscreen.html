@@ -196,9 +196,12 @@ params: {"script":"VORTAC_DETECT"}</code></pre>
           <code>printer.extruders.count</code> reads 0.)</li>
       <li><strong>The Extrude panel's tool selector runs a REAL tool change</strong> — its
           extruder buttons send <code>T&lt;n&gt;</code>, which vortac_manager registers as a
-          full dock swap with motion. To switch only the logical extruder (e.g. to prime a
-          docked tool), use <code>ACTIVATE_EXTRUDER EXTRUDER=extruder1</code> or
-          <code>VORTAC_SET_CURRENT_TOOL</code> in the console instead.</li>
+          full dock swap with motion. Selecting the tool that is ALREADY on the carriage is
+          safe: the manager takes the no-motion path and only syncs the active extruder
+          (after a restart + <code>VORTAC_DETECT</code> that sync has already happened). To
+          switch only the logical extruder of a DIFFERENT, docked tool (e.g. to prime it),
+          use <code>ACTIVATE_EXTRUDER EXTRUDER=extruder1</code> in the console instead —
+          extruder object names, not tool names.</li>
       <li><strong>Heating a docked tool works only while its dock is powered</strong> — with
           <code>dock_power_mode: occupancy/handover</code> occupied docks stay energized, so
           this is the normal case; a dock the manager de-energized (positively known empty)

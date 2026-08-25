@@ -1215,6 +1215,10 @@ class VortacManager:
                     self.offsets_applied = False
                 self.current_tool = self.tools[grabbed_ids[0]]
                 self._assign_park_dock(self.current_tool, detected, gcmd)
+                # A restart resets Klipper's active extruder to the primary
+                # [extruder]; the freshly detected held tool must take over
+                # or extrusion keeps checking the wrong (cold) heater.
+                self._sync_active_extruder(self.current_tool, gcmd)
             elif len(grabbed_ids) == 0:
                 # A held tool without sense readings can never show up in
                 # grabbed_ids — clearing current_tool on that non-evidence
@@ -1362,9 +1366,39 @@ class VortacManager:
                 f"Tool {target_id} not registered or unavailable")
         self._change_to(self.tools[target_id], gcmd)
 
+    def _sync_active_extruder(self, tool, gcmd):
+        """Make Klipper's active extruder match the held tool.
+
+        The full tool change does this in step 6 of _change_to; every other
+        path that establishes current_tool (VORTAC_DETECT after a restart,
+        VORTAC_SET_CURRENT_TOOL, the "Already on" early return) must do it
+        too — otherwise G1 E and the UIs' extrude guards keep checking the
+        PREVIOUS, typically cold, extruder while the manager already reports
+        the new tool. No-op when the right extruder is already active.
+        """
+        if tool is None or not tool.extruder_name:
+            return
+        extruder = self.printer.lookup_object(tool.extruder_name, None)
+        if extruder is None:
+            if gcmd is not None:
+                gcmd.respond_info(
+                    f"Vortac warning: extruder '{tool.extruder_name}' "
+                    f"for {tool.tool_id} not found, active extruder "
+                    f"unchanged")
+            return
+        toolhead = self.printer.lookup_object('toolhead')
+        if toolhead.get_extruder() is extruder:
+            return
+        self.printer.lookup_object('gcode').run_script_from_command(
+            f'ACTIVATE_EXTRUDER EXTRUDER={tool.extruder_name}')
+
     def _change_to(self, target, gcmd):
         if self.current_tool is target:
             tid = target.tool_id if target else 'None'
+            # Asking for the tool already on the carriage is the UIs' way
+            # of "switching" (Mainsail/KlipperScreen tool buttons send Tn)
+            # — no motion, but the active extruder must still follow.
+            self._sync_active_extruder(target, gcmd)
             if (self.qgl_state is not None
                     and self.qgl_state.in_dock_frame()):
                 # Dock frame we are sitting in with nothing to change — an
@@ -1610,16 +1644,7 @@ class VortacManager:
 
         # 6. Switch active extruder, apply target offsets, run activate gcode
         if target is not None:
-            if target.extruder_name:
-                if self.printer.lookup_object(
-                        target.extruder_name, None) is not None:
-                    gcode.run_script_from_command(
-                        f'ACTIVATE_EXTRUDER EXTRUDER={target.extruder_name}')
-                elif gcmd is not None:
-                    gcmd.respond_info(
-                        f"Vortac warning: extruder '{target.extruder_name}' "
-                        f"for {target.tool_id} not found, active extruder "
-                        f"unchanged")
+            self._sync_active_extruder(target, gcmd)
             gcode.run_script_from_command(
                 f'SET_GCODE_OFFSET '
                 f'X={target.gcode_offset_x + adjust[0]:.6f} '
@@ -2270,6 +2295,7 @@ class VortacManager:
         # Manually declared — nothing applied this tool's offsets, so the
         # next change must not subtract them from homing_origin.
         self.offsets_applied = False
+        self._sync_active_extruder(self.current_tool, gcmd)
         gcmd.respond_info(
             f"Set current Vortac tool to {self.current_tool.tool_id} "
             f"(no motion performed)")

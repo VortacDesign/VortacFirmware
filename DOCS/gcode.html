@@ -22,15 +22,15 @@ the overview table down.</p>
 <table id="cmd-table">
 <thead><tr><th>Command</th><th>Module</th><th>Purpose</th></tr></thead>
 <tbody>
-<tr><td class="cmd"><code>T0</code>, <code>T1</code>, …</td><td>manager</td><td>full tool change (registered dynamically from each available tool's <code>tool_index</code>)</td></tr>
+<tr><td class="cmd"><code>T0</code>, <code>T1</code>, …</td><td>manager</td><td>full tool change (registered dynamically from each available tool's <code>tool_index</code>); re-selecting the held tool moves nothing and just re-syncs the active extruder</td></tr>
 <tr><td class="cmd"><code>VORTAC_STATUS</code></td><td>manager</td><td>report current tool, dock map, dock power, status-LED mode, QGL state (tools listed as <code>&lt;name&gt; (T&lt;index&gt;)</code>)</td></tr>
-<tr><td class="cmd"><code>VORTAC_DETECT</code></td><td>manager</td><td>strobe the dock sense pull and update the dock map</td></tr>
+<tr><td class="cmd"><code>VORTAC_DETECT</code></td><td>manager</td><td>strobe the dock sense pull and update the dock map; a detected held tool also becomes Klipper's active extruder</td></tr>
 <tr><td class="cmd"><code>VORTAC_SELECT_DOCK DOCK=dockN</code></td><td>manager</td><td>detect/select a dock and its tool for calibration</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_CAL_STATUS</code></td><td>manager</td><td>report selected calibration dock/tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_CAL_SAVE</code></td><td>manager</td><td>save current hooked/engage XYZ for the selected dock/tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_LOAD TOOL=&lt;name&gt;|Tn</code></td><td>manager</td><td>fetch a tool from its dock</td></tr>
 <tr><td class="cmd"><code>VORTAC_UNLOAD</code></td><td>manager</td><td>park the held tool at its dock</td></tr>
-<tr><td class="cmd"><code>VORTAC_SET_CURRENT_TOOL TOOL=&lt;name&gt;|Tn</code></td><td>manager</td><td>set logical current tool without movement</td></tr>
+<tr><td class="cmd"><code>VORTAC_SET_CURRENT_TOOL TOOL=&lt;name&gt;|Tn</code></td><td>manager</td><td>set logical current tool without movement (also activates its extruder)</td></tr>
 <tr><td class="cmd"><code>VORTAC_SET_CURRENT_TOOL CLEAR=1</code></td><td>manager</td><td>clear logical current tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_SAVE_POS TOOL=&lt;name&gt;|Tn DOCK=dockN</code></td><td>manager</td><td>save current hooked/engage XYZ as tool's position for the dock (requires gantry flat)</td></tr>
 <tr><td class="cmd"><code>VORTAC_SENSE_STATUS</code></td><td>manager</td><td>raw cached dock/grab sense pin states per tool</td></tr>
