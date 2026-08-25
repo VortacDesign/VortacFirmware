@@ -103,9 +103,9 @@ gcode:
     {% set hotend = params.HOTEND|default(240)|float %}
     {% set tool = params.TOOL|default('T0') %}
 
-    VORTAC_UNLOAD                       # make sure the carriage is empty
     M140 S{bed}                         # bed up first
-    G28
+    G28                                 # homing works with a tool held (sensorless Z, no probe)
+    VORTAC_UNLOAD                       # make sure the carriage is empty before probing
     M190 S{bed}                         # soak while heated
     QUAD_GANTRY_LEVEL                   # leaves the gantry tilted — do NOT re-home Z after this
     BED_MESH_PROFILE LOAD=default
@@ -213,17 +213,22 @@ drop the <code>.example</code>, and include it <em>after</em> <code>tools.cfg</c
 [include vortac_configs/macros.cfg]</code></pre>
 <p>What it does, and why in that order:</p>
 <ul>
-  <li><code>_VORTAC_ENSURE_EMPTY</code> — parks whatever is held before anything probes.
-      If a tool is grabbed <em>and</em> the axes are not homed, it aborts with an explanation
-      instead of driving the nozzle into the bed: Z homing needs the probe, and probing is
-      refused while a tool is held.</li>
+  <li><code>G28</code>, but only when the axes are not homed yet. Homing with a tool on the
+      carriage is fine — Z homes sensorless against the top of the frame, the probe is not
+      involved — so a print can be started straight from a grabbed tool.</li>
+  <li><code>_VORTAC_ENSURE_EMPTY</code> — parks whatever is held before anything probes
+      (it homes first if PRINT_START has not, because parking is an absolute move to the
+      dock). Probing itself stays refused while a tool is held.</li>
   <li>Bed to temperature, nozzle only to <code>soak_temp</code> — hot enough not to sit cold,
       cold enough not to ooze during homing and levelling.</li>
-  <li><code>G28</code> → <code>QUAD_GANTRY_LEVEL</code> → <code>BED_MESH_*</code>, all with an
-      empty carriage. <strong>No <code>G28 Z</code> after QGL</strong> — that would reset the
-      gantry to flat and throw the levelling away.</li>
-  <li><code>VORTAC_DETECT</code>, then <code>T&lt;n&gt;</code>, then <code>M109</code>, then the
+  <li><code>QUAD_GANTRY_LEVEL</code> → <code>BED_MESH_*</code>, both with an empty carriage.
+      <strong>No <code>G28 Z</code> after QGL</strong> — that would reset the gantry to flat
+      and throw the levelling away.</li>
+  <li><code>VORTAC_DETECT</code> only if the dock map is not valid yet (<code>auto_detect</code>
+      already ran it at startup), then <code>T&lt;n&gt;</code>, then <code>M109</code>, then the
       prime line. Print temperature is only reached once the tool is actually on the carriage.</li>
+  <li>Both conditionals can be forced with <code>variable_always_home</code> /
+      <code>variable_always_detect</code> in <code>_VORTAC_PRINT_VARS</code>.</li>
   <li><code>PRINT_END</code> retracts, hops, kills the hotends, runs <code>VORTAC_UNLOAD</code>
       and parks the empty carriage. <code>CANCEL_PRINT</code> is wrapped to go through it too —
       otherwise a cancelled print leaves a tool on the carriage and the next

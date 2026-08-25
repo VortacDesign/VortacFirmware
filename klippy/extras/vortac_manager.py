@@ -27,7 +27,7 @@
 #   4b. retreat: drop straight down to retreat_z -- the mirror of the
 #       approach, which raises Z last. Below the frame-mounted docks the
 #       dock row is out of the plane of motion, so the diagonal the next G1
-#       takes cannot touch it. Unset by default; no X/Y retreat is needed
+#       takes cannot touch it. Defaults to 150 mm; no X/Y retreat is needed
 #       because the dock routine already ends dock_y_safe clear of every
 #       tool.
 #   5. VORTAC_GANTRY_TILT                  -- bed-flat geometry for printing
@@ -198,12 +198,13 @@ class VortacManager:
         # dock_y_safe clear of every tool, and dropping out of the dock plane
         # releases the carriage to go anywhere.
         #
-        # Unset by default = no Z move, the clearance height stands and the
-        # calling macro owns the first move. Nothing is derived from the bed
-        # size: the manager knows where the docks are, not where the print
-        # wants to begin. The drop uses dock_approach_feedrate, the same
-        # feedrate the approach raised Z with.
-        self.retreat_z = config.getfloat('retreat_z', default=None)
+        # Defaults to 150 mm: below the docks, above the tallest print most
+        # builds run. It is the one number in this module that IS invented,
+        # so it is worth checking against your own geometry — it must clear
+        # the docks on the way down and the work on the way across. The drop
+        # uses dock_approach_feedrate, the same feedrate the approach raised
+        # Z with.
+        self.retreat_z = config.getfloat('retreat_z', default=150.0)
 
         # --- hook/unhook verification ----------------------------------
         self.dock_check_zstep = config.getfloat(
@@ -1627,8 +1628,7 @@ class VortacManager:
         retreat — the dock routine already ends dock_y_safe clear of every
         tool.
 
-        Unset retreat_z = no-op: the carriage stays at the clearance height
-        and the calling macro owns the first move.
+        retreat_z defaults to 150 mm. Already being there is a no-op.
         """
         if self.retreat_z is None:
             return

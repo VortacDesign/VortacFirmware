@@ -242,7 +242,7 @@ defaults — they apply unless the config overrides them. Feedrates are mm/min
 <tr><td><code>dock_retries</code></td><td>3</td><td>1 … 10</td><td>re-seat + retry attempts before aborting</td></tr>
 <tr><td><code>dock_contact_settle</code></td><td>1.0</td><td>0 … 10</td><td>s to wait for <code>dock_sense</code> after the seat press</td></tr>
 <tr><td><code>sense_settle</code></td><td><code>dock_strobe_time</code> (0.10)</td><td>0.01 … 2</td><td>s pause after each checked step before the sense pins are read</td></tr>
-<tr><td><code>retreat_z</code></td><td>unset</td><td>—</td><td>Z to drop to after a dock operation, out of the dock plane; unset = no Z move</td></tr>
+<tr><td><code>retreat_z</code></td><td>150</td><td>—</td><td>Z to drop to after a dock operation, out of the dock plane</td></tr>
 </tbody>
 </table>
 </div>
@@ -298,10 +298,10 @@ can always be made here, the way Y-out always can on the way in.</p>
   ends <code>dock_y_safe</code> clear of every tool, and dropping out of the dock plane
   releases the carriage to go anywhere.</p>
 </div>
-<p><strong>Unset by default</strong>, and unset means Z is not moved: the carriage stays at the
-clearance height and the calling macro owns the first move. Nothing is derived from the bed
-size — the manager knows where the docks are, not where the print wants to begin. Pick a height
-below the docks and above the tallest print you run.</p>
+<p><strong>Defaults to 150 mm</strong>, so the retreat happens without configuring anything.
+This is the one number in the module that is invented rather than measured, so check it against
+your own geometry: it has to clear the docks on the way down, and the tallest print you run on
+the way across.</p>
 <p>The drop uses <code>dock_approach_feedrate</code>, the same feedrate the approach raised Z
 with, so both halves of the trip are symmetric in speed as well as in order. It runs while the
 G-code offsets are still zeroed and the bed mesh still suspended, so it is a pure kinematic move
