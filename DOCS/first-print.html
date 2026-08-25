@@ -94,6 +94,7 @@ VORTAC_DETECT             # dock map — runs automatically ~3 s after startup
 T0                        # manager: FLAT -> fetch -> TILT -> offsets -> activate
 # print</code></pre>
 
+<p>A ready-made pair of macros ships as <code>configs/vortac_configs/macros.example.cfg</code> — see <a href="#macros">3b — The PRINT_START / PRINT_END macros</a>. The skeleton below is the same sequence, stripped down, so you can see what the macro is actually doing.</p>
 <p>As a macro skeleton — adapt names and temperatures to your build; every
 <code>VORTAC_*</code> command here is real, the rest is plain Klipper:</p>
 <pre><code>[gcode_macro PRINT_START]
@@ -140,27 +141,102 @@ gcode:
   </div>
 </details>
 
-<h2 id="slicer">3 — Slicer setup</h2>
+<h2 id="slicer">3 — OrcaSlicer setup</h2>
+<p>Vortac is a <em>true toolchanger</em>: one extruder per tool, each with its own hotend.
+In OrcaSlicer that is a multi-extruder printer profile — not "single extruder multi-material",
+not a filament changer.</p>
+
+<h3 id="orca-printer">Printer settings</h3>
+<div class="filterbox" data-target="orca-printer-table"></div>
+<table id="orca-printer-table">
+  <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>G-code flavor</td><td><code>Klipper</code></td><td>Enables <code>SET_VELOCITY_LIMIT</code>, arc fitting and the Klipper-style placeholders.</td></tr>
+    <tr><td>Extruders</td><td>one per tool</td><td>Extruder 1 = <code>T0</code>, extruder 2 = <code>T1</code>, … Numbering is the <em>include order</em> in <code>tools.cfg</code>.</td></tr>
+    <tr><td>Single Extruder Multi Material</td><td><strong>off</strong></td><td>Each tool carries its own hotend; Orca must emit real tool changes, not filament swaps.</td></tr>
+    <tr><td>Extruder offset X/Y</td><td><code>0, 0</code> for every extruder</td><td>Offsets live in Klipper (<code>gcode_offset_x/y/z</code>). Two sets silently add up.</td></tr>
+    <tr><td>Bed size / origin</td><td>your machine</td><td>Docks sit outside the print area — do not shrink the bed to "make room".</td></tr>
+    <tr><td>Z hop when retracting</td><td>on, ~0.4 mm</td><td>Long travels to the dock row cross finished perimeters.</td></tr>
+    <tr><td>Retraction length</td><td>per tool</td><td>A tool that sits parked for a whole layer oozes far more than in a single-tool print.</td></tr>
+  </tbody>
+</table>
+
+<h3 id="orca-gcode">Machine G-code</h3>
+<p><strong>Machine start G-code</strong> — one line; everything else lives in the
+<code>PRINT_START</code> macro (<code>vortac_configs/macros.example.cfg</code>):</p>
+<pre><code>PRINT_START BED=[bed_temperature_initial_layer_single] HOTEND=[nozzle_temperature_initial_layer] TOOL={initial_extruder}</code></pre>
+<p><strong>Machine end G-code</strong>:</p>
+<pre><code>PRINT_END</code></pre>
+<p><strong>Tool change G-code</strong> — the plain tool command is the entire sequence.
+The manager owns park, fetch, gantry state and offsets:</p>
+<pre><code>T{next_extruder}</code></pre>
+<p><strong>Change filament G-code</strong> — leave empty. That field is for single-nozzle
+MMU machines and would fire on top of the real tool change.</p>
+<p><strong>Before layer change G-code</strong> (optional, gives Mainsail a live progress
+estimate):</p>
+<pre><code>;BEFORE_LAYER_CHANGE
+;[layer_z]
+SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}</code></pre>
+<p>and in <strong>Machine start G-code</strong>, after <code>PRINT_START</code>:
+<code>SET_PRINT_STATS_INFO TOTAL_LAYER={total_layer_count}</code>.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Do not let the slicer move the toolhead to a dock</span>
+  <p>Dock approach geometry (Y → X → Z, checked stepwise hook/unhook, dock power switching)
+  is owned by <code>vortac_manager</code>. Any park/pickup move added in the slicer runs
+  <em>outside</em> that logic and will crash into the dock.</p>
+</div>
+
+<h3 id="orca-temps">Temperatures and ooze</h3>
 <ul>
-  <li><strong>One extruder per tool</strong>, in the same order as the tool includes in
-      <code>tools.cfg</code> — tool numbering is include order, so the slicer's extruder 1 is
-      <code>T0</code>, extruder 2 is <code>T1</code>, and so on.</li>
-  <li><strong>Tool change G-code</strong>: the plain <code>T&lt;n&gt;</code> command is enough —
-      the manager owns the whole sequence. Do not add park/pickup moves in the slicer.</li>
-  <li><strong>Offsets stay in Klipper.</strong> Leave the slicer's extruder offsets at zero;
-      <code>gcode_offset_x/y/z</code> on the tool is the single source of truth. Two sets of
-      offsets silently add up.</li>
-  <li><strong>Per-tool temperatures and standby</strong>: give each tool its own filament
-      profile. A tool that waits in the dock does not need print temperature — but decide
-      deliberately how hot a parked tool stays; that is a property of your dock, not of the
-      firmware.</li>
-  <li><strong>Prime / purge after every change</strong>: a tool that sat idle oozes and needs a
-      few millimetres before it prints clean. Put the purge into the slicer's tool-change
-      G-code, or into that tool's <code>tool_activate_gcode</code> if your build has a fixed
-      purge position.</li>
-  <li><strong>Start with two tools and few changes.</strong> A tall two-colour cube with one
-      change per layer tells you more about repeatability than a complex model.</li>
+  <li><strong>Per-tool filament profiles.</strong> Orca emits <code>M104 T&lt;n&gt; S…</code>
+      ahead of a tool change; Klipper applies that to <code>extruder&lt;n&gt;</code> without
+      activating it. That is exactly what you want — the tool is already at temperature when
+      the grabber picks it up.</li>
+  <li><strong>Decide the standby temperature deliberately.</strong> A parked tool keeps its
+      board powered (an occupied dock is never de-energized), so it <em>can</em> hold heat.
+      Whether it <em>should</em> is a property of your dock, not of the firmware.</li>
+  <li><strong>Prime tower / wipe tower: on.</strong> With two hotends the tower is what
+      absorbs the ooze of the tool that was idle. Place it clear of the dock approach lane.</li>
+  <li><strong>Ooze prevention</strong> (temperature drop while parked) works, but costs a
+      heat-up wait on every change. Try the prime tower alone first.</li>
 </ul>
+
+<h3 id="orca-first">Start small</h3>
+<p>Two tools, a tall two-colour cube, one change per layer. That tells you more about
+repeatability than a complex model — and every change happens where you can watch it.</p>
+
+<h2 id="macros">3b — The PRINT_START / PRINT_END macros</h2>
+<p><code>configs/vortac_configs/macros.example.cfg</code> ships a ready pair. Copy it,
+drop the <code>.example</code>, and include it <em>after</em> <code>tools.cfg</code>:</p>
+<pre><code>[include vortac_configs/tools.cfg]
+[include vortac_configs/macros.cfg]</code></pre>
+<p>What it does, and why in that order:</p>
+<ul>
+  <li><code>_VORTAC_ENSURE_EMPTY</code> — parks whatever is held before anything probes.
+      If a tool is grabbed <em>and</em> the axes are not homed, it aborts with an explanation
+      instead of driving the nozzle into the bed: Z homing needs the probe, and probing is
+      refused while a tool is held.</li>
+  <li>Bed to temperature, nozzle only to <code>soak_temp</code> — hot enough not to sit cold,
+      cold enough not to ooze during homing and levelling.</li>
+  <li><code>G28</code> → <code>QUAD_GANTRY_LEVEL</code> → <code>BED_MESH_*</code>, all with an
+      empty carriage. <strong>No <code>G28 Z</code> after QGL</strong> — that would reset the
+      gantry to flat and throw the levelling away.</li>
+  <li><code>VORTAC_DETECT</code>, then <code>T&lt;n&gt;</code>, then <code>M109</code>, then the
+      prime line. Print temperature is only reached once the tool is actually on the carriage.</li>
+  <li><code>PRINT_END</code> retracts, hops, kills the hotends, runs <code>VORTAC_UNLOAD</code>
+      and parks the empty carriage. <code>CANCEL_PRINT</code> is wrapped to go through it too —
+      otherwise a cancelled print leaves a tool on the carriage and the next
+      <code>PRINT_START</code> cannot probe.</li>
+</ul>
+<p>Everything tunable (soak, prime line, park position) sits in
+<code>[gcode_macro _VORTAC_PRINT_VARS]</code>. Edit the variables, not the macros.</p>
+<div class="callout tip">
+  <span class="callout-title">Check the PAUSE park position</span>
+  <p>Mainsail/Fluidd park in a corner on <code>PAUSE</code>, and that corner may be a dock.
+  The bundled <code>[gcode_macro _CLIENT_VARIABLE]</code> block sets a safe spot — adjust the
+  coordinates to your machine.</p>
+</div>
 
 <h2 id="watch">4 — What to watch during the first print</h2>
 <ul>
