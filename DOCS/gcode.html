@@ -33,6 +33,8 @@ the overview table down.</p>
 <tr><td class="cmd"><code>VORTAC_SET_CURRENT_TOOL TOOL=&lt;name&gt;|Tn</code></td><td>manager</td><td>set logical current tool without movement (also activates its extruder)</td></tr>
 <tr><td class="cmd"><code>VORTAC_SET_CURRENT_TOOL CLEAR=1</code></td><td>manager</td><td>clear logical current tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_SAVE_POS TOOL=&lt;name&gt;|Tn DOCK=dockN</code></td><td>manager</td><td>save current hooked/engage XYZ as tool's position for the dock (requires gantry flat)</td></tr>
+<tr><td class="cmd"><code>VORTAC_SET_TOOL_TEMP TOOL=&lt;name&gt;|Tn TEMP=&lt;c&gt;</code></td><td>manager</td><td>record what a tool prints at, without touching its heater — what it returns to after standby. <code>TEMP=0</code> forgets it. Used by <code>PRINT_START</code> to seed the slicer's per-tool temperatures</td></tr>
+<tr><td class="cmd"><code>VORTAC_PREHEAT [EXCEPT=&lt;n&gt;]</code></td><td>manager</td><td>put every tool on its standby temperature (print temp minus <code>standby_delta</code>), so a tool change need not heat one up from soak. <code>EXCEPT</code> leaves one tool index alone</td></tr>
 <tr><td class="cmd"><code>VORTAC_SENSE_STATUS</code></td><td>manager</td><td>raw cached dock/grab sense pin states per tool</td></tr>
 <tr><td class="cmd"><code>VORTAC_SENSE_MONITOR [DURATION=s]</code></td><td>manager</td><td>poll sense states live, report transitions</td></tr>
 <tr><td class="cmd"><code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=0..1</code></td><td>manager</td><td>manually set one dock's sense pull (debug)</td></tr>

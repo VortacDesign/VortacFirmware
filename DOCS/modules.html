@@ -130,7 +130,12 @@ chips before extras run.</p>
   <li><strong>Templates:</strong> <code>tool_activate_gcode</code> /
       <code>tool_deactivate_gcode</code> — run by the manager around the dock motion. Jinja
       context: <code>tool</code> (this VortacTool), <code>dock=None</code>,
-      <code>params</code>.</li>
+      <code>params</code>. <strong>Optional here.</strong> Absent, the manager's own templates
+      of the same name run instead (themselves optional). A tool spells one out only to deviate;
+      it then replaces the shared one for that tool (empty value = run nothing). Reported as
+      <code>has_activate_gcode</code> / <code>has_deactivate_gcode</code> in the tool's status.
+      Note these hooks carry no safety role — the temperature wait and the retract pairing are
+      the manager's, and cannot be switched off by leaving a hook empty.</li>
 </ul>
 
 <h2 id="vortac-manager">vortac_manager — [vortac_manager]</h2>
@@ -249,8 +254,16 @@ defaults — they apply unless the config overrides them. Feedrates are mm/min
 <p><code>dock_check_ystep × dock_check_steps</code> must stay within
 <code>dock_y_safe</code>, otherwise the checked backout would overshoot the
 safe line — that combination is rejected at startup.</p>
-<p>Per-tool tweaks belong in
-<code>tool_activate_gcode</code> / <code>tool_deactivate_gcode</code>. Saved dock positions are
+<p>Behaviour that is the same for every tool — retract on park, standby temperature,
+wait-and-prime on pickup — belongs in <code>[vortac_manager]</code>'s own
+<code>tool_activate_gcode</code> / <code>tool_deactivate_gcode</code>, which run for every tool
+and default to <strong>empty</strong> — they are extension points for a purge bucket, a nozzle
+wipe or an LED. The retract, the standby temperature and the wait for the arriving tool are the
+module's own doing (<code>_park_temperature_and_retract</code> /
+<code>_pickup_temperature_and_prime</code>), tuned with typed options
+(<code>standby_delta</code>, <code>park_retract</code>, …) rather than gcode, because they are
+identical on every machine and a print depends on them. A <code>[vortac_tool]</code> section overrides them only where it genuinely
+deviates. <code>VORTAC_STATUS</code> reports which of the two is in effect. Saved dock positions are
 the hooked/engage position; load uses saved Z then lifts to
 Z&nbsp;+&nbsp;<code>dock_z_clearance</code>, and unload approaches at
 Z&nbsp;+&nbsp;<code>dock_z_clearance</code> before dropping to saved Z.</p>
@@ -327,7 +340,7 @@ a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
       all leave the grabber wherever it stood, and an engaged or half-turned key rams the tool on
       the Y slide-in. Arrival is guaranteed by the grabber itself: <code>engage()</code> and
       <code>disengage()</code> raise when the closed loop does not land within
-      <code>move_tol</code> (<a href="#grabber">vortac_grabber</a>), so a stalled stepper or a bad
+      <code>move_tol</code> (<a href="#vortac-grabber">vortac_grabber</a>), so a stalled stepper or a bad
       angle reading aborts the change before any XY motion instead of travelling into the dock.
       It can never drop a tool: the fetch path already refuses while any tool reads grabbed, and
       the disengage re-checks that.</li>

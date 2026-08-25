@@ -138,12 +138,22 @@ class VortacTool:
         # Per-dock hooked/engage positions: params_<dock>_x|y|z
         self.dock_positions = _parse_dock_positions(config)
 
-        # Activate/deactivate gcode templates
+        # Activate/deactivate gcode templates. Left as None when the option
+        # is absent -- vortac_manager then falls back to its OWN
+        # tool_activate_gcode/tool_deactivate_gcode, which is where the
+        # shared behaviour (retract, standby temperature, prime) belongs.
+        # A tool only spells one out to DEVIATE from the shared default; an
+        # empty value ("tool_activate_gcode:") is a deliberate "run nothing
+        # for this tool" and is honoured as such.
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
-        self.tool_activate_gcode = gcode_macro.load_template(
-            config, 'tool_activate_gcode', '')
-        self.tool_deactivate_gcode = gcode_macro.load_template(
-            config, 'tool_deactivate_gcode', '')
+        self.tool_activate_gcode = None
+        self.tool_deactivate_gcode = None
+        if config.get('tool_activate_gcode', None) is not None:
+            self.tool_activate_gcode = gcode_macro.load_template(
+                config, 'tool_activate_gcode', '')
+        if config.get('tool_deactivate_gcode', None) is not None:
+            self.tool_deactivate_gcode = gcode_macro.load_template(
+                config, 'tool_deactivate_gcode', '')
 
         if self.available and self.dock_sense_pin and self.grab_sense_pin:
             buttons = self.printer.load_object(config, 'buttons')
@@ -211,6 +221,9 @@ class VortacTool:
             'gcode_offset_x': self.gcode_offset_x,
             'gcode_offset_y': self.gcode_offset_y,
             'gcode_offset_z': self.gcode_offset_z,
+            # Whether this tool overrides the manager's shared hooks
+            'has_activate_gcode': self.tool_activate_gcode is not None,
+            'has_deactivate_gcode': self.tool_deactivate_gcode is not None,
             'dock_positions': self.dock_positions,
             'dock_sense_state': self.dock_sense_state,
             'grab_sense_state': self.grab_sense_state,

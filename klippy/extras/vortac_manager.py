@@ -130,6 +130,7 @@ import re
 # dock_retries, dock_contact_settle, sense_settle.
 
 
+
 class VortacManager:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -310,10 +311,80 @@ class VortacManager:
 
         # gcode_macro is needed by [vortac_tool Tn]'s activate/deactivate
         # templates; load it eagerly so the order doesn't matter.
-        self.printer.load_object(config, 'gcode_macro')
+        gcode_macro = self.printer.load_object(config, 'gcode_macro')
+
+        # Shared tool-change hooks. These run for EVERY tool, which is where
+        # the behaviour that is the same everywhere belongs -- retract on
+        # park, standby temperature, wait-and-prime on pickup. Repeating an
+        # identical block in every [vortac_tool] would be duplication with
+        # nothing to gain, and the templates get the arriving/leaving tool
+        # handed to them anyway ({tool.extruder_name}, {tool.tool_index}),
+        # so one text covers all tools.
+        #
+        # A [vortac_tool] section that spells out its own
+        # tool_activate_gcode/tool_deactivate_gcode replaces the shared one
+        # for that tool -- deviation is per-tool, the rule is not.
+        # Optional, default empty: these are EXTENSION POINTS for whatever
+        # is specific to a build -- a purge bucket, a nozzle wipe, an LED.
+        # The retract and the temperature handling do NOT live here; they
+        # are the module's job (see _park_temperature_and_retract /
+        # _pickup_temperature_and_prime) because they are identical on every
+        # machine and because a print must not depend on remembering to
+        # configure them. A [vortac_tool] section may override either hook
+        # for one tool.
+        self.tool_activate_gcode = None
+        self.tool_deactivate_gcode = None
+        if config.get('tool_activate_gcode', None) is not None:
+            self.tool_activate_gcode = gcode_macro.load_template(
+                config, 'tool_activate_gcode', '')
+        if config.get('tool_deactivate_gcode', None) is not None:
+            self.tool_deactivate_gcode = gcode_macro.load_template(
+                config, 'tool_deactivate_gcode', '')
+
+        # --- tool-change temperature and retract handling -------------------
+        # A parked tool keeps its board powered, so it holds whatever target
+        # it had and drips into its dock for the whole print. standby_delta
+        # drops it on park; the pickup puts it back and WAITS before motion
+        # is handed on. That wait is the whole point: without it the first
+        # extrusion after a change hits a cold nozzle.
+        #
+        # The manager cannot preheat the NEXT tool -- when it parks one it
+        # does not yet know which is coming -- so the drop costs heat-up time
+        # on every change. standby_delta: 0 disables the drop; the wait stays.
+        self.standby_delta = config.getfloat(
+            'standby_delta', default=50.0, minval=0.0)
+        self.standby_min = config.getfloat(
+            'standby_min', default=150.0, minval=0.0)
+        # Targets at or below this are the machine idling (soak during
+        # PRINT_START, cooldown at PRINT_END), never a print temperature to
+        # come back to. Deliberately NOT the macros' soak_temp: this one
+        # bounds a safety decision, that one is a comfort setting.
+        self.print_temp_min = config.getfloat(
+            'print_temp_min', default=150.0, minval=0.0)
+        # On top of the slicer's own tool-change retract, which happens
+        # before T<n> is even emitted -- everything after that (travel to the
+        # dock row, checked hook-in, fetch of the next tool) runs on the
+        # manager's clock and is where the long ooze happens. Given back on
+        # pickup, plus pickup_prime_extra to refill the melt zone.
+        # Feedrates are mm/min, like every other feedrate in this module.
+        self.park_retract = config.getfloat(
+            'park_retract', default=1.5, minval=0.0)
+        self.park_retract_speed = config.getfloat(
+            'park_retract_speed', default=2400.0, above=0.0)
+        self.pickup_prime_extra = config.getfloat(
+            'pickup_prime_extra', default=0.4, minval=0.0)
+        self.prime_speed = config.getfloat(
+            'prime_speed', default=300.0, above=0.0)
 
         # State (populated at klippy:connect)
         self.tools = {}             # tool_id -> VortacTool
+        # tool_id -> {'print_temp': float, 'retracted': bool}
+        # print_temp is the target to come back to after standby; retracted
+        # records that park_retract was actually pulled, so the pickup gives
+        # back exactly what was taken and never primes a tool that was not
+        # retracted (which would blob at the start of a print). Keyed by tool
+        # NAME, not by tool_index -- the index is include-order based.
+        self.tool_temps = {}
         self.current_tool = None    # VortacTool or None
         # True only while current_tool's configured gcode offsets are known
         # to be active in homing_origin (set in step 6, cleared when step 2b
@@ -404,6 +475,12 @@ class VortacManager:
         gcode.register_command(
             'VORTAC_DOCK_SAVE_POS', self.cmd_VORTAC_DOCK_SAVE_POS,
             desc="Save current hooked/engage XYZ as TOOL's DOCK position")
+        gcode.register_command(
+            'VORTAC_SET_TOOL_TEMP', self.cmd_VORTAC_SET_TOOL_TEMP,
+            desc="Record TOOL's print temperature (TEMP=0 forgets it)")
+        gcode.register_command(
+            'VORTAC_PREHEAT', self.cmd_VORTAC_PREHEAT,
+            desc="Put every tool (except EXCEPT=<n>) on its standby temp")
 
         self.printer.register_event_handler(
             'klippy:connect', self._handle_connect)
@@ -1467,8 +1544,12 @@ class VortacManager:
 
         # 1. Deactivate current tool
         if self.current_tool is not None:
-            self._render(self.current_tool.tool_deactivate_gcode,
+            # Hook first, module second: a wipe or purge in the hook needs
+            # the nozzle still hot and still primed, which is exactly what
+            # _park_temperature_and_retract takes away.
+            self._render(self._hook(self.current_tool, 'deactivate'),
                          tool=self.current_tool, dock=None, gcmd=gcmd)
+            self._park_temperature_and_retract(self.current_tool, gcmd)
 
         # 2. Frame-flat geometry for dock approach. With [vortac_qgl_state]
         # this is the whole coordinate-system switch: the toggle suspends the
@@ -1653,7 +1734,11 @@ class VortacManager:
             self.offsets_applied = True
             # Back in homing_origin — the debt is settled.
             self.pending_offset_adjust = (0.0, 0.0, 0.0)
-            self._render(target.tool_activate_gcode,
+            # Module first, hook second: temperature is restored and the
+            # retract given back before anything user-defined runs, so a
+            # purge in the hook meets a hot, primed nozzle.
+            self._pickup_temperature_and_prime(target, gcmd)
+            self._render(self._hook(target, 'activate'),
                          tool=target, dock=None, gcmd=gcmd)
         else:
             gcode.run_script_from_command(
@@ -2221,6 +2306,163 @@ class VortacManager:
             f"Saved {tool.tool_id} @ {dock}: "
             f"X={x:.4f} Y={y:.4f} Z={z:.4f}.  Run SAVE_CONFIG to persist.")
 
+    # --------------------------------------------------------------------
+    # Tool-change temperature / retract handling
+    #
+    # Identical on every machine and load-bearing for a print, so it lives
+    # here rather than in a macro the user has to remember to wire up.
+    # --------------------------------------------------------------------
+
+    def _temp_state(self, tool):
+        return self.tool_temps.setdefault(
+            tool.tool_id, {'print_temp': 0.0, 'retracted': False})
+
+    def _extruder_status(self, tool):
+        if tool is None or not tool.extruder_name:
+            return None
+        obj = self.printer.lookup_object(tool.extruder_name, None)
+        if obj is None:
+            return None
+        return obj.get_status(self.printer.get_reactor().monotonic())
+
+    def _heater_of(self, tool):
+        pheaters = self.printer.lookup_object('heaters', None)
+        if pheaters is None or tool is None or not tool.extruder_name:
+            return None
+        try:
+            return pheaters.lookup_heater(tool.extruder_name)
+        except Exception:
+            return None
+
+    def _set_tool_temperature(self, tool, temp, wait):
+        """Set (and optionally wait for) a tool's hotend target.
+
+        Goes through the heaters object rather than emitting M104/M109 so it
+        reaches the named heater regardless of which extruder is active.
+        wait=True is M109 semantics: it returns when the heater has settled.
+        """
+        heater = self._heater_of(tool)
+        if heater is None:
+            return False
+        pheaters = self.printer.lookup_object('heaters')
+        pheaters.set_temperature(heater, temp, wait)
+        return True
+
+    def _extrude(self, dist, speed):
+        """Relative E move that leaves the gcode state as it found it.
+
+        Goes to whatever extruder is active, which is exactly right at both
+        call sites: on park the leaving tool is still active, on pickup
+        _sync_active_extruder has already switched to the arriving one.
+        """
+        self.printer.lookup_object('gcode').run_script_from_command(
+            "SAVE_GCODE_STATE NAME=_vortac_tool_e\n"
+            "M83\n"
+            f"G1 E{dist:.5f} F{speed:.0f}\n"
+            "RESTORE_GCODE_STATE NAME=_vortac_tool_e MOVE=0")
+
+    def _is_printing(self):
+        ps = self.printer.lookup_object('print_stats', None)
+        if ps is None:
+            return False
+        eventtime = self.printer.get_reactor().monotonic()
+        return ps.get_status(eventtime).get('state') == 'printing'
+
+    def _park_temperature_and_retract(self, tool, gcmd):
+        """Runs as the tool leaves: extra retract, memorise the print
+        temperature, drop to standby. Called AFTER tool_deactivate_gcode so
+        a user wipe/purge still meets a hot, primed nozzle."""
+        status = self._extruder_status(tool)
+        if status is None:
+            return
+        st = self._temp_state(tool)
+        # Retract only if the nozzle is actually molten. The carriage is also
+        # emptied during PRINT_START, with every nozzle at soak temperature,
+        # and a G1 E there would abort the print start.
+        if self.park_retract > 0.0 and status.get('can_extrude'):
+            self._extrude(-self.park_retract, self.park_retract_speed)
+            st['retracted'] = True
+        target = float(status.get('target') or 0.0)
+        if target <= self.print_temp_min:
+            # Machine idling, not a print temperature -- keep whatever we
+            # remembered from the last real one.
+            return
+        st['print_temp'] = target
+        standby = max(target - self.standby_delta, self.standby_min)
+        if standby >= target:
+            return
+        if self._set_tool_temperature(tool, standby, False):
+            gcmd.respond_info(
+                f"Vortac: {tool.tool_id} parked at {standby:.0f}C standby "
+                f"(prints at {target:.0f}C)")
+
+    def _pickup_temperature_and_prime(self, tool, gcmd):
+        """Runs as the tool arrives: back to print temperature, WAIT, undo
+        the park retract. Called BEFORE tool_activate_gcode so a purge in
+        that hook meets a hot, primed nozzle."""
+        status = self._extruder_status(tool)
+        if status is None:
+            return
+        st = self._temp_state(tool)
+        live = float(status.get('target') or 0.0)
+        want = float(st.get('print_temp') or 0.0)
+
+        # Whose value wins? Normally the memorised one -- the tool is sitting
+        # at the standby target we put it at, and that is precisely the value
+        # that must not be restored. But a target can also have been changed
+        # on purpose while the tool was parked (temperature tower, per-object
+        # temperature, a slider pull in a UI). So: work out the standby value
+        # we would have left behind, and if the live target is something else
+        # entirely, the live one is the deliberate one and it wins.
+        # print_temp_min and below never counts as deliberate -- that is
+        # PRINT_START holding the nozzles down while it homes and probes.
+        expect = (max(want - self.standby_delta, self.standby_min)
+                  if want > 0.0 else 0.0)
+        changed = (want > 0.0 and live > self.print_temp_min
+                   and abs(live - expect) > 1.0 and abs(live - want) > 1.0)
+        target = live if changed else (want if want > 0.0 else live)
+
+        if target > 0.0:
+            if changed:
+                st['print_temp'] = target
+                gcmd.respond_info(
+                    f"Vortac: {tool.tool_id} came back to a changed target "
+                    f"({target:.0f}C instead of {want:.0f}C) -- keeping it")
+            self._set_tool_temperature(tool, target, True)
+        elif self._is_printing():
+            # Mid-print this is fatal, so fail here with the reason instead
+            # of letting the next extrusion die on min_extrude_temp.
+            raise self.printer.command_error(
+                f"Vortac: no hotend temperature known for {tool.tool_id} "
+                f"({tool.extruder_name}). Set it before the tool change, or "
+                f"seed it from PRINT_START with VORTAC_SET_TOOL_TEMP.")
+        else:
+            # Dry runs and dock calibration fetch tools cold. Normal.
+            gcmd.respond_info(
+                f"Vortac: {tool.tool_id} picked up cold -- no hotend "
+                f"temperature known (normal outside a print)")
+
+        if not st.get('retracted'):
+            return
+        status = self._extruder_status(tool)
+        if status is None or not status.get('can_extrude'):
+            return
+        give_back = self.park_retract + self.pickup_prime_extra
+        if give_back > 0.0:
+            self._extrude(give_back, self.prime_speed)
+        st['retracted'] = False
+
+    def _hook(self, tool, which):
+        """Pick the activate/deactivate template for `tool`.
+
+        The tool's own template wins when it has one; otherwise the shared
+        one from [vortac_manager]. Returns None when neither is configured,
+        which _render treats as "nothing to run".
+        """
+        attr = f'tool_{which}_gcode'
+        own = getattr(tool, attr, None) if tool is not None else None
+        return own if own is not None else getattr(self, attr, None)
+
     def _render(self, template, tool, dock, gcmd):
         if template is None:
             return
@@ -2266,7 +2508,89 @@ class VortacManager:
             f"  Dock power   : {power_line}\n"
             f"  Status LED   : {self.argb_status_mode}\n"
             f"  Cal selected : {cal_dock} / {cal_tool}\n"
-            f"  QGL state    : {qgl}")
+            f"  QGL state    : {qgl}\n"
+            f"  Tool temps   : {self._temp_line()}\n"
+            f"  Change hooks : {self._hook_line()}")
+
+    def _temp_line(self):
+        """What each tool prints at, what it idles at when parked, and
+        whether it currently owes a prime."""
+        if not self.tools:
+            return '(no tools)'
+        if self.standby_delta <= 0.0:
+            mode = 'standby off'
+        else:
+            mode = f"-{self.standby_delta:.0f}K, floor {self.standby_min:.0f}C"
+        parts = []
+        for tid, tool in sorted(self.tools.items()):
+            st = self.tool_temps.get(tid) or {}
+            want = float(st.get('print_temp') or 0.0)
+            if want <= 0.0:
+                parts.append(f"{tid}=unknown")
+                continue
+            txt = f"{tid}={want:.0f}C"
+            if st.get('retracted'):
+                txt += " (retracted)"
+            parts.append(txt)
+        return f"{', '.join(parts)}  [{mode}]"
+
+    def _hook_line(self):
+        """One-line summary of which activate/deactivate hooks are live —
+        the answer to "are my park/pick macros actually wired up?"."""
+        parts = []
+        for which in ('deactivate', 'activate'):
+            shared = getattr(self, f'tool_{which}_gcode', None) is not None
+            own = sorted(tid for tid, tl in self.tools.items()
+                         if getattr(tl, f'tool_{which}_gcode', None) is not None)
+            if shared:
+                state = 'set'
+                if own:
+                    state += f" (+own: {', '.join(own)})"
+            elif own:
+                state = f"own only: {', '.join(own)}"
+            else:
+                state = 'NONE'
+            parts.append(f"{which}={state}")
+        return '  '.join(parts)
+
+    def cmd_VORTAC_SET_TOOL_TEMP(self, gcmd):
+        """Record what a tool prints at, without touching its heater.
+
+        This is what PRINT_START uses to seed the temperatures the slicer
+        knows and the printer does not yet: a tool that has never been parked
+        has nothing memorised, so the first pickup of a print would have no
+        target to restore. TEMP=0 forgets a tool's value again.
+        """
+        tool = self._get_tool(gcmd.get('TOOL'), gcmd)
+        temp = gcmd.get_float('TEMP', minval=0.0)
+        st = self._temp_state(tool)
+        st['print_temp'] = temp
+        if temp <= 0.0:
+            gcmd.respond_info(f"Vortac: {tool.tool_id} print temperature "
+                              f"forgotten")
+            return
+        gcmd.respond_info(
+            f"Vortac: {tool.tool_id} prints at {temp:.0f}C "
+            f"(standby {max(temp - self.standby_delta, self.standby_min):.0f}C)")
+
+    def cmd_VORTAC_PREHEAT(self, gcmd):
+        """Put every tool on its standby temperature, so a tool change does
+        not have to heat one all the way up from soak. EXCEPT=<index> leaves
+        one alone -- normally the tool the print starts with, which
+        PRINT_START brings to full temperature itself."""
+        skip = gcmd.get_int('EXCEPT', None)
+        done = []
+        for tid, tool in sorted(self.tools.items()):
+            if skip is not None and tool.tool_index == skip:
+                continue
+            want = float(self._temp_state(tool).get('print_temp') or 0.0)
+            if want <= 0.0:
+                continue
+            standby = max(want - self.standby_delta, self.standby_min)
+            if self._set_tool_temperature(tool, standby, False):
+                done.append(f"{tid}={standby:.0f}C")
+        gcmd.respond_info("Vortac preheat: "
+                          + (', '.join(done) if done else "nothing to do"))
 
     def cmd_VORTAC_LOAD(self, gcmd):
         target = self._get_tool(gcmd.get('TOOL'), gcmd)
@@ -2550,6 +2874,10 @@ class VortacManager:
             'calibration_tool': (self.calibration_tool.tool_id
                                  if self.calibration_tool else None),
             'qgl_state': self.qgl_state.state if self.qgl_state else None,
+            'tool_temps': {tid: dict(st)
+                           for tid, st in self.tool_temps.items()},
+            'standby_delta': self.standby_delta,
+            'standby_min': self.standby_min,
         }
 
 

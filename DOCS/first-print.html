@@ -210,6 +210,21 @@ SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}</code></pre>
 <p>and in <strong>Machine start G-code</strong>, after <code>PRINT_START</code>:
 <code>SET_PRINT_STATS_INFO TOTAL_LAYER={total_layer_count}</code>.</p>
 
+<div class="callout danger">
+  <span class="callout-title">Exactly one <code>PRINT_START</code> — a second one wrecks the offsets</span>
+  <p>A duplicate line in the machine start G-code (the old one left in place above the new one)
+  is easy to end up with and used to end in the bed. The second <code>PRINT_START</code> zeroes
+  the gcode offset while the tool fetched by the first one is still on the carriage. The manager
+  reads the live offset at the start of every tool change and treats whatever exceeds the held
+  tool's <em>configured</em> offset as deliberate babystepping to carry across the change — so a
+  zeroed offset reads as "the user babystepped by minus the whole tool offset". It carries that
+  faithfully through the park and the next pickup, where it cancels the real offset out. The
+  nozzle then sits one full tool offset too low.</p>
+  <p>Fixed on both sides: <code>PRINT_START</code> now zeroes the offset only <em>after</em>
+  <code>_VORTAC_ENSURE_EMPTY</code>, and it aborts with a clear message if it is called twice for
+  one print. Still: check the sliced file, <code>PRINT_START</code> must appear exactly once.</p>
+</div>
+
 <div class="callout warn">
   <span class="callout-title">Do not let the slicer move the toolhead to a dock</span>
   <p>Dock approach geometry (Y → X → Z, checked stepwise hook/unhook, dock power switching)
@@ -247,23 +262,23 @@ it is worth being precise about who heats what.</p>
 </div>
 <ul>
   <li><strong><code>TEMPS=</code> in the start G-code</strong> (see above). <code>PRINT_START</code>
-      stores one print temperature per tool, keeps every nozzle at <code>soak_temp</code> while
-      it homes, levels and meshes, and brings the idle tools to standby afterwards. This is what
-      makes the first change fast instead of a cold start.</li>
-  <li><strong>The park/pick hooks</strong> — <code>_VORTAC_TOOL_PARK</code> /
-      <code>_VORTAC_TOOL_PICK</code>, wired into each tool via
-      <a href="configuration.html">include_with overrides</a>.
-      <code>_VORTAC_TOOL_PICK</code> <em>always</em> waits for the arriving tool to reach
-      temperature before anything is extruded, so a cold nozzle is structurally impossible
-      regardless of what the slicer emitted. If no temperature is known at all it aborts with
-      that reason instead of a cryptic extrusion error.</li>
+      hands one print temperature per tool to the manager with
+      <code>VORTAC_SET_TOOL_TEMP</code>, keeps every nozzle at <code>soak_temp</code> while it
+      homes, levels and meshes, and runs <code>VORTAC_PREHEAT</code> afterwards to put the idle
+      tools on standby. This is what makes the first change fast instead of a cold start.</li>
+  <li><strong>The manager's own pickup step</strong> (see
+      <a href="#tool-hooks">Retract, standby temperature and the wait</a>). It <em>always</em>
+      waits for the arriving tool to reach temperature before anything is extruded, so a cold
+      nozzle is structurally impossible regardless of what the slicer emitted — and there is
+      nothing to configure or forget. If no temperature is known at all it aborts with that
+      reason instead of a cryptic extrusion error.</li>
 </ul>
 
 <h3 id="orca-standby">Standby temperature</h3>
 <p>A parked tool keeps its board powered — an occupied dock is never de-energized — so it holds
 whatever target it had. At ABS temperatures that means it drips into its dock for the whole
-print. <code>_VORTAC_TOOL_PARK</code> drops the nozzle by <code>standby_delta</code> kelvin the
-moment the tool is parked and <code>_VORTAC_TOOL_PICK</code> brings it back and waits.</p>
+print. The manager drops the nozzle by <code>standby_delta</code> kelvin the moment the tool is
+parked and brings it back — with a wait — on pickup.</p>
 <p>The price is heat-up time on every change: the manager cannot preheat the next tool, because
 when it parks one it does not yet know which one is coming. 40–60 K is the useful range — enough
 to stop the dripping, quick enough to come back. <code>standby_delta: 0</code> turns the drop off
@@ -278,14 +293,15 @@ overwriting them:</p>
 <ul>
   <li><strong>Changed while the tool is printing</strong> (temperature tower, per-object
       temperature, a slider pull in Mainsail — all of which hit the <em>active</em> extruder):
-      <code>_VORTAC_TOOL_PARK</code> reads the live target when the tool is parked and memorises
-      <em>that</em>. The new value is what comes back on the next pickup.</li>
-  <li><strong>Changed while the tool is parked:</strong> <code>_VORTAC_TOOL_PICK</code> works out
-      the standby value it would have left behind. If the live target is something else, that is
-      a deliberate change — it wins, it is kept, and the console says so.</li>
-  <li><strong>Below <code>soak_temp</code> never counts as deliberate.</strong> That is
-      <code>PRINT_START</code> holding the nozzles down while it homes, levels and meshes;
-      coming back up from it is exactly what the pick hook is for.</li>
+      the manager reads the live target when the tool is parked and memorises <em>that</em>.
+      The new value is what comes back on the next pickup.</li>
+  <li><strong>Changed while the tool is parked:</strong> on pickup the manager works out the
+      standby value it would have left behind. If the live target is something else, that is a
+      deliberate change — it wins, it is kept, and the console says so.</li>
+  <li><strong>Below <code>print_temp_min</code> never counts as deliberate.</strong> That is
+      <code>PRINT_START</code> holding the nozzles at <code>soak_temp</code> while it homes,
+      levels and meshes; coming back up from it is exactly what the pickup step is for. Keep
+      <code>soak_temp</code> at or below <code>print_temp_min</code>.</li>
 </ul>
 <div class="callout tip">
   <span class="callout-title">Temperature towers</span>
@@ -343,35 +359,57 @@ drop the <code>.example</code>, and include it <em>after</em> <code>tools.cfg</c
 <p>Everything tunable (soak, standby delta, tool-change retract, prime line, park position)
 sits in <code>[gcode_macro _VORTAC_PRINT_VARS]</code>. Edit the variables, not the macros.</p>
 
-<h3 id="tool-hooks">The park / pick hooks</h3>
-<p>The same file ships the two per-tool hooks. They are not wired up automatically — add these
-two lines to the <code>overrides:</code> block of every tool file:</p>
-<pre><code>overrides:
-  vortac_tool TN.tool_deactivate_gcode: _VORTAC_TOOL_PARK EXTRUDER={tool.extruder_name} IDX={tool.tool_index}
-  vortac_tool TN.tool_activate_gcode: _VORTAC_TOOL_PICK EXTRUDER={tool.extruder_name} IDX={tool.tool_index}</code></pre>
-<p><code>overrides</code> parses one line per entry, which is why the logic lives in a macro
-rather than inline. What runs when, and why it has to be that way:</p>
+<h3 id="tool-hooks">Retract, standby temperature and the wait</h3>
+<p><strong>Nothing to configure.</strong> This is not a macro you have to wire up — it is
+<code>vortac_manager</code>'s own behaviour, because it is identical on every machine and a print
+depends on it. On every tool change:</p>
 <div class="filterbox" data-target="hook-table"></div>
 <table id="hook-table">
-  <thead><tr><th>Hook</th><th>Runs</th><th>State at that moment</th><th>Does</th></tr></thead>
+  <thead><tr><th>Step</th><th>When</th><th>State at that moment</th><th>What happens</th></tr></thead>
   <tbody>
-    <tr><td><code>_VORTAC_TOOL_PARK</code></td><td>first step of a change, before any motion</td>
+    <tr><td>park</td><td>first, before any motion</td>
         <td>old tool still the active extruder, its offsets still applied, mesh still active,
             toolhead still at the print position</td>
         <td>extra retract (only if the nozzle can actually extrude), memorise the print
             temperature, drop to standby</td></tr>
-    <tr><td><code>_VORTAC_TOOL_PICK</code></td><td>last step, after the fetch</td>
-        <td>new tool active (<code>ACTIVATE_EXTRUDER</code> done), its offsets applied, gantry
-            tilted back, mesh restored</td>
-        <td>restore the print temperature, <strong>wait</strong>, give the retract back plus
-            <code>extra_prime</code></td></tr>
+    <tr><td>pickup</td><td>last, after the fetch</td>
+        <td>new tool active (<code>ACTIVATE_EXTRUDER</code> done), offsets applied, gantry tilted
+            back, mesh restored</td>
+        <td>restore the print temperature, <strong>wait for it</strong>, give the retract back
+            plus <code>pickup_prime_extra</code></td></tr>
   </tbody>
 </table>
+<p>Tuned with plain config options on <code>[vortac_manager]</code> — all with working
+defaults, so an untouched config already does the right thing:</p>
+<pre><code>[vortac_manager]
+standby_delta:      50.0    # K below print temp while parked, 0 = off
+standby_min:       150.0
+print_temp_min:    150.0    # at/below this = machine idling, never memorised
+park_retract:        1.5    # mm, 0 = off
+park_retract_speed: 2400    # mm/min
+pickup_prime_extra:  0.4
+prime_speed:         300</code></pre>
+<p><code>VORTAC_STATUS</code> shows the state:</p>
+<pre><code>Tool temps   : miniGrey=270C, miniPink=265C  [-50K, floor 150C]
+Change hooks : deactivate=NONE  activate=NONE</code></pre>
+
+<h3 id="tool-hook-gcode">The optional gcode hooks</h3>
+<p><code>tool_activate_gcode</code> / <code>tool_deactivate_gcode</code> on
+<code>[vortac_manager]</code> are extension points for what is specific to <em>your</em> build —
+a purge bucket, a nozzle wipe, an LED. Both default to empty, and the retract and temperature
+handling run regardless, so leaving them empty is a complete setup.</p>
+<p>Ordering is chosen so a hook always meets a hot, primed nozzle: the deactivate hook runs
+<em>before</em> the module's retract, the activate hook <em>after</em> the module has restored
+temperature and primed. The template is handed the tool the change is about
+(<code>{tool.extruder_name}</code>, <code>{tool.tool_index}</code>,
+<code>{tool.display_name}</code>), so one text covers every tool; a
+<code>[vortac_tool]</code> section may override either hook for one tool.</p>
 <div class="callout tip">
   <span class="callout-title">Why the retract cannot live in the slicer</span>
-  <p><code>tool_deactivate_gcode</code> is the only place that reaches the <em>old</em> hotend
-  after the slicer has handed control over. One step later the gantry goes flat, the gcode
-  offset is zeroed and the carriage is on its way to the dock.</p>
+  <p>The slicer retracts before it emits <code>T&lt;n&gt;</code>. Everything after that — the
+  travel to the dock row, the stepwise hook-in, the fetch of the next tool — runs on the manager's
+  clock, and that is where the long ooze happens. Only <code>park_retract</code> covers that
+  window, and only the deactivate step reaches the <em>old</em> hotend at all.</p>
 </div>
 <div class="callout tip">
   <span class="callout-title">Check the PAUSE park position</span>
