@@ -57,10 +57,21 @@ command tables, see the <a href="gcode.html">G-code Reference</a>.</p>
 <tr><td><code>disengage_pos</code></td><td>0</td><td>true angle for <code>VORTAC_DISENGAGE</code> / <code>disengage()</code></td></tr>
 <tr><td><code>engage_mode</code></td><td>shortest</td><td>direction constraint for engage: <code>shortest</code>, <code>cw</code>, <code>ccw</code></td></tr>
 <tr><td><code>disengage_mode</code></td><td>shortest</td><td>direction constraint for disengage</td></tr>
+<tr><td><code>move_tol</code></td><td>2.0</td><td>° that counts as arrived for <code>engage()</code>/<code>disengage()</code> (and default <code>TOL</code> of <code>VORTAC_MOVE</code>); missing it raises</td></tr>
 <tr><td><code>lookup_table</code></td><td>(saved)</td><td>JSON LUT <code>[[true_deg, raw_deg], …]</code> written by <code>VORTAC_CALIBRATE</code></td></tr>
 <tr><td><code>zero_pos_offset</code></td><td>0.0</td><td>offset written by <code>VORTAC_SET_ZERO</code></td></tr>
 </tbody>
 </table>
+</div>
+<div class="callout tip">
+  <span class="callout-title">engage()/disengage() report success</span>
+  <p>Both return the measured final angle and <strong>raise</strong> when the closed loop did not
+  land within <code>move_tol</code> — the closed loop itself only ever <em>reported</em> a failed
+  convergence and returned. Verification therefore lives in one place instead of in every caller:
+  the manager calls <code>disengage()</code> before entering a dock and <code>engage()</code>
+  before lifting a tool, and a stalled stepper or bad angle reading stops the tool change right
+  there. <code>CHECK=0</code> on <code>VORTAC_ENGAGE</code>/<code>VORTAC_DISENGAGE</code>/<code>VORTAC_MOVE</code>
+  downgrades it to a report for manual work.</p>
 </div>
 
 <details class="fold">
@@ -275,6 +286,17 @@ in <code>handover</code> mode still happens with the carriage standing still.</p
 callbacks land, and logs
 a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
 <ul>
+  <li><strong>Disengage before every dock entry:</strong> a fetch drives the key to
+      <code>disengage_pos</code> <em>before</em> the approach starts. A successful park leaves the
+      key out, but nothing else does — an aborted tool change, a manual
+      <code>VORTAC_ENGAGE</code>/<code>VORTAC_MOVE</code>, a calibration run or a klippy restart
+      all leave the grabber wherever it stood, and an engaged or half-turned key rams the tool on
+      the Y slide-in. Arrival is guaranteed by the grabber itself: <code>engage()</code> and
+      <code>disengage()</code> raise when the closed loop does not land within
+      <code>move_tol</code> (<a href="#grabber">vortac_grabber</a>), so a stalled stepper or a bad
+      angle reading aborts the change before any XY motion instead of travelling into the dock.
+      It can never drop a tool: the fetch path already refuses while any tool reads grabbed, and
+      the disengage re-checks that.</li>
   <li><strong>Fetch (unhook):</strong> engage, then checked lift — <code>dock_sense</code> must
       STAY LOW (going HIGH mid-lift = tilt/bind → lower back, re-seat, retry) — then checked Y
       backout where <code>dock_sense</code> going HIGH is the clean release. <code>grab_sense</code>

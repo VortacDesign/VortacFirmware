@@ -28,6 +28,11 @@ class VortacGrabber:
 
         self.disengage_pos = config.getint('disengage_pos', default=0)
         self.engage_pos = config.getint('engage_pos', default=130)
+        # Angle tolerance that counts as "arrived" for engage()/disengage()
+        # (and the default TOL of VORTAC_MOVE). Missing it is a hard error,
+        # not a warning: a key that did not turn rams the tool at the dock.
+        self.move_tol = config.getfloat(
+            'move_tol', default=2.0, above=0.0, maxval=30.0)
         self.zero_pos_offset = config.getfloat('zero_pos_offset', default=0.0)
 
         # Direction constraint for engage/disengage moves. 'cw' means
@@ -73,15 +78,25 @@ class VortacGrabber:
     # gcmd is optional; when omitted, status messages go to klippy.log.
     # --------------------------------------------------------------------
 
-    def engage(self, angle=None, gcmd=None):
-        """Move grabber to engage_pos (or override `angle`). Returns final true angle."""
-        target = float(angle) if angle is not None else float(self.engage_pos)
-        return self._move_to(target, mode=self.engage_mode, gcmd=gcmd)
+    def engage(self, angle=None, gcmd=None, require=True):
+        """Move grabber to engage_pos (or override `angle`).
 
-    def disengage(self, gcmd=None):
-        """Move grabber to disengage_pos. Returns final true angle."""
+        Returns the final true angle. With require=True (default) a move
+        that does not land within move_tol raises command_error — callers
+        get success/failure directly instead of having to re-check the
+        returned angle. require=False downgrades that to a report and is
+        for manual/debug use only."""
+        target = float(angle) if angle is not None else float(self.engage_pos)
+        return self._move_to(target, mode=self.engage_mode, gcmd=gcmd,
+                             tol=self.move_tol, require=require,
+                             what='engage')
+
+    def disengage(self, gcmd=None, require=True):
+        """Move grabber to disengage_pos. See engage() for `require`."""
         return self._move_to(float(self.disengage_pos),
-                             mode=self.disengage_mode, gcmd=gcmd)
+                             mode=self.disengage_mode, gcmd=gcmd,
+                             tol=self.move_tol, require=require,
+                             what='disengage')
 
     def read_angle(self, gcmd=None):
         """Synchronous direct read; returns offset-applied true angle in [0, 360)."""
@@ -94,10 +109,12 @@ class VortacGrabber:
 
     def cmd_engage(self, gcmd):
         angle = gcmd.get_float('ANGLE', default=None)
-        return self.engage(angle=angle, gcmd=gcmd)
+        require = bool(gcmd.get_int('CHECK', 1, minval=0, maxval=1))
+        return self.engage(angle=angle, gcmd=gcmd, require=require)
 
     def cmd_disengage(self, gcmd):
-        return self.disengage(gcmd=gcmd)
+        require = bool(gcmd.get_int('CHECK', 1, minval=0, maxval=1))
+        return self.disengage(gcmd=gcmd, require=require)
 
     def cmd_vortac_set_zero(self, gcmd):
         raw = self.read_raw()
@@ -120,12 +137,13 @@ class VortacGrabber:
         kwargs = {
             'mode':      gcmd.get('MODE', default='shortest').lower(),
             'speed':     gcmd.get_float('SPEED', default=self.speed),
-            'tol':       gcmd.get_float('TOL', default=2.0),
+            'tol':       gcmd.get_float('TOL', default=self.move_tol),
             'backoff':   gcmd.get_float('BACKOFF', default=None),
             'guard_frac': gcmd.get_float('GUARD_FRAC', default=0.05),
             'max_iters': gcmd.get_int('MAX_ITERS', default=10),
             'n_reads':   gcmd.get_int('READS', default=2),
             'r_settle':  gcmd.get_float('READ_SETTLE', default=0.010),
+            'require':   bool(gcmd.get_int('CHECK', 1, minval=0, maxval=1)),
         }
         return self._move_to(target, gcmd=gcmd, **kwargs)
 
@@ -278,9 +296,10 @@ class VortacGrabber:
     # Closed-loop move engine (drives engage/disengage and VORTAC_MOVE)
     # --------------------------------------------------------------------
 
-    def _move_to(self, target_true, mode='shortest', speed=None, tol=2.0,
+    def _move_to(self, target_true, mode='shortest', speed=None, tol=None,
                  backoff=None, guard_frac=0.05, max_iters=10,
-                 n_reads=2, r_settle=0.010, gcmd=None):
+                 n_reads=2, r_settle=0.010, gcmd=None, require=True,
+                 what='move'):
         """
         Closed-loop absolute move. The angle sensor is absolute ground
         truth, so every pass commands the FULL remaining error in a single
@@ -296,6 +315,14 @@ class VortacGrabber:
         overshoot that still lands inside tol is accepted as reached.
         Large constrained moves thus take one long pass plus one short
         finishing pass.
+
+        Success/failure is explicit: reaching the target within `tol`
+        returns the measured angle, and with require=True (default) NOT
+        reaching it raises command_error instead of quietly returning the
+        angle it ended up at. Everything mechanical downstream of a grabber
+        move (entering a dock, letting go of a tool) depends on the key
+        actually being where it was told to go, so the caller must not have
+        to remember to re-check. `what` only names the move in that error.
         """
         def wrap180(a):
             return ((a + 180.0) % 360.0) - 180.0
@@ -342,7 +369,7 @@ class VortacGrabber:
         target_true = float(target_true)
         mode = (mode or 'shortest').lower()
         speed = float(speed) if speed is not None else float(self.speed)
-        tol = float(tol)
+        tol = float(tol) if tol is not None else float(self.move_tol)
         constrained = mode in ('cw', 'clockwise',
                                'ccw', 'counterclockwise', 'cclockwise')
         backoff = float(backoff) if backoff is not None else 0.5 * tol
@@ -381,9 +408,16 @@ class VortacGrabber:
                 moves += 1
             cur_true = read_true_quiet(n_reads, r_settle)
 
-        respond(f"Stopped after {max_iters} passes ({moves} moves) at "
-                f"{cur_true:.2f}° (target {target_true:.2f}°, err "
-                f"{wrap180(target_true - cur_true):.2f}°)")
+        err = wrap180(target_true - cur_true)
+        msg = (f"Stopped after {max_iters} passes ({moves} moves) at "
+               f"{cur_true:.2f}° (target {target_true:.2f}°, err "
+               f"{err:.2f}°, tol {tol})")
+        if require:
+            raise self.printer.command_error(
+                f"vortac_grabber: {what} failed — {msg}. Check the grabber "
+                f"stepper and the angle sensor; VORTAC_SIMPLE_READ shows "
+                f"the current angle.")
+        respond(msg)
         return cur_true
 
     # --------------------------------------------------------------------
