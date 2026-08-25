@@ -12,6 +12,7 @@
 
 /configs/printer.cfg
 /configs/vortac_configs/tools.cfg
+/configs/vortac_configs/macros.cfg
 /configs/vortac_configs/tools/*.cfg
 
 # ...but always keep the committed templates

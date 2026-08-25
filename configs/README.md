@@ -26,8 +26,10 @@ configs/
     ├── tools/
     │   └── tool0.example.cfg    template: static [mcu <name>] + PCB-template
     │                            include (real tools/*.cfg gitignored)
-    └── tools.example.cfg        template: per-tool includes + [vortac_manager]
-                                 (real tools.cfg gitignored)
+    ├── tools.example.cfg        template: per-tool includes + [vortac_manager]
+    │                            (real tools.cfg gitignored)
+    └── macros.example.cfg       template: PRINT_START / PRINT_END / CANCEL_PRINT
+                                 for OrcaSlicer (real macros.cfg gitignored)
 ```
 
 ## Boot order (`printer.cfg`)
