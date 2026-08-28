@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KlipperScreen — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>KlipperScreen</h1>
+<p class="subtitle">Installing the touchscreen UI and adding a custom menu to it.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Status</span>
+  <p>The custom <strong>vortac_docks panel is implemented</strong>:
+  <code>klipperscreen/panels/vortac_docks.py</code> in this repo, symlinked into
+  <code>~/KlipperScreen/panels/</code> by <code>install.sh</code> (skipped automatically on a Pi
+  without KlipperScreen). The repo's <code>KlipperScreen.conf</code> carries the matching
+  <code>[menu __main vortac]</code> entry. <code>main_menu.conf</code> remains a reference copy
+  of KlipperScreen's stock menu — do not deploy it.</p>
+</div>
+
+<h2 id="install">1 — Installing KlipperScreen</h2>
+<p>KlipperScreen is a separate project that talks to Moonraker, so it is installed and updated
+independently of this repo. On the Pi:</p>
+<pre><code>cd ~
+git clone https://github.com/KlipperScreen/KlipperScreen.git
+./KlipperScreen/scripts/KlipperScreen-install.sh</code></pre>
+<p>Let Moonraker manage updates by adding this to <code>moonraker.conf</code>:</p>
+<pre><code>[update_manager KlipperScreen]
+type: git_repo
+path: ~/KlipperScreen
+origin: https://github.com/KlipperScreen/KlipperScreen.git
+env: ~/.KlipperScreen-env/bin/python
+requirements: scripts/KlipperScreen-requirements.txt
+install_script: scripts/KlipperScreen-install.sh
+managed_services: KlipperScreen</code></pre>
+<p>Useful operational commands:</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Command</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>sudo systemctl restart KlipperScreen</code></td><td>reload after any config change — KlipperScreen does not hot-reload</td></tr>
+<tr><td><code>sudo systemctl status KlipperScreen</code></td><td>is it running?</td></tr>
+<tr><td><code>journalctl -u KlipperScreen -f</code></td><td>live log — first stop for a blank screen or a menu that won't appear</td></tr>
+<tr><td><code>~/printer_data/logs/KlipperScreen.log</code></td><td>KlipperScreen's own log, incl. config and Jinja parse errors</td></tr>
+</tbody>
+</table>
+</div>
+<div class="callout">
+  <span class="callout-title">Where the config lives</span>
+  <p>KlipperScreen reads <code>~/printer_data/config/KlipperScreen.conf</code>. That is the
+  <strong>only</strong> file you edit. Everything else — panels, the default menu, translations —
+  lives inside the KlipperScreen installation and is overwritten on update.</p>
+</div>
+
+<details class="fold">
+  <summary>Display, rotation and touch quirks</summary>
+  <div class="fold-body">
+    <p>Screen size, rotation and touch behaviour are display-driver territory, not Vortac
+    territory — follow the
+    <a href="https://klipperscreen.readthedocs.io/">KlipperScreen documentation</a> for your
+    panel. Two <code>[main]</code> settings worth knowing: <code>screen_blanking</code> (idle
+    blanking) and <code>show_cursor</code> (helpful over VNC during bring-up). The autosaved
+    <code>move_speed_xy</code>/<code>move_speed_z</code> in this repo's
+    <code>KlipperScreen.conf</code> come from the on-screen Settings panel — that is how
+    KlipperScreen writes UI settings back.</p>
+  </div>
+</details>
+
+<h2 id="deploy">2 — Deploying this repo's KlipperScreen config</h2>
+<p>Because <code>install.sh</code> does not touch these files, pick one of two approaches:</p>
+<pre><code># A) copy once, edit on the Pi
+cp ~/vortac/configs/klipper_screen_configs/KlipperScreen.conf ~/printer_data/config/
+
+# B) keep it tracked in git and symlink (edits stay in the repo)
+ln -sf ~/vortac/configs/klipper_screen_configs/KlipperScreen.conf \
+       ~/printer_data/config/KlipperScreen.conf
+
+sudo systemctl restart KlipperScreen</code></pre>
+<p>The <strong>panel</strong> itself needs no manual deployment: re-run
+<code>sudo ./install.sh</code> (or just <code>git pull</code> — the watcher re-runs it) and it
+symlinks every <code>klipperscreen/panels/*.py</code> into
+<code>~/KlipperScreen/panels/</code>. Then restart both services:</p>
+<pre><code>sudo systemctl restart klipper          # picks up the vortac_manager status export
+sudo systemctl restart KlipperScreen    # loads the panel + menu entry</code></pre>
+<p>The repo's <code>KlipperScreen.conf</code> already contains the menu entry that opens it:</p>
+<pre><code>[menu __main vortac]
+name: Vortac
+icon: extrude
+panel: vortac_docks
+enable: {{ 'vortac_manager' in printer.config_sections }}</code></pre>
+<p><strong>Getting back to the normal menu:</strong> panels opened from a menu get
+KlipperScreen's standard title bar with the back arrow — one tap returns to the main menu,
+nothing custom needed.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Do not deploy main_menu.conf</span>
+  <p>It is a reference copy of KlipperScreen's stock menu. Copying it into
+  <code>~/printer_data/config/</code> does nothing useful, and editing the original inside the
+  KlipperScreen installation is overwritten on the next update. Custom menus belong in
+  <code>KlipperScreen.conf</code>.</p>
+</div>
+
+<h2 id="menu-mechanics">3 — Adding a custom menu</h2>
+<p>Menu items are config sections in <code>KlipperScreen.conf</code> whose <em>name path</em>
+defines the tree:</p>
+<pre><code>[menu __main vortac]                 &lt;- entry in the main menu
+[menu __main vortac grabber]         &lt;- submenu inside it
+[menu __main vortac grabber engage]  &lt;- item inside that submenu</code></pre>
+<p>KlipperScreen loads its default menu first and your config on top: a <strong>new</strong> name
+path adds an entry, an <strong>existing</strong> one (see <code>main_menu.conf</code> for the
+stock paths) overrides the stock item.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>name</code></td><td>button label</td></tr>
+<tr><td><code>icon</code></td><td>icon name from KlipperScreen's image set (see <code>main_menu.conf</code> for known-good names: <code>move</code>, <code>refresh</code>, <code>settings</code>, <code>extrude</code>, <code>bed-level</code>, <code>console</code>, <code>complete</code>, <code>fine-tune</code>, <code>info</code>, …); an unknown name renders without an icon</td></tr>
+<tr><td><code>panel</code></td><td>opens a built-in panel (<code>move</code>, <code>bed_mesh</code>, <code>gcode_macros</code>, <code>console</code>, …)</td></tr>
+<tr><td><code>method</code> + <code>params</code></td><td>calls a Moonraker method — for G-code: <code>printer.gcode.script</code> with <code>params: {"script":"…"}</code></td></tr>
+<tr><td><code>confirm</code></td><td>confirmation dialog before running — use for anything that moves the machine or writes config</td></tr>
+<tr><td><code>enable</code></td><td>Jinja condition; e.g. <code>{{ 'vortac_manager' in printer.config_sections }}</code> hides the entry on a printer without the extras</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>A minimal working example — one Vortac submenu with two buttons:</p>
+<pre><code>[menu __main vortac]
+name: Vortac
+icon: extrude
+enable: {{ 'vortac_manager' in printer.config_sections }}
+
+[menu __main vortac unload]
+name: Park Tool
+icon: home
+method: printer.gcode.script
+params: {"script":"VORTAC_UNLOAD"}
+confirm: Park the held tool at its dock?
+
+[menu __main vortac detect]
+name: Detect Tools
+icon: refresh
+method: printer.gcode.script
+params: {"script":"VORTAC_DETECT"}</code></pre>
+<p>Restart KlipperScreen and the entry appears in the main menu.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Two limits of menu buttons</span>
+  <p><strong>Buttons cannot take parameters.</strong> Commands like
+  <code>VORTAC_SELECT_DOCK DOCK=…</code> need either a fixed value baked into the button's
+  <code>script</code>, or a thin <code>gcode_macro</code> wrapper per case (which also shows up in
+  the stock <em>Macros</em> panel with zero menu config).<br>
+  <strong>Buttons cannot display state.</strong> Most <code>VORTAC_*</code> commands answer with
+  console text — put a <code>panel: console</code> shortcut next to any status button so the
+  reply is readable. A live dock/tool display needs a custom panel, not a menu (see below).</p>
+</div>
+
+<details class="fold">
+  <summary>Menu changes don't show up?</summary>
+  <div class="fold-body">
+    <ul>
+      <li>KlipperScreen does not reload config on its own:
+          <code>sudo systemctl restart KlipperScreen</code>.</li>
+      <li>Edited the wrong file? Only <code>~/printer_data/config/KlipperScreen.conf</code>
+          counts — not <code>main_menu.conf</code>, not anything inside
+          <code>~/KlipperScreen/</code>.</li>
+      <li>A section that is present but invisible is usually an <code>enable:</code> condition
+          evaluating false — e.g. the extras are not loaded.</li>
+      <li><em>"Section headers have extra information after brackets"</em> — KlipperScreen's
+          validator also scans <strong>comment</strong> lines for <code>[…]</code> patterns.
+          A comment like <code># see [menu __main vortac]</code> breaks the whole config;
+          write section names in comments without brackets.</li>
+      <li>Parse and Jinja errors land in <code>~/printer_data/logs/KlipperScreen.log</code>.</li>
+    </ul>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Toolchanger gotchas on the stock panels</summary>
+  <div class="fold-body">
+    <ul>
+      <li><strong>Bed Mesh / Z Calibrate fail with "probing refused"</strong> — that is the
+          manager's <a href="modules.html#probe-guard">probe guard</a> doing its job while a tool
+          is held. Park the tool first, then probe.</li>
+      <li><strong>The temperature panel shows <code>extruder</code>, <code>extruder1</code>, …</strong> —
+          Klipper's multi-extruder naming is hardwired; namespaced hardware (fans, LEDs) shows the
+          display name. See <a href="configuration.html#pretty-names">pretty names</a>. (This
+          relies on include_with's <a href="modules.html#include-with">status mirror</a> —
+          without it, injected sections are invisible to the config snapshot and KlipperScreen
+          hides the Temperature/Extrude/Print menus entirely because
+          <code>printer.extruders.count</code> reads 0.)</li>
+      <li><strong>The Extrude panel's tool selector runs a REAL tool change</strong> — its
+          extruder buttons send <code>T&lt;n&gt;</code>, which vortac_manager registers as a
+          full dock swap with motion. Selecting the tool that is ALREADY on the carriage is
+          safe: the manager takes the no-motion path and only syncs the active extruder
+          (after a restart + <code>VORTAC_DETECT</code> that sync has already happened). To
+          switch only the logical extruder of a DIFFERENT, docked tool (e.g. to prime it),
+          use <code>ACTIVATE_EXTRUDER EXTRUDER=extruder1</code> in the console instead —
+          extruder object names, not tool names.</li>
+      <li><strong>Heating a docked tool works only while its dock is powered</strong> — with
+          <code>dock_power_mode: occupancy/handover</code> occupied docks stay energized, so
+          this is the normal case; a dock the manager de-energized (positively known empty)
+          has no tool to heat anyway. Check the bolt glyph on the Vortac panel.</li>
+      <li><strong>The Input Shaper button is missing</strong> — its <code>enable:</code> guard
+          checks for the <code>[input_shaper]</code> singleton, which the tool configs
+          <code>skip_sections:</code>. Declare it in <code>printer.cfg</code> if you want the
+          panel; background in
+          <a href="print-calibration.html#shaper">Print Calibration → input shaper</a>.</li>
+    </ul>
+  </div>
+</details>
+
+
+<h2 id="panel-preview">4 — Panel design proposal (preview)</h2>
+<p>This is a to-scale HTML mockup of the <code>vortac_docks</code> panel — implemented as a GTK panel
+with this layout in <code>klipperscreen/panels/vortac_docks.py</code>. It is drawn for a landscape 800×480
+touchscreen (the KlipperScreen default) and deliberately always dark, like the screen itself.
+Every element maps to data that <code>get_status</code> already exports.</p>
+
+<style>
+.ksmock { background:#0d1117; border:1px solid #2a3442; border-radius:14px;
+  max-width:760px; aspect-ratio:800/480; margin:0 0 1rem; padding:2.2%;
+  display:flex; flex-direction:column; gap:2.2%;
+  font-family:-apple-system,"Segoe UI",Roboto,sans-serif; color:#dde3ea;
+  user-select:none; box-shadow:0 6px 24px rgba(0,0,0,.45); }
+.ksmock * { box-sizing:border-box; }
+.ksmock .bar { display:flex; align-items:center; gap:2%; flex:0 0 13%; }
+.ksmock .brand { font-weight:800; letter-spacing:.06em; font-size:clamp(11px,2.2vw,17px); color:#f0764f; }
+.ksmock .chip { border-radius:999px; padding:.35em .9em; font-size:clamp(9px,1.6vw,13px);
+  font-weight:600; background:#1c2531; border:1px solid #2f3b4b; white-space:nowrap; }
+.ksmock .chip b { color:#f0764f; }
+.ksmock .chip.ok { border-color:#2f7d4f; color:#7fd6a0; }
+.ksmock .chip.warn { border-color:#a06a1f; color:#e8b45a; }
+.ksmock .chip.right { margin-left:auto; }
+.ksmock .docks { flex:1 1 auto; display:grid; grid-template-columns:repeat(4,1fr); gap:2.2%; }
+.ksmock .dock { border-radius:12px; background:#161e29; border:2px solid #2f3b4b;
+  display:flex; flex-direction:column; padding:4% 6%; position:relative; }
+.ksmock .dock .dname { font-size:clamp(8px,1.5vw,12px); color:#8b95a5; font-weight:600;
+  text-transform:uppercase; letter-spacing:.05em; }
+.ksmock .dock .tname { font-size:clamp(11px,2.4vw,19px); font-weight:800; margin-top:auto; }
+.ksmock .dock .tsub { font-size:clamp(8px,1.5vw,12px); color:#8b95a5; margin-bottom:auto; }
+.ksmock .dock .pins { display:flex; gap:.5em; font-size:clamp(8px,1.4vw,11px); color:#8b95a5; }
+.ksmock .dot { display:inline-block; width:.65em; height:.65em; border-radius:50%;
+  background:#3a4657; margin-right:.3em; vertical-align:baseline; }
+.ksmock .dot.on { background:#5aa9e8; box-shadow:0 0 6px #5aa9e8; }
+.ksmock .dot.grab { background:#f0764f; box-shadow:0 0 6px #f0764f; }
+.ksmock .dock.occupied { border-color:#3d6ea5; }
+.ksmock .dock.occupied .tname { color:#8fc1f2; }
+.ksmock .dock.held { border-color:#f0764f; background:#241a15; }
+.ksmock .dock.held .tname { color:#f0764f; }
+.ksmock .dock.held::after { content:"on carriage"; position:absolute; top:6%; right:6%;
+  font-size:clamp(7px,1.2vw,10px); font-weight:700; color:#f0764f; }
+.ksmock .dock.empty { border-style:dashed; }
+.ksmock .dock.empty .tname { color:#4a5568; font-weight:600; }
+.ksmock .dock.unknown { border-color:#6b5518; }
+.ksmock .dock.unknown .tname { color:#c9a75a; }
+.ksmock .dock .hint { font-size:clamp(7px,1.3vw,10px); color:#5b6675; margin-top:.4em; }
+.ksmock .actions { flex:0 0 17%; display:grid; grid-template-columns:repeat(5,1fr); gap:2.2%; }
+.ksmock .btn { border-radius:10px; background:#1c2531; border:1px solid #2f3b4b;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:.15em; font-size:clamp(9px,1.7vw,13px); font-weight:700; cursor:pointer; }
+.ksmock .btn svg { width:clamp(16px,3.4vw,26px); height:clamp(16px,3.4vw,26px); }
+.ksmock .btn.primary { background:#f0764f; border-color:#f0764f; color:#181818; }
+.ksmock .btn:hover { border-color:#f0764f; }
+</style>
+
+<div class="ksmock" role="img" aria-label="Mockup of the Vortac docks panel">
+  <div class="bar">
+    <span class="brand">VORTAC</span>
+    <span class="chip">Holding: <b>miniGrey&nbsp;(T1)</b></span>
+    <span class="chip ok">Gantry: TILTED</span>
+    <span class="chip right warn">Detection: stale — run Detect</span>
+  </div>
+  <div class="docks">
+    <div class="dock occupied">
+      <span class="dname">dock0</span>
+      <span class="tname">miniPink</span>
+      <span class="tsub">T0 · extruder</span>
+      <span class="pins"><span><span class="dot on"></span>dock</span><span><span class="dot"></span>grab</span></span>
+      <span class="hint">tap: load</span>
+    </div>
+    <div class="dock held">
+      <span class="dname">dock1</span>
+      <span class="tname">miniGrey</span>
+      <span class="tsub">T1 · extruder1</span>
+      <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot grab"></span>grab</span></span>
+      <span class="hint">tap: park here</span>
+    </div>
+    <div class="dock empty">
+      <span class="dname">dock2</span>
+      <span class="tname">— empty —</span>
+      <span class="tsub">&nbsp;</span>
+      <span class="pins"><span><span class="dot"></span>dock</span><span><span class="dot"></span>grab</span></span>
+      <span class="hint">tap: select for calibration</span>
+    </div>
+    <div class="dock unknown">
+      <span class="dname">dock3</span>
+      <span class="tname">miniBlue</span>
+      <span class="tsub">T2 · not calibrated</span>
+      <span class="pins"><span><span class="dot on"></span>dock</span><span><span class="dot"></span>grab</span></span>
+      <span class="hint">tap: select for calibration</span>
+    </div>
+  </div>
+  <div class="actions">
+    <div class="btn primary"><svg width="26" height="26" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M30.5 8.5 Q32 6 33.5 8.5 L40 20 Q41.5 23 38 23 H26 Q22.5 23 24 20 Z"/>
+    <path d="M32 28 V38 M32 38 L28 33.5 M32 38 L36 33.5"/>
+    <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>
+  </g>
+</svg> Park</div>
+    <div class="btn"><svg width="24" height="24"
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+  
+  
+   viewBox="0 0 64 64"
+   version="1.1"
+   id="svg10"
+   sodipodi:docname="refresh.svg"
+   inkscape:version="1.0.2 (e86c870879, 2021-01-15, custom)">
+  <metadata
+     id="metadata16">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title>folder</dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <defs
+     id="defs14" />
+  <sodipodi:namedview
+     pagecolor="#bfbfbf"
+     bordercolor="#666666"
+     borderopacity="1"
+     objecttolerance="10"
+     gridtolerance="10"
+     guidetolerance="10"
+     inkscape:pageopacity="0"
+     inkscape:pageshadow="2"
+     inkscape:window-width="1600"
+     inkscape:window-height="837"
+     id="namedview12"
+     showgrid="false"
+     inkscape:pagecheckerboard="false"
+     inkscape:zoom="5.4137931"
+     inkscape:cx="32.109123"
+     inkscape:cy="22.356606"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg10"
+     inkscape:snap-bbox="true"
+     inkscape:snap-bbox-edge-midpoints="true"
+     inkscape:document-rotation="0"
+     inkscape:snap-bbox-midpoints="true"
+     inkscape:snap-intersection-paths="true"
+     inkscape:snap-midpoints="true"
+     inkscape:snap-smooth-nodes="true"
+     inkscape:snap-object-midpoints="true"
+     inkscape:snap-center="true"
+     inkscape:bbox-nodes="true"
+     inkscape:bbox-paths="true" />
+  
+  <title
+     id="title2">folder</title>
+  <desc
+     id="desc4">Created with Sketch.</desc>
+  <path
+     sodipodi:nodetypes="ccc"
+     inkscape:connector-curvature="0"
+     id="path4710-2-1"
+     d="m 4.3403339,31.365635 5.187416,7.118657 5.0236311,-7.118657 z"
+     style="display:inline;fill:#ffffff;fill-opacity:1;fill-rule:evenodd;stroke:#ffffff;stroke-width:2.73127;stroke-linecap:butt;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
+  <path
+     style="fill:none;stroke:#ffffff;stroke-width:4;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stop-color:#000000"
+     id="path853"
+     sodipodi:type="arc"
+     sodipodi:cx="33"
+     sodipodi:cy="32"
+     sodipodi:rx="23.5"
+     sodipodi:ry="23.5"
+     sodipodi:start="3.1415927"
+     sodipodi:end="5.4977871"
+     sodipodi:arc-type="arc"
+     sodipodi:open="true"
+     d="M 9.5,32 A 23.5,23.5 0 0 1 24.006939,10.288831 23.5,23.5 0 0 1 49.617009,15.38299" />
+  <path
+     sodipodi:nodetypes="ccc"
+     inkscape:connector-curvature="0"
+     id="path866"
+     d="M 59.659666,32.634365 54.47225,25.515708 49.448619,32.634365 Z"
+     style="display:inline;fill:#ffffff;fill-opacity:1;fill-rule:evenodd;stroke:#ffffff;stroke-width:2.73127;stroke-linecap:butt;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
+  <path
+     style="fill:none;stroke:#ffffff;stroke-width:4;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stop-color:#000000"
+     id="path868"
+     sodipodi:type="arc"
+     sodipodi:cx="-31.000221"
+     sodipodi:cy="-32"
+     sodipodi:rx="23.5"
+     sodipodi:ry="23.5"
+     sodipodi:start="3.1415927"
+     sodipodi:end="5.4977871"
+     sodipodi:arc-type="arc"
+     sodipodi:open="true"
+     d="m -54.500221,-32 a 23.5,23.5 0 0 1 14.506939,-21.711169 23.5,23.5 0 0 1 25.610069,5.094159"
+     transform="scale(-1)" />
+</svg> Detect</div>
+    <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 12 V52 M52 12 V52"/>
+    <path d="M10 52 H54"/>
+    <path d="M10 16 L54 26"/>
+  </g>
+</svg> Tilt</div>
+    <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    
+    <g transform="translate(30 33) rotate(-30)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    
+    <g transform="translate(30 33) rotate(60)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    
+    <path d="M56.9 29.8 A25 25 0 0 1 52.5 46.3"/>
+    <path d="M52.5 46.3 L57.8 43.6 M52.5 46.3 L53.2 40.3"/>
+  </g>
+</svg> Engage</div>
+    <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    
+    <g transform="translate(30 33) rotate(60)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    
+    <g transform="translate(30 33) rotate(-30)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    
+    <path d="M52.5 46.3 A25 25 0 0 0 56.9 29.8"/>
+    <path d="M56.9 29.8 L54.6 35.3 M56.9 29.8 L60.2 34.8"/>
+  </g>
+</svg> Disengage</div>
+    <div class="btn"><svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 9 H41 L55 23 V49 Q55 55 49 55 H15 Q9 55 9 49 V15 Q9 9 15 9 Z"/>
+    <path d="M21 9 V20 Q21 23 24 23 H37 Q40 23 40 20 V9"/>
+    <path d="M18 55 V38 Q18 35 21 35 H43 Q46 35 46 38 V55"/>
+    <path d="M33.5 12 V19"/>
+  </g>
+</svg> Save Dock</div>
+  </div>
+</div>
+
+<h3 id="panel-icons">Custom icons</h3>
+<p>The gantry toggle uses <code>vortac_gantry_flat.svg</code> /
+<code>vortac_gantry_tilt.svg</code> — the frame (uprights plus bed) with the gantry beam
+either level with the frame or tilted onto the bed, whichever state the button moves to.
+Engage/Disengage use custom SVGs from <code>klipperscreen/icons/</code> — the grabber key in
+both positions: the <em>target</em> position solid (with the sensor hole), the <em>start</em>
+position ghosted at 50% opacity, plus a small arrow showing the direction of rotation. The
+cleaned monochrome <strong>Vortac logo</strong> (right; source export kept as
+<code>vortac_logo_original.svg</code>) is the panel's entry icon in the main menu —
+<code>install.sh</code> links it into every KlipperScreen theme's <code>images/</code> dir, so
+<code>icon: vortac_logo</code> resolves like a stock icon name. The panel resolves the icon path through its own symlink
+back into the repo, so <code>install.sh</code> needs no extra step; if the SVG cannot be loaded,
+the button falls back to a stock icon.</p>
+<div class="vortac-icons" style="display:flex;gap:2rem;align-items:center;background:#10151d;border:1px solid #2a3442;border-radius:11px;padding:1.2rem 1.5rem;margin:0 0 1.2rem;width:max-content;">
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M30.5 8.5 Q32 6 33.5 8.5 L40 20 Q41.5 23 38 23 H26 Q22.5 23 24 20 Z"/>
+    <path d="M32 28 V38 M32 38 L28 33.5 M32 38 L36 33.5"/>
+    <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>
+  </g>
+</svg>
+    <figcaption>vortac_park.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M32 18 V8 M32 8 L28 12.5 M32 8 L36 12.5"/>
+    <path d="M30.5 26.5 Q32 24 33.5 26.5 L40 38 Q41.5 41 38 41 H26 Q22.5 41 24 38 Z"/>
+    <path d="M16 42 V52 Q16 56 20 56 H44 Q48 56 48 52 V42"/>
+  </g>
+</svg>
+    <figcaption>vortac_load.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 9 H41 L55 23 V49 Q55 55 49 55 H15 Q9 55 9 49 V15 Q9 9 15 9 Z"/>
+    <path d="M21 9 V20 Q21 23 24 23 H37 Q40 23 40 20 V9"/>
+    <path d="M18 55 V38 Q18 35 21 35 H43 Q46 35 46 38 V55"/>
+    <path d="M33.5 12 V19"/>
+  </g>
+</svg>
+    <figcaption>vortac_dock_save.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    
+    <g transform="translate(30 33) rotate(60)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    
+    <g transform="translate(30 33) rotate(-30)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    
+    <path d="M52.5 46.3 A25 25 0 0 0 56.9 29.8"/>
+    <path d="M56.9 29.8 L54.6 35.3 M56.9 29.8 L60.2 34.8"/>
+  </g>
+</svg>
+
+    <figcaption>vortac_disengage.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    
+    <g transform="translate(30 33) rotate(-30)" opacity="0.45">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+    </g>
+    
+    <g transform="translate(30 33) rotate(60)">
+      <rect x="-16.5" y="-7" width="33" height="14" rx="7"/>
+      <circle cx="0" cy="0" r="4"/>
+    </g>
+    
+    <path d="M56.9 29.8 A25 25 0 0 1 52.5 46.3"/>
+    <path d="M52.5 46.3 L57.8 43.6 M52.5 46.3 L53.2 40.3"/>
+  </g>
+</svg>
+
+    <figcaption>vortac_engage.svg</figcaption>
+  </figure>
+  <figure style="margin:0;text-align:center;color:#8b95a5;font-size:.8rem;">
+    <svg width="110" height="110" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  
+  <path fill="#e8e8e8" transform="translate(-646.72 -935.96) scale(2.8)" d="M240.63,337.18h3.76c.15,0,.27.12.27.27v6.22l2.15,3.72h0s5.39,3.11,5.39,3.11c.13.07.17.24.1.37l-1.88,3.26c-.07.13-.24.17-.37.1l-5.39-3.11h-4.3l-5.39,3.11c-.13.07-.29.03-.37-.1l-1.88-3.26c-.07-.13-.03-.29.1-.37l5.38-3.11h0s2.15-3.73,2.15-3.73v-6.22c0-.15.12-.27.27-.27ZM241.44,344.88l-1.45,2.52h1.01l1.45-2.52h-1.01ZM243.46,344.88l-2.91,5.04h1.01l2.91-5.04h-1.01ZM244.02,347.4l-1.45,2.52h1.01l1.45-2.52h-1.01Z"/>
+</svg>
+    <figcaption>vortac_logo.svg</figcaption>
+  </figure>
+</div>
+
+<h3 id="panel-behaviour">Behaviour</h3>
+<ul>
+  <li><strong>Header:</strong> held tool (<code>current_tool</code>, or "Carriage empty"),
+      gantry state (<code>qgl_state</code> — green when TILTED, amber when FLAT during
+      printing hours, with a "· dock frame" suffix while the bed mesh and gcode offset are
+      parked, see <a href="modules.html#vortac-qgl-state">two coordinate systems</a>), and a
+      detection-freshness chip (<code>dock_detection_valid</code>) that
+      turns amber after a restart until <code>VORTAC_DETECT</code> ran, followed by a
+      <em>Power: n/m</em> counter of energized docks (only when the manager actually manages the
+      dock supply, see <a href="modules.html#dock-power">Dock power</a>).</li>
+  <li><strong>One tile per dock</strong> (grid grows with <code>dock_count</code>). Tile state
+      from <code>dock_occupancy</code> + per-tool <code>dock_sense_state</code>/
+      <code>grab_sense_state</code>:
+      <span class="badge">blue</span> occupied, <span class="badge">orange</span> the held
+      tool's origin dock, dashed = calibrated but empty, amber = no calibrated position yet.
+      The two small dots mirror the raw sense pins — the live wiring truth, invaluable when a
+      tile disagrees with reality. While a tool is carried, its return dock is marked
+      "on carriage" (from the manager's <code>park_dock</code> status export). A bolt glyph in the
+      tile header shows the dock supply: lit = the dock feeds its tool board, dimmed = contacts
+      dead, absent = the manager does not manage the supply (so the tile degrades silently
+      against an older manager instead of lying).</li>
+  <li><strong>Red tile = <code>NO POWER</code>:</strong> the dock holds a tool while its supply is
+      off. That combination strands the tool board — the LED keeps its state across a klipper
+      restart, so the board would be missing at the next mcu identify — and it is the one power
+      state worth shouting about, so it overrides the normal tile rendering. Tapping it offers to
+      switch the supply back on. Switching a dock <em>off</em> is deliberately never offered here:
+      it costs an MCU and thus a klipper shutdown, and stays in the console behind
+      <code>FORCE=1</code>.</li>
+  <li><strong>Tap logic is contextual:</strong> occupied + calibrated tile → confirm →
+      <code>T&lt;n&gt;</code>; the held tool's tile → confirm → <code>VORTAC_UNLOAD</code>;
+      occupied but <em>uncalibrated</em> tile (amber, "not calibrated" — the tool has no saved
+      hooked position for this dock, so loading would fail) → confirm →
+      <code>VORTAC_SELECT_DOCK DOCK=…</code>, then jog to the hooked position via the Move
+      panel and press <em>Save Dock</em>; empty/unknown tile → confirm →
+      <code>VORTAC_SELECT_DOCK DOCK=…</code> as well. One screen, no submenu digging.</li>
+  <li><strong>Action bar:</strong> a contextual primary button — park icon while a tool is
+      held, load icon when the carriage is empty and exactly one docked tool with a
+      calibrated dock position exists (uncalibrated tools don't count — loading would
+      fail), greyed
+      out otherwise (then the dock tiles are the way to load); icon plus a short generic
+      label ("Park"/"Load") like the other buttons — the confirm dialog names the concrete
+      tool — plus Detect, a contextual <strong>gantry toggle</strong>, Engage, Disengage and
+      Save Dock. <em>Confirm policy:</em> Detect runs immediately (harmless — LEDs are
+      restored); everything that moves the machine or writes config confirms first.
+      Disengage keeps its confirm deliberately: disengaging mid-air drops the tool.</li>
+  <li><strong>Gantry toggle:</strong> shows the state it moves <em>to</em> — "Tilt" (beam
+      tilted onto the bed) while flat, "Flatten" (beam level with the frame) while tilted.
+      It is the whole coordinate-system switch, not just a gantry move: FLAT parks the bed
+      mesh and the gcode offset, TILT hands both back (see
+      <a href="modules.html#vortac-qgl-state">vortac_qgl_state</a>). That is what makes
+      hand-teaching a dock safe — press <em>Flatten</em>, jog, <em>Save Dock</em>,
+      <em>Tilt</em>. The confirm dialog spells out both halves, and the button is greyed
+      out while a print is running — pressing it there would drop the print onto raw
+      kinematic Z. Tool changes call FLAT/TILT internally, that path is unaffected.</li>
+  <li><strong>Calibration and grabber details stay in the menu</strong> (LUT sweep, set zero)
+      — the panel is for daily operation, the menu for commissioning.</li>
+</ul>
+
+<div class="callout tip">
+  <span class="callout-title">Why this exact layout</span>
+  <p>The panel answers the three questions you actually walk to the printer with — <em>what is
+  on the carriage, what is in which dock, is the state trustworthy</em> — without touching
+  anything. Every action is one tap plus one confirm, with the confirm carrying the concrete
+  consequence ("Run a tool change to T0?"). Diagnostic truth (sense dots, supply glyph) sits
+  directly on the thing it describes instead of in a separate status page.</p>
+  <p>One honest limitation: the panel polls at 1&nbsp;Hz, and the supply handover during a tool
+  change lasts a second or two — the glyph will usually miss it. It is a steady-state display by
+  design; what matters is whether a parked tool has power, not watching the switch happen.</p>
+</div>
+
+<h2 id="outlook">5 — Outlook: a real Vortac UI</h2>
+<p>Not built yet — recorded here so the options and their cost are on the table:</p>
+<ul>
+  <li><strong>Level 1 — G-code macro wrappers</strong> (hours): <code>VORTAC_UI_*</code> macros
+      for the parameterised commands. Visible in Mainsail, Fluidd <em>and</em> KlipperScreen's
+      stock Macros panel — one implementation, every UI.</li>
+  <li><strong>Level 2 — static KlipperScreen menu</strong> (hours): a button tree over those
+      macros using the mechanics above. Config only, no code.</li>
+  <li><strong>Level 3 — custom KlipperScreen panel: ✅ shipped</strong> (design preview
+      <a href="#panel-preview">above</a>, code in
+      <code>klipperscreen/panels/vortac_docks.py</code>). It polls
+      <code>vortac_manager</code> / <code>vortac_tool</code> / <code>vortac_qgl_state</code>
+      status once per second via <code>printer.objects.query</code> — deliberately independent
+      of KlipperScreen's internal subscription machinery, to minimise breakage across
+      KlipperScreen updates. Residual risk: the GTK panel base-class API is not versioned; a
+      KlipperScreen update may require small adaptations (only this panel fails, the rest of the
+      UI keeps working — check <code>KlipperScreen.log</code>).</li>
+</ul>
+<p>Mainsail has no plugin/panel system, so a KlipperScreen menu or panel cannot be carried over.
+The browser-side counterpart is the <a href="web-ui.html">Web UI</a> — the same panel as a web
+page, embeddable into the Mainsail dashboard via its iframe webcam type.</p>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

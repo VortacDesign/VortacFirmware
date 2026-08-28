@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Configuration</h1>
+<p class="subtitle">Config layout, the <code>include_with</code> template system, adding a tool,
+per-tool overrides, and the gantry/probing workflow.</p>
+
+<h2 id="layout">Layout</h2>
+<pre><code>configs/
+├── printer.example.cfg          template for your printer.cfg (real one gitignored)
+└── vortac_configs/
+    ├── mcu/
+    │   ├── octopus.cfg          mainboard: XY, Z×4 sensorless, dock LEDs
+    │   ├── vortac.cfg           grabber MCU + [vortac_grabber] + [vortac_qgl_state]
+    │   ├── SB2209.cfg           toolboard PCB template — reused by every SB2209 tool
+    │   ├── EBB42_V12.cfg        toolboard PCB template — EBB42 v1.2
+    │   └── kraken.cfg           placeholder for future mainboard
+    ├── tools/
+    │   └── tool0.example.cfg    template: static [mcu &lt;name&gt;] + PCB-template
+    │                            include (real tools/*.cfg gitignored)
+    └── tools.example.cfg        template: per-tool includes + [vortac_manager]
+                                 (real tools.cfg gitignored)</code></pre>
+<p>Files under <code>vortac_configs/</code> are bind-mounted into
+<code>~/printer_data/config/vortac_configs/</code> by <code>install.sh</code> and reload after
+<code>git pull</code> + <code>systemctl restart klipper</code>.</p>
+
+<h2 id="include-with">The include_with template system</h2>
+<p>All tools with the same PCB share <strong>one</strong> hardware template
+(e.g. <code>mcu/SB2209.cfg</code>, written against the generic MCU name <code>EBBCan</code>).
+<code>[include_with &lt;namespace&gt; &lt;file&gt;]</code> instantiates it once per tool:</p>
+<ul>
+  <li><strong>Pin rewrite</strong> — every <code>EBBCan:</code> pin reference becomes
+      <code>&lt;namespace&gt;:</code> (e.g. <code>miniGrey:</code>).</li>
+  <li><strong>Section prefixing</strong> — every <em>named</em> section gets the DISPLAY prefix
+      <code>&lt;namespace&gt;&lt;tool_index&gt;</code>: <code>[neopixel logo_rgb]</code> →
+      <code>[neopixel miniGrey1_logo_rgb]</code>. That is what
+      Mainsail/Fluidd/KlipperScreen show, and the index makes <code>extruder1</code> ↔
+      <code>miniGrey1_*</code> visually matchable. LEDs become addressable per tool:
+      <code>SET_LED LED=miniGrey1_logo_rgb …</code> — or index-proof in macros via
+      <code>{tool.display_name}_logo_rgb</code>. Legacy digit-suffixed namespaces
+      (<code>tool0</code>, <code>tool1</code>) stay as-is (no double index). Exceptions:
+      <code>[mcu &lt;name&gt;]</code> and <code>[vortac_tool &lt;name&gt;]</code> keep the
+      <em>pure</em> namespace.</li>
+  <li><strong>Singleton renaming</strong> for <code>tool_index ≥ 1</code> —
+      <code>[extruder]</code> → <code>[extruder1]</code>, <code>[fan]</code> →
+      <code>[fan_generic miniGrey1_fan]</code>. Tool 0 keeps the primary extruder and the M106 fan.
+      Reference sections (<code>tmcXXXX</code>, <code>verify_heater</code>) follow their target's
+      rename, and whole-string section refs in values (<code>heater: extruder</code> →
+      <code>heater: extruder1</code>) are fixed up too.</li>
+  <li><strong><code>[vortac_tool TN]</code> injection</strong> — the template's
+      <code>[vortac_tool TN]</code> placeholder (it carries the sense pins) becomes
+      <code>[vortac_tool &lt;namespace&gt;]</code> (PURE name, no index — the persistence anchor
+      for SAVE_CONFIG'd dock positions), and <code>tool_index</code>, <code>mcu_name</code>,
+      <code>display_name</code> (<code>&lt;namespace&gt;&lt;index&gt;</code>, the dashboard prefix
+      of the injected hardware sections), <code>canbus_uuid</code> (from the static
+      <code>[mcu]</code> section) and <code>extruder_name</code> (the renamed extruder:
+      <code>extruder</code> for index 0, <code>extruderN</code> otherwise) are auto-injected. <code>home_dock</code> is optional
+      (docks come from <code>VORTAC_DETECT</code> at runtime); it can be pinned via
+      <code>overrides:</code> (<code>vortac_tool TN.home_dock: dockX</code>).</li>
+</ul>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Original (template)</th><th>Tool 0 (ns <code>tool0</code>)</th><th>Tool 1 (ns <code>miniGrey</code>)</th></tr></thead>
+<tbody>
+<tr><td><code>[mcu EBBCan]</code></td><td><code>[mcu tool0]</code></td><td><code>[mcu miniGrey]</code></td></tr>
+<tr><td><code>[vortac_tool &lt;any&gt;]</code></td><td><code>[vortac_tool tool0]</code></td><td><code>[vortac_tool miniGrey]</code></td></tr>
+<tr><td><code>[&lt;head&gt; name]</code> (generic)</td><td><code>[&lt;head&gt; tool0_name]</code></td><td><code>[&lt;head&gt; miniGrey1_name]</code></td></tr>
+<tr><td><code>[adxl345 (name)]</code></td><td><code>[adxl345 tool0(_name)]</code></td><td><code>[adxl345 miniGrey1(_name)]</code></td></tr>
+<tr><td><code>[extruder]</code></td><td><code>[extruder]</code></td><td><code>[extruder1]</code></td></tr>
+<tr><td><code>[tmcXXXX extruder]</code></td><td><code>[tmcXXXX extruder]</code></td><td><code>[tmcXXXX extruder1]</code></td></tr>
+<tr><td><code>[verify_heater extruder]</code></td><td><code>[verify_heater extruder]</code></td><td><code>[verify_heater extruder1]</code></td></tr>
+<tr><td><code>[fan]</code></td><td><code>[fan]</code></td><td><code>[fan_generic miniGrey1_fan]</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<details class="fold">
+  <summary>Good to know: what cannot be namespaced</summary>
+  <div class="fold-body">
+    <p>Bare Klipper singletons without a name part (<code>input_shaper</code>,
+    <code>firmware_retraction</code>, <code>resonance_tester</code>, <code>shaketune</code>, …)
+    cannot be renamed. For <code>tool_index ≥ 1</code> the known offenders are skipped
+    automatically; anything else that collides across tools goes into
+    <code>skip_sections:</code>. Multi-extruder naming is hardwired to
+    <code>extruder&lt;N&gt;</code> by Klipper regardless of namespace —
+    <code>[extruder miniPink]</code> is not a valid Klipper section.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Good to know: why <code>[mcu &lt;name&gt;]</code> must be static</summary>
+  <div class="fold-body">
+    <p>Klipper registers MCU pin chips <em>before</em> extras like <code>include_with</code> run.
+    So the <code>[mcu &lt;name&gt;]</code> section cannot be injected by the template — each tool
+    file declares it statically, and the template's <code>[mcu EBBCan]</code> is excluded via
+    <code>skip_sections:</code>. Pins must name their chip (<code>miniGrey:PB7</code>) — that is
+    plain Klipper syntax.</p>
+  </div>
+</details>
+
+<h2 id="adding-a-tool">Adding a tool — the checklist</h2>
+<p>Three conventions link everything:</p>
+<ul>
+  <li><strong>The tool's NAME is defined exactly once</strong> — the <code>[mcu &lt;name&gt;]</code>
+      section / <code>include_with</code> namespace (e.g. <code>miniGrey</code>). Dashboards show
+      the DISPLAY prefix <code>&lt;name&gt;&lt;index&gt;</code> (<code>miniGrey1_logo_rgb</code>,
+      <code>miniGrey1_hotend_fan</code>, …) so <code>extruder1</code> is visually matchable to
+      <code>miniGrey1_*</code>; the pure name stays the persistence key
+      (<code>[mcu miniGrey]</code>, <code>[vortac_tool miniGrey]</code>).</li>
+  <li><strong>The tool's NUMBER comes from the include ORDER in <code>tools.cfg</code></strong> —
+      the first (uncommented) tool include is <code>T0</code>, the next <code>T1</code>, and so on.
+      The first tool always owns Klipper's primary <code>[extruder]</code> and <code>[fan]</code>
+      (hardwired by Klipper for <code>M104</code>/<code>M106</code>), so commenting a broken tool
+      out simply renumbers the rest — Klipper never sees <code>[extruder1]</code> without
+      <code>[extruder]</code>.</li>
+  <li><strong>The tool's DOCK is established at runtime by <code>VORTAC_DETECT</code></strong> —
+      docked tools are located via the strobe map, and a grabbed tool is assigned the first free
+      dock that has calibrated positions for it (a warning is printed if none exists). Run
+      <code>VORTAC_DETECT</code> before the first tool change; a manual fallback can optionally
+      be pinned per tool via the <code>overrides:</code> block
+      (<code>vortac_tool TN.home_dock: dockX</code>). Saved dock positions are keyed by tool name,
+      so they survive renumbering — and a commented-out tool's calibration survives in
+      <code>printer.cfg</code>'s autosave block as a harmless ghost
+      <code>[vortac_tool &lt;name&gt;]</code> section (loaded as <code>available: False</code>)
+      until the tool returns.</li>
+</ul>
+
+<div class="checklist">
+  <div class="checklist-head">
+    <h3>New-tool checklist</h3>
+    <button class="reset" type="button">Reset checklist</button>
+  </div>
+  <label class="check"><input type="checkbox" data-ck="uuid">
+    <span class="check-text"><span class="check-title">Get the board's CAN UUID</span>
+    <span class="check-sub"><code>~/klipper/scripts/canbus_query.py can0</code></span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="copy">
+    <span class="check-text"><span class="check-title">Copy a tool file</span>
+    <span class="check-sub"><code>cp tools/miniStealth_grey.cfg tools/myTool.cfg</code>
+    (or start from <code>tools/tool0.example.cfg</code>).</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="rename">
+    <span class="check-text"><span class="check-title">Rename the namespace</span>
+    <span class="check-sub"><code>[mcu myTool]</code> + <code>[include_with myTool …]</code> —
+    those two headers are the only places the name appears.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="setuuid">
+    <span class="check-text"><span class="check-title">Set the new canbus_uuid</span>
+    <span class="check-sub">Under <code>[mcu myTool]</code>. The tool's dock is established at
+    runtime by <code>VORTAC_DETECT</code> — nothing to configure.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="include">
+    <span class="check-text"><span class="check-title">Register the tool</span>
+    <span class="check-sub">Add <code>[include tools/myTool.cfg]</code> to <code>tools.cfg</code> —
+    its <strong>position in the include list is its tool number</strong>. Make sure
+    <code>dock_count</code> covers the dock.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="restart">
+    <span class="check-text"><span class="check-title">Restart Klipper</span>
+    <span class="check-sub">The manager refuses to start on duplicated identities or
+    non-contiguous tool indices — fix what it names.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="verify">
+    <span class="check-text"><span class="check-title">Verify</span>
+    <span class="check-sub"><code>VORTAC_STATUS</code> lists both tools;
+    <code>VORTAC_DETECT DEBUG=1</code> shows each tool flip only on its own dock's strobe
+    (detection also establishes the dock map used by tool changes).</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="dockcal">
+    <span class="check-text"><span class="check-title">Calibrate the dock position, then SAVE_CONFIG</span>
+    <span class="check-sub">See <a href="calibration.html#dock-positions">Calibration → Dock positions</a>.</span></span>
+  </label>
+</div>
+
+<div class="callout danger">
+  <span class="callout-title">A missed rename does NOT error</span>
+  <p>Klipper silently merges duplicate config sections (last value wins). A
+  copied-but-not-fully-renamed tool file therefore never errors on its own — the symptom is one
+  <em>franken-tool</em>, e.g. one board shut down by the other tool's sensor config.
+  <code>vortac_manager</code> catches the detectable leftovers (duplicate index/MCU/UUID/pins),
+  but <strong>grep the file</strong> for the old name anyway — it must only appear in the two
+  headers <code>[mcu &lt;name&gt;]</code> and <code>[include_with &lt;name&gt; …]</code>.</p>
+</div>
+
+<h2 id="pretty-names">Tool names, numbers and what stays index-based</h2>
+<p>Name the tool after the physical tool (<code>miniPink</code>, <code>miniGrey</code>, …) —
+dashboards show the DISPLAY prefix <code>&lt;name&gt;&lt;index&gt;</code>
+(<code>miniPink0_logo_rgb</code>, <code>miniGrey1_hotend_fan</code>, etc.), so
+<code>extruder1</code> is visually matchable to <code>miniGrey1_*</code>. Nothing else needs to
+be set: <code>tool_index</code> comes from the include order in <code>tools.cfg</code>, and
+<code>mcu_name</code>/<code>display_name</code>/<code>canbus_uuid</code>/<code>extruder_name</code>
+are auto-injected into the tool's <code>[vortac_tool &lt;name&gt;]</code> section. The display
+prefix <em>shifts</em> when tools are renumbered (commenting one out) — safe, because those
+injected hardware sections never hold SAVE_CONFIG data; the pure-name sections
+(<code>[mcu &lt;name&gt;]</code>, <code>[vortac_tool &lt;name&gt;]</code>) never carry the
+index.</p>
+<p>Only <code>extruder</code>/<code>extruder1</code> stay index-based (hardwired by Klipper), and
+the <code>T0</code>/<code>T1</code> commands plus <code>dock0</code>/<code>dock1</code> names are
+index-based too (slicers emit <code>T&lt;n&gt;</code>; docks map to LED chain indices). Manager
+commands accept either form: <code>VORTAC_LOAD TOOL=miniGrey</code> and
+<code>VORTAC_LOAD TOOL=T1</code> both work (<code>TOOL=</code> takes the tool name,
+case-insensitive, <code>T&lt;n&gt;</code>, or a bare index). Macros can address per-tool hardware
+index-proof via the tool's <code>display_name</code>, e.g. in <code>tool_activate_gcode</code>:
+<code>SET_LED LED={tool.display_name}_logo_rgb …</code>.</p>
+
+<details class="fold">
+  <summary>Legacy: static hand-written <code>[vortac_tool T0]</code> sections</summary>
+  <div class="fold-body">
+    <p>A hand-written <code>[vortac_tool T0]</code> section still works when the PCB template
+    carries no <code>[vortac_tool TN]</code> placeholder — its trailing number derives
+    <code>tool_index=0</code>, <code>mcu_name=tool0</code>, <code>home_dock=dock0</code>, and the
+    sense pins (<code>dock_sense_pin</code>/<code>grab_sense_pin</code>) go into that section
+    directly. A trailing-numbered namespace (<code>tool1</code> → 1) likewise derives the
+    include's <code>tool_index</code> for non-tool templates; an explicit <code>tool_index:</code>
+    option always wins.</p>
+  </div>
+</details>
+
+<h2 id="overrides">Per-tool hardware deviations (overrides:)</h2>
+<p><strong>Never edit the shared PCB template for one tool.</strong> Deviations go on that tool's
+<code>[include_with]</code> section, one <code>section.key: value</code> per line:</p>
+<pre><code>[include_with miniPink vortac_configs/mcu/EBB42_V12.cfg]
+skip_sections:
+  mcu EBBCan
+overrides:
+  extruder.sensor_type: MAX31865
+  extruder.sensor_pin: EBBCan: PA4
+  extruder.spi_bus: spi1
+  extruder.rtd_nominal_r: 1000
+  extruder.rtd_reference_r: 4300
+  extruder.rtd_num_of_wires: 2
+  extruder.rtd_use_50Hz_filter: True</code></pre>
+<ul>
+  <li>Section names are the <strong>original template names</strong> (pre-rename).</li>
+  <li>Pin values may be written template-relative (<code>EBBCan: PA4</code>) — they run through
+      the same rewriter.</li>
+  <li>Keys the template lacks are <strong>added</strong>; an <strong>empty value deletes</strong>
+      the option.</li>
+</ul>
+
+<div class="callout tip">
+  <span class="callout-title">RTD pairing rule of thumb</span>
+  <p>PT100 → <code>rtd_reference_r: 430</code>, PT1000 → <code>4300</code> — check the reference
+  resistor on your board. A mismatch shows up as a <code>Thermocouple reader fault</code> MCU
+  shutdown (see <a href="troubleshooting.html#thermocouple-fault">Troubleshooting</a>).</p>
+</div>
+
+<h2 id="gantry-workflow">Homing, QGL &amp; probing — the gantry workflow</h2>
+<p>The 4-Z gantry has two valid states, tracked by
+<a href="modules.html#vortac-qgl-state"><code>[vortac_qgl_state]</code></a>:
+<strong>flat</strong> (top-home/frame reference — dock geometry valid) and
+<strong>tilted</strong> (bed reference — print geometry valid). Rules:</p>
+<ul>
+  <li><strong>Z homing</strong> (against the top/frame) resets the state to <code>flat</code> and
+      clears the stored QGL deltas — after any fresh Z home, QGL must be re-run before printing.</li>
+  <li><strong>All probing requires NO tool held.</strong> The probe touch point sits above the
+      nozzle tip whenever a tool is grabbed, so the nozzle would hit the bed before the probe
+      triggers. The manager enforces this at the probe object itself:
+      <code>QUAD_GANTRY_LEVEL</code>, <code>BED_MESH_CALIBRATE</code>, <code>PROBE</code>,
+      <code>PROBE_ACCURACY</code>, … all refuse while a tool is held. Park the tool first:
+      <code>VORTAC_UNLOAD</code>.</li>
+  <li><strong>Tool changes handle FLAT/TILT automatically</strong>: the manager flattens the
+      gantry for the dock motion and re-tilts afterwards — no re-probing needed.</li>
+  <li><strong>The toggle switches the whole coordinate system</strong>, not just the gantry:
+      <code>VORTAC_GANTRY_FLAT</code> suspends the bed mesh and parks the gcode offset
+      (dock frame), <code>VORTAC_GANTRY_TILT</code> hands both back (print frame). So a
+      manual FLAT — from the console or the <em>Flatten</em> button in the Vortac panel —
+      puts you straight into the coordinate system the docks are taught in. See
+      <a href="modules.html#vortac-qgl-state">vortac_qgl_state</a>; set
+      <code>manage_coordinate_system: False</code> on
+      <code>[vortac_qgl_state]</code> to keep the toggle gantry-only.</li>
+</ul>
+<p>Typical print start (no tool held yet):</p>
+<pre><code>G28                  # top-home -> flat
+QUAD_GANTRY_LEVEL    # no tool! -> tilted
+BED_MESH_CALIBRATE   # still no tool
+VORTAC_DETECT        # establish the dock map before the first tool change
+T0                   # manager: FLAT -> fetch -> TILT, applies offsets
+# print</code></pre>
+<p>A tool change before any <code>VORTAC_DETECT</code>, for a tool without a pinned
+<code>home_dock</code>, fails with a clear error ("no dock known … — run
+<code>VORTAC_DETECT</code>") — so run detection in your <code>PRINT_START</code>.</p>
+<p>If Z was re-homed mid-session while a tool is held: <code>VORTAC_UNLOAD</code>, then
+<code>QUAD_GANTRY_LEVEL</code>, then pick the tool back up.</p>
+
+<h2 id="dock-motion">Where the dock motion lives</h2>
+<ul>
+  <li><strong>XYZ approach/depart</strong> is axis-by-axis, never a diagonal
+      (see <a href="modules.html#dock-approach">Sequential dock approach</a>), and
+      configured on <code>[vortac_manager]</code>: <code>dock_y_safe</code>,
+      <code>dock_z_clearance</code>, <code>dock_approach_hop</code>,
+      <code>dock_approach_feedrate</code>, <code>dock_slide_feedrate</code>. The checked
+      Z/Y phases add <code>dock_lift_feedrate</code>, <code>dock_backout_feedrate</code>,
+      <code>dock_check_zstep</code>, <code>dock_check_ystep</code>,
+      <code>dock_check_steps</code>, <code>dock_retries</code>,
+      <code>dock_contact_settle</code> and <code>sense_settle</code>. Every one of them has a
+      built-in default — see
+      <a href="modules.html#dock-motion-options">Dock motion options</a> for values and
+      ranges.</li>
+  <li><strong>Per-tool warm-up / cool-down</strong> → <code>tool_activate_gcode</code> /
+      <code>tool_deactivate_gcode</code> on <code>[vortac_tool &lt;name&gt;]</code> (set via
+      include_with overrides: <code>vortac_tool TN.tool_activate_gcode: …</code>) — those run on
+      either side of the dock motion.</li>
+  <li><strong>Extruder switching is automatic</strong>: the manager runs
+      <code>ACTIVATE_EXTRUDER</code> with the tool's injected <code>extruder_name</code> on every
+      tool change — no per-tool <code>tool_activate_gcode</code> needed for that.</li>
+  <li><strong>FLAT / TILT</strong> of the gantry around dock approach is automatic.</li>
+  <li><strong>Per-tool offsets</strong> → <code>gcode_offset_x/y/z</code> on
+      <code>[vortac_tool &lt;name&gt;]</code>; the manager applies them via
+      <code>SET_GCODE_OFFSET</code> on every tool change.</li>
+</ul>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

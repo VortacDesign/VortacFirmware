@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Troubleshooting</h1>
+<p class="subtitle">Known failure modes, sorted by symptom. Each entry expands to cause and
+fix.</p>
+
+<h2 id="install-issues">Installation &amp; deployment</h2>
+
+<details class="fold" id="empty-configs">
+  <summary><code>vortac_configs/</code> shows up empty in the config folder</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> the systemd automount hasn't been triggered yet, or the web
+    interface is showing a cached file tree.</p>
+    <p><strong>Fix:</strong> run <code>sudo ./install.sh</code> manually once more, then clear
+    your browser cache and reload the web interface — Mainsail/Fluidd caches the file tree.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Changes to a <code>.py</code> file don't take effect on the printer</summary>
+  <div class="fold-body">
+    <p><strong>Checklist:</strong></p>
+    <ul>
+      <li>Did the Pi actually pull? (<code>git -C ~/vortac log -1</code>)</li>
+      <li>The <code>.path</code> watcher re-runs <code>install.sh</code> on pull, but Klipper is
+          <strong>not</strong> restarted automatically: <code>sudo systemctl restart klipper</code>.</li>
+      <li>Is the file symlinked? <code>ls -la ~/klipper/klippy/extras/ | grep vortac</code>. The
+          installer <em>skips</em> files that already exist as real (non-symlink) files — remove
+          the stale copy and re-run <code>install.sh</code>.</li>
+      <li>New <code>.py</code> files only get linked when <code>install.sh</code> runs — after
+          adding a module, make sure it ran (a pull triggers it, or run it manually).</li>
+    </ul>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Klipper error: <code>Section 'vortac_…' is not a valid config section</code></summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> the extra isn't symlinked into Klipper's
+    <code>klippy/extras/</code> (installer never ran, or Klipper lives in a non-default path).</p>
+    <p><strong>Fix:</strong> run <code>sudo ./install.sh</code> (set <code>KLIPPER_DIR</code> if
+    Klipper is not at <code>~/klipper</code>), then restart Klipper.</p>
+  </div>
+</details>
+
+<h2 id="config-issues">Configuration</h2>
+
+<details class="fold" id="mainsail-cfg">
+  <summary>Mainsail warns: <code>virtual_sdcard / pause_resume / gcode_macro pause … is not defined in config</code></summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> Mainsail's client config (<code>mainsail.cfg</code>) is not
+    included — it provides <code>virtual_sdcard</code>, <code>pause_resume</code>,
+    <code>display_status</code> and the <code>PAUSE</code>/<code>RESUME</code>/
+    <code>CANCEL_PRINT</code> macros.</p>
+    <p><strong>Fix:</strong> add <code>[include mainsail.cfg]</code> to
+    <code>printer.cfg</code> (see <code>configs/printer.example.cfg</code>). If
+    <code>~/printer_data/config/mainsail.cfg</code> does not exist, install it via the
+    <a href="https://github.com/mainsail-crew/mainsail-config">mainsail-config</a> repo with a
+    Moonraker <code>update_manager</code> entry, then restart Klipper.</p>
+    <p><strong>Toolchanger note:</strong> the client macros park the toolhead on pause/cancel —
+    no probing involved, so the probe guard does not interfere. If the default park corner
+    collides with a dock, set <code>variable_custom_park_x/y</code> in
+    <code>[gcode_macro _CLIENT_VARIABLE]</code>.</p>
+  </div>
+</details>
+
+<details class="fold" id="franken-tool">
+  <summary>One "franken-tool": a board behaves as if it had the other tool's config</summary>
+  <div class="fold-body">
+    <p><strong>Symptom examples:</strong> one board shut down by the other tool's sensor config;
+    LEDs or fans reacting on the wrong tool; only one tool showing up although two are
+    configured.</p>
+    <p><strong>Cause:</strong> a copied tool file where an occurrence of the old tool name was
+    missed. Klipper silently merges duplicate config sections (last value wins), so this never
+    errors on its own.</p>
+    <p><strong>Fix:</strong> grep the new tool file for the old name and rename every
+    occurrence. With the current conventions the name only appears in <strong>two</strong>
+    headers — <code>[mcu &lt;name&gt;]</code> and <code>[include_with &lt;name&gt; …]</code> —
+    everything else (sense pins, <code>[vortac_tool &lt;name&gt;]</code>,
+    <code>extruder_name</code>) is injected from the PCB template.
+    <code>vortac_manager</code> refuses to start on the conflicts it can detect (duplicate
+    index/MCU/UUID/sense pins) — fix what it names.</p>
+  </div>
+</details>
+
+<details class="fold" id="thermocouple-fault">
+  <summary>MCU shutdown: <code>Thermocouple reader fault</code></summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> MAX31865 RTD configuration doesn't match the board's reference
+    resistor.</p>
+    <p><strong>Fix:</strong> pairing rule of thumb — PT100 → <code>rtd_reference_r: 430</code>,
+    PT1000 → <code>rtd_reference_r: 4300</code>. Check the actual reference resistor on your
+    board and set the values via <code>overrides:</code> on the tool's
+    <code>[include_with]</code> section (see
+    <a href="configuration.html#overrides">Configuration → overrides</a>).</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Section collision between tools (e.g. <code>input_shaper</code> defined twice)</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> bare Klipper singletons without a name part can't be namespaced by
+    <code>include_with</code>. The known ones (<code>resonance_tester</code>,
+    <code>input_shaper</code>, <code>shaketune</code>) are skipped automatically for
+    <code>tool_index ≥ 1</code>; anything else passes through unchanged.</p>
+    <p><strong>Fix:</strong> add the section to <code>skip_sections:</code> on the colliding
+    tool's <code>[include_with]</code>.</p>
+  </div>
+</details>
+
+<details class="fold" id="ghost-tool">
+  <summary>Tool file commented out, but <code>[vortac_tool &lt;name&gt;]</code> is still in printer.cfg's autosave block</summary>
+  <div class="fold-body">
+    <p><strong>This is by design, not an error.</strong> Dock calibration
+    (<code>params_&lt;dock&gt;_x/y/z</code>) is persisted via <code>SAVE_CONFIG</code> into
+    <code>[vortac_tool &lt;name&gt;]</code> in the autosave block. When the tool's include is
+    commented out, that section remains and loads as a harmless <em>ghost</em>: no sense pins
+    configured → <code>available</code> defaults to <code>False</code>, the manager skips it, and
+    the calibration data survives until the tool returns. Don't delete it unless the tool is gone
+    for good.</p>
+    <p>Set <code>available: True</code> explicitly only for a genuinely sense-pin-less tool
+    (degraded blind-unhook mode) — never to "fix" a ghost.</p>
+  </div>
+</details>
+
+<details class="fold" id="non-contiguous-indices">
+  <summary>Startup error: <code>tool_index values … are not contiguous 0..N-1</code></summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> with order-based numbering this holds by construction, so the
+    error usually means an explicit <code>tool_index:</code> was mixed with auto-numbered
+    includes (the per-printer counter ignores explicit values), or a <code>vortac_tool</code>
+    section was skipped (e.g. via <code>skip_sections:</code>) while another include already
+    counted past it.</p>
+    <p><strong>Fix:</strong> let the include order in <code>tools.cfg</code> do the numbering —
+    remove explicit <code>tool_index:</code> options from tool includes (or use them on
+    <em>all</em> tools consistently), and don't skip the template's <code>vortac_tool</code>
+    placeholder on some tools but not others.</p>
+  </div>
+</details>
+
+<h2 id="grabber-issues">Grabber &amp; calibration</h2>
+
+<details class="fold">
+  <summary><code>VORTAC_MOVE</code> doesn't converge, or needs many passes</summary>
+  <div class="fold-body">
+    <ul>
+      <li><strong>Stale or missing LUT</strong> — re-run <code>VORTAC_CALIBRATE</code> +
+          <code>SAVE_CONFIG</code>. Verify with <code>VORTAC_MESURE</code>:
+          <code>lutPairs</code>/<code>finalPairs</code> must be a straight line with slope 1.</li>
+      <li><strong>Mechanical backlash</strong> — <code>VORTAC_CALIBRATE DIR=both</code> reports it
+          (<code>Backlash … mean/max</code>). If it is large, use direction-constrained modes
+          (<code>MODE=cw|ccw</code>, <code>engage_mode</code>/<code>disengage_mode</code>) and
+          calibrate with <code>DIR=</code> that direction.</li>
+      <li><strong>Lost steps</strong> (binding, too-high speed, too-low stepper current) — lost
+          steps show up as a constant surprise in the next absolute reading. Check that the
+          grabber rotates freely and reduce <code>SPEED</code>.</li>
+      <li><strong>Noisy sensor reads</strong> — increase <code>READS</code> and
+          <code>READ_SETTLE</code>.</li>
+    </ul>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>True angle wrong / jumps at one spot on the circle</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> LUT seam handling problems usually come from a calibration run
+    where the sensor seam fell exactly on a bin, or from an aborted calibration.</p>
+    <p><strong>Fix:</strong> re-run <code>VORTAC_CALIBRATE</code> (the default <code>PHASE</code>
+    pre-roll of half a bin places the seam between bins). Verify the full circle with
+    <code>VORTAC_MESURE SAMPLES=180</code> and plot via <code>dev_scripts/plotData.py</code> —
+    exactly one clean wrap at the 360° seam is expected.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Calibration OK but zero position is off after restart</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> <code>SAVE_CONFIG</code> was skipped — <code>lookup_table</code>
+    and <code>zero_pos_offset</code> are only staged via <code>configfile.set</code> until then.</p>
+    <p><strong>Fix:</strong> re-run <code>VORTAC_SET_ZERO</code> (approach the reference in the
+    operating direction if you use cw/ccw modes), then <code>SAVE_CONFIG</code>.</p>
+  </div>
+</details>
+
+<h2 id="detection-issues">Dock detection</h2>
+
+<details class="fold" id="detect-aborts">
+  <summary><code>VORTAC_DETECT</code> aborts before strobing</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> a tool already reads dock LOW while <em>all</em> dock Tool_id
+    channels are off — the mapping would be ambiguous. Usually a wiring/polarity issue on
+    <code>dock_sense_pin</code>, ambient light triggering the opto, or a dock LED channel that is
+    not actually controlled by the configured <code>argb_led</code>/<code>argb_channel</code>.</p>
+    <p><strong>Debug:</strong> <code>VORTAC_SENSE_STATUS</code> for the raw pin states,
+    <code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=0</code>/<code>1</code> to toggle a single channel
+    manually, <code>VORTAC_SENSE_MONITOR DURATION=10</code> while toggling to watch transitions.
+    Check the pin inversion (<code>!miniGrey:PB15</code>) against your opto logic.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>A tool never flips on its dock's strobe</summary>
+  <div class="fold-body">
+    <ul>
+      <li>Dock LED chain index vs. <code>dockN</code> mismatch — docks map to LED chain indices;
+          verify with <code>VORTAC_DOCK_STROBE</code> that the right physical LED lights up.</li>
+      <li>Wrong <code>argb_channel</code> (Tool_id strobe is the <code>green</code> channel by
+          default).</li>
+      <li><code>dock_strobe_time</code> too short for the opto to settle — raise it in
+          <code>[vortac_manager]</code>.</li>
+      <li>Run <code>VORTAC_DETECT DEBUG=1</code> for per-strobe detail.</li>
+    </ul>
+  </div>
+</details>
+
+<details class="fold" id="sense-channel-off">
+  <summary>Unhook aborts with <code>dock contact … did not return</code> / dock reads HIGH although the tool sits fine</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> <code>dock_sense</code> is <em>actively pulled low by the dock's
+    green LED channel</em> — with green off, the pad always reads HIGH regardless of pogo
+    contact, and every unhook check misinterprets that as lost contact. Typical trigger: a
+    manual <code>SET_LED</code> (or an LED effect) switched the dock's green channel off
+    between detection and the load.</p>
+    <p><strong>Check:</strong> <code>VORTAC_SENSE_STATUS</code> reports the per-dock sense pull
+    state (<code>Dock sense pull (green)</code>) and warns when any dock has it off. With
+    <code>argb_status_mode: sense</code> the blue status LED mirrors it, so a dark status LED at
+    the dock is the visual giveaway — in the other status modes blue says nothing about the sense
+    pull.</p>
+    <p><strong>Fix:</strong> the manager reconciles every dock LED at <code>klippy:ready</code>,
+    before every tool change, and after every <code>VORTAC_DETECT</code> — so on current firmware
+    this recovers automatically. Manually: <code>VORTAC_DOCK_STROBE DOCK=dockN VALUE=1</code>.</p>
+  </div>
+</details>
+
+<details class="fold" id="no-dock-known">
+  <summary>Tool change fails: <code>no dock known … — run VORTAC_DETECT</code></summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> docks are established at runtime by <code>VORTAC_DETECT</code>
+    (<code>home_dock</code> is only an optional manual fallback), and no detection has run yet —
+    the manager has no dock to fetch the tool from or park it at.</p>
+    <p><strong>Fix:</strong> run <code>VORTAC_DETECT</code> before the first tool change — put it
+    in your <code>PRINT_START</code>. Alternatively, pin a manual fallback on the tool via
+    include_with overrides (<code>vortac_tool TN.home_dock: dockX</code>).</p>
+  </div>
+</details>
+
+<details class="fold" id="no-free-calibrated-dock">
+  <summary>Warning after <code>VORTAC_DETECT</code>: grabbed tool has no free dock with calibrated positions</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> a grabbed tool is assigned the first <em>free</em> dock that has
+    <em>calibrated</em> positions for it (a previous choice — fetch origin or manual
+    <code>home_dock</code> — is kept if still free and calibrated). If every calibrated dock is
+    occupied, or no dock was ever calibrated for this tool, detection warns:
+    <code>VORTAC_UNLOAD</code> / tool changes will fail until a dock is calibrated for it or a
+    dock is freed.</p>
+    <p><strong>Fix:</strong> calibrate a dock position for the tool
+    (<a href="calibration.html#dock-positions">Calibration → Dock positions</a>, or the manual
+    <code>VORTAC_DOCK_SAVE_POS</code> fallback), or free an already-calibrated dock, then re-run
+    <code>VORTAC_DETECT</code>.</p>
+  </div>
+</details>
+
+<details class="fold" id="change-refused">
+  <summary><code>refusing to park … / refusing to fetch …</code></summary>
+  <div class="fold-body">
+    <p>The tool change aborted <em>before moving</em> because the manager's state and the sense
+    pins disagree. Four distinct refusals, all of them cheap insurance against a collision:</p>
+    <ul>
+      <li><strong>&ldquo;the dock map says X is already sitting there&rdquo;</strong> — the park
+      destination is believed occupied by another tool. Driving the held tool in would wreck
+      both.</li>
+      <li><strong>&ldquo;the dock map says X is sitting there&rdquo;</strong> (on a fetch) — the
+      target's dock is assigned to a different tool, and completing the fetch would erase that
+      tool's only occupancy record and leave its dock de-energized.</li>
+      <li><strong>&ldquo;dock_sense says it is still sitting in a dock&rdquo;</strong> — the
+      manager thinks it holds a tool that is provably still parked, so the park would drive the
+      <em>empty</em> grabber down onto it. Almost always a
+      <code>VORTAC_SET_CURRENT_TOOL</code> that does not match reality.</li>
+      <li><strong>&ldquo;grab_sense says X is still in the grabber&rdquo;</strong> — a fetch was
+      requested with a tool still on the carriage (a cleared current tool, or a detection that
+      could not see a sense-pin-less tool). It would ram the held tool into the target's
+      dock.</li>
+    </ul>
+    <p><strong>Fix:</strong> <code>VORTAC_DETECT</code>. It rebuilds the map from the sense pins
+    and resyncs the held tool, which resolves all four. If a refusal survives detection, the
+    sense wiring disagrees with physical reality — start at
+    <code>VORTAC_SENSE_STATUS</code>.</p>
+  </div>
+</details>
+
+<h2 id="power-issues">Dock power</h2>
+
+<details class="fold" id="mcu-missing-after-change">
+  <summary>Klipper will not start: <code>Unable to connect</code> / MCU missing for one tool</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> that tool's dock is switched off and the tool is sitting in it, so
+    the board never comes up on the CAN bus. WS2812 keep their last value across a klippy
+    restart, so a dock left dead by an aborted tool change is still dead at the next
+    <code>mcu_identify</code> — and that happens <em>before</em> Klipper ever programs the dock
+    LED, so nothing in the firmware can rescue it.</p>
+    <p><strong>Fix:</strong> <strong>power-cycle the printer.</strong> That clears the LED latch,
+    and the unprogrammed state is &ldquo;powered&rdquo; by design
+    (<code>dock_power_invert</code>). Klipper then starts normally.</p>
+    <p><strong>Why it happened:</strong> normal operation cannot produce this state —
+    <code>RESTART</code> and <code>FIRMWARE_RESTART</code> are wrapped to energize every dock
+    first, and every failure path of a fetch restores the supply. Suspect one of:</p>
+    <ul>
+      <li>a manual <code>SET_LED</code> that raised the supply channel, followed by a
+          <em>service</em> restart (<code>systemctl restart klipper</code>) — the restart guard
+          only covers the gcode commands; a service restart kills the host without running any
+          klippy code. The dock power watchdog reverts such tampering within
+          <code>dock_power_watchdog</code> seconds (default 5), so this window is nearly closed
+          on current firmware;</li>
+      <li>a hard <code>M112</code>/power loss mid-change;</li>
+      <li>a manual <code>VORTAC_DOCK_POWER … VALUE=0 FORCE=1</code>.</li>
+    </ul>
+    <p>If it repeats without any of these, that is a bug worth reporting.</p>
+    <div class="callout warn">
+    <p>Check <code>initial_RED: 0.0</code> in the <code>[neopixel]</code> dock section. A
+    non-zero value means &ldquo;supply cut&rdquo; on Vortac hardware and would starve every tool
+    board at startup.</p>
+    </div>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>A dock tile in KlipperScreen is red and says <code>NO POWER</code></summary>
+  <div class="fold-body">
+    <p><strong>Meaning:</strong> the manager believes that dock holds a tool while its supply is
+    switched off. Left alone, that board will be missing after the next restart (above).</p>
+    <p><strong>Fix:</strong> tap the tile and confirm, or run
+    <code>VORTAC_DOCK_POWER DOCK=dockN VALUE=1</code>. Then <code>VORTAC_DETECT</code> to get a
+    clean map. Switching a dock <em>off</em> is deliberately not offered from the touchscreen.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary><code>still hooked at dockN (attempt 3/3)</code> although nothing is stuck</summary>
+  <div class="fold-body">
+    <p><strong>Meaning:</strong> after the checked Z lift the manager backs out by
+    <code>dock_check_ystep</code> in Y and expects <code>dock_sense</code> to go HIGH &mdash; the
+    pogo pin sliding off its landing pad is what signals a clean release. It stayed LOW, so the
+    verdict is &ldquo;hooks did not release&rdquo;, the tool is re-seated and the attempt repeats.</p>
+    <p><strong>Telling a false positive from a real bind:</strong> a real bind usually clears on
+    one of the retries or shows up as a <code>tilt</code> (dock contact lost during the lift). All
+    three attempts failing identically, with the tool visibly free on the hooks, points at the
+    step simply being too short: the pin is still on the pad. The relevant dimension is the
+    <em>Y extent of the pad</em> (plus any Y compliance of the spring-loaded dock board, which is
+    riding at the top of its travel at that moment), not the pin's own spring travel.</p>
+    <p><strong>Fix:</strong> read the checkpoints in <code>klippy.log</code>
+    (<code>vortac unhook &lt;tool&gt;: backout +2.000mm dock=LOW grab=LOW</code>) and raise
+    <code>dock_check_ystep</code> in <code>[vortac_manager]</code> (see
+    <a href="modules.html#dock-motion-options">Dock motion options</a>)
+    until <code>dock</code> reads HIGH on the first step. Raising
+    <code>dock_check_steps</code> instead gives the pin several steps to clear the pad
+    before a verdict is passed. The backout happens at Z&nbsp;+&nbsp;<code>dock_z_clearance</code>
+    with the tool off the hooks, so a longer step is not in itself risky.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Docks stay powered even though they are empty</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> by design. Only a dock <em>positively known</em> to be empty is
+    de-energized. Anything uncertain stays live: no detection has run yet, the dock was ambiguous
+    in the last pass, some tool could not be placed, or more than one tool read grabbed at once
+    (a lying <code>grab_sense</code> can hide a parked tool) — the last two cases hold
+    <em>all</em> docks on, because that tool may be sitting in a dock that read empty precisely
+    because its board was already dark.</p>
+    <p>Two configurations pin every dock on <em>permanently</em>, because detection can never
+    locate the tool in question:</p>
+    <ul>
+      <li>a tool with <code>available: True</code> but no sense pins (the degraded blind-unhook
+          mode) — it has no <code>dock_sense</code> to strobe;</li>
+      <li>a tool with <code>available: False</code> whose <code>[mcu&nbsp;…]</code> section is
+          still included — klippy needs that board on the bus, but this module never sees it.
+          <code>klippy.log</code> carries a warning naming it at startup.</li>
+    </ul>
+    <p><strong>Check:</strong> <code>VORTAC_STATUS</code> shows the dock power map and, in
+    brackets, which docks are being held on. Run <code>VORTAC_DETECT</code> and resolve the
+    <code>Missing</code> / <code>Ambiguous</code> / <code>Unknown sense</code> lines it
+    reports.</p>
+  </div>
+</details>
+
+<h2 id="probing-issues">Probing &amp; gantry</h2>
+
+<details class="fold">
+  <summary><code>QUAD_GANTRY_LEVEL</code> / <code>PROBE</code> / <code>BED_MESH_CALIBRATE</code> refuses to run</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> this is the manager's probe guard, not an error. A tool is held
+    (logically, or a <code>grab_sense</code> pin reads grabbed). Probing with a tool would crash
+    the nozzle into the bed — the probe touch point sits above the nozzle tip.</p>
+    <p><strong>Fix:</strong> <code>VORTAC_UNLOAD</code>, probe, then pick the tool back up. If no
+    tool is physically held but the guard still triggers, check
+    <code>VORTAC_SENSE_STATUS</code> — a stuck/misconfigured <code>grab_sense_pin</code> reads as
+    grabbed — and clear a stale logical tool with
+    <code>VORTAC_SET_CURRENT_TOOL CLEAR=1</code>.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>First layer / dock approach wrong after a restart or Z-home</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> the FLAT/TILT state of <code>[vortac_qgl_state]</code> is RAM only.
+    A power cycle, a Klipper restart or a fresh Z-home resets it to <code>flat</code> and clears
+    the stored QGL deltas.</p>
+    <p><strong>Fix:</strong> re-run <code>QUAD_GANTRY_LEVEL</code> (with no tool held) before
+    printing. Check with <code>VORTAC_QGL_STATUS</code>. If Z was re-homed while a tool was held:
+    <code>VORTAC_UNLOAD</code> → <code>QUAD_GANTRY_LEVEL</code> → reload the tool.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>No bed mesh / gcode offset gone after a manual VORTAC_GANTRY_FLAT</summary>
+  <div class="fold-body">
+    <p><strong>Cause:</strong> that is the dock coordinate system doing its job —
+    <code>VORTAC_GANTRY_FLAT</code> parks the bed mesh and the gcode offset because both are
+    bed-referenced and invalid frame-flat (see
+    <a href="modules.html#vortac-qgl-state">two coordinate systems</a>).
+    <code>VORTAC_QGL_STATUS</code> shows <code>frame: dock</code>, the parked offset and
+    whether a mesh is suspended.</p>
+    <p><strong>Fix:</strong> <code>VORTAC_GANTRY_TILT</code> (or the panel's <em>Tilt</em>
+    button) hands both back — the offset is <em>added</em> on top of whatever is live, so
+    babystepping done in the dock frame survives too. A <code>QUAD_GANTRY_LEVEL</code> does
+    it as well, since QGL ends bed-tilted by definition.</p>
+    <p><strong>Lost for good only across a restart:</strong> the parked values are RAM, like
+    <code>homing_origin</code> itself. Re-run <code>QUAD_GANTRY_LEVEL</code> and
+    <code>BED_MESH_PROFILE LOAD=…</code>. If you would rather keep the toggle gantry-only,
+    set <code>manage_coordinate_system: False</code> on <code>[vortac_qgl_state]</code>.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary><code>VORTAC_DOCK_CAL_SAVE</code> / <code>VORTAC_DOCK_SAVE_POS</code> refuses</summary>
+  <div class="fold-body">
+    <ul>
+      <li>Gantry is <code>tilted</code> — dock geometry is only valid frame-flat:
+          <code>VORTAC_GANTRY_FLAT</code> first.</li>
+      <li>No dock/tool selected — run <code>VORTAC_SELECT_DOCK DOCK=dockN</code> (which needs the
+          tool to be detected in that dock) before <code>VORTAC_DOCK_CAL_SAVE</code>.</li>
+    </ul>
+  </div>
+</details>
+
+<h2 id="docs-issues">These docs</h2>
+
+<details class="fold">
+  <summary>Checkboxes don't stay checked</summary>
+  <div class="fold-body">
+    <p>Checklist state is stored in your browser's <code>localStorage</code>, keyed per page. It
+    is lost if you clear site data, use a private window, or open the docs from a different
+    origin/path. Some browsers restrict <code>localStorage</code> for <code>file://</code> pages —
+    serving the folder (e.g. <code>python3 -m http.server</code> in <code>DOCS/</code>) always
+    works.</p>
+  </div>
+</details>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

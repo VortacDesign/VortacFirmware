@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Module Reference — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Module Reference</h1>
+<p class="subtitle">Internals of the Klipper extras in <code>klippy/extras/</code>. For the
+command tables, see the <a href="gcode.html">G-code Reference</a>.</p>
+
+<div class="callout">
+  <span class="callout-title">The Klipper plugin contract</span>
+  <p>Klipper imports an extra when it sees a config section matching the file name. The factory
+  functions are <code>load_config(config)</code> for singleton sections
+  (<code>[vortac_grabber]</code>) and <code>load_config_prefix(config)</code> for prefix sections
+  (<code>[vortac_tool T0]</code>, <code>[include_with foo bar]</code>). Extras look up shared
+  objects via <code>printer.lookup_object(…)</code>, register commands via
+  <code>gcode.register_command(…)</code>, and persist tuned values via
+  <code>configfile.set(…)</code> + user-run <code>SAVE_CONFIG</code>.</p>
+</div>
+
+<h2 id="vortac-grabber">vortac_grabber — [vortac_grabber]</h2>
+<p>Hardware-only module: AS5047D angle sensor (SPI), closed-loop control of the
+<code>[manual_stepper grabber]</code>, LUT-based raw→true angle interpolation.</p>
+<ul>
+  <li><strong>Python API</strong> (called by the manager): <code>engage(angle=None, gcmd=None)</code>,
+      <code>disengage(gcmd=None)</code>, <code>read_angle(gcmd=None)</code>.</li>
+  <li><strong>Calibration</strong> (<code>VORTAC_CALIBRATE</code>): synchronous direct-read
+      (multi-turn, last-turn-wins, circular mean per bin). <code>DIR=both</code> (default) sweeps
+      cw then ccw, stores the per-bin circular midpoint and reports the cw/ccw spread as a
+      backlash measurement. Details in <a href="calibration.html#lut">Calibration</a>.</li>
+  <li><strong>Closed-loop moves</strong> (<code>VORTAC_MOVE</code>, engage/disengage): each pass
+      commands the full remaining error in one <code>force_move.manual_move</code>, re-measures,
+      repeats — typically 1–2 moves; lost steps show up in the next absolute reading.
+      <code>MODE=cw|ccw</code> constrained moves stop
+      <code>max(BACKOFF, GUARD_FRAC·dist)</code> short per pass so overshoot never forces an
+      extra revolution. <code>cw</code> means <em>increasing</em> true angle.</li>
+  <li><strong>Persistence:</strong> <code>lookup_table</code> and <code>zero_pos_offset</code>
+      are written via <code>configfile.set</code> → user runs <code>SAVE_CONFIG</code>.</li>
+</ul>
+
+<h3>Config options</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>angleSensor</code></td><td>(required)</td><td>name of the <code>[angle …]</code> section for the AS5047D</td></tr>
+<tr><td><code>speed</code></td><td>50</td><td>default move speed (deg/s) for closed-loop moves</td></tr>
+<tr><td><code>engage_pos</code></td><td>130</td><td>true angle for <code>VORTAC_ENGAGE</code> / <code>engage()</code></td></tr>
+<tr><td><code>disengage_pos</code></td><td>0</td><td>true angle for <code>VORTAC_DISENGAGE</code> / <code>disengage()</code></td></tr>
+<tr><td><code>engage_mode</code></td><td>shortest</td><td>direction constraint for engage: <code>shortest</code>, <code>cw</code>, <code>ccw</code></td></tr>
+<tr><td><code>disengage_mode</code></td><td>shortest</td><td>direction constraint for disengage</td></tr>
+<tr><td><code>move_tol</code></td><td>2.0</td><td>° that counts as arrived for <code>engage()</code>/<code>disengage()</code> (and default <code>TOL</code> of <code>VORTAC_MOVE</code>); missing it raises</td></tr>
+<tr><td><code>lookup_table</code></td><td>(saved)</td><td>JSON LUT <code>[[true_deg, raw_deg], …]</code> written by <code>VORTAC_CALIBRATE</code></td></tr>
+<tr><td><code>zero_pos_offset</code></td><td>0.0</td><td>offset written by <code>VORTAC_SET_ZERO</code></td></tr>
+</tbody>
+</table>
+</div>
+<div class="callout tip">
+  <span class="callout-title">engage()/disengage() report success</span>
+  <p>Both return the measured final angle and <strong>raise</strong> when the closed loop did not
+  land within <code>move_tol</code> — the closed loop itself only ever <em>reported</em> a failed
+  convergence and returned. Verification therefore lives in one place instead of in every caller:
+  the manager calls <code>disengage()</code> before entering a dock and <code>engage()</code>
+  before lifting a tool, and a stalled stepper or bad angle reading stops the tool change right
+  there. <code>CHECK=0</code> on <code>VORTAC_ENGAGE</code>/<code>VORTAC_DISENGAGE</code>/<code>VORTAC_MOVE</code>
+  downgrades it to a report for manual work.</p>
+</div>
+
+<details class="fold">
+  <summary>Deep dive: angle math on a circle</summary>
+  <div class="fold-body">
+    <p>All angle math wraps to <code>[0, 360)</code> and must handle seam crossings. The
+    <code>wrap360</code> / <code>wrap180</code> / <code>circ_mean</code> helpers in
+    <code>vortac_grabber.py</code> are the reference implementations —
+    <code>_measured_to_true</code> does wrap-aware circular interpolation across the LUT,
+    including entries that straddle the 0°/360° seam. <code>read_raw</code> builds 16-bit AS5047D
+    SPI commands (with parity bit) and returns the angle in degrees at 14-bit precision.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Deep dive: the standard stepper-nudge pattern</summary>
+  <div class="fold-body">
+    <p>The grabber stepper is never driven through the kinematics path. The standard pattern is
+    <code>force_move.manual_move(stepper, distance, speed)</code> followed by
+    <code>toolhead.wait_moves()</code> and a small <code>dwell</code> to let the sensor settle
+    before reading. Keep this pattern for any new grabber motion code.</p>
+  </div>
+</details>
+
+<h2 id="vortac-tool">vortac_tool — [vortac_tool &lt;name&gt;]</h2>
+<p>Per-tool logical definition. Normally <strong>injected by <code>include_with</code></strong>
+from the PCB template's <code>[vortac_tool TN]</code> placeholder (identity auto-filled); a
+statically written <code>[vortac_tool T0]</code> still works. The tool <em>hardware</em> must
+already be present in normal Klipper config (<code>[mcu &lt;name&gt;]</code> plus
+<code>[include_with &lt;name&gt; …]</code>) before this extra loads — Klipper registers MCU pin
+chips before extras run.</p>
+<ul>
+  <li><strong>Identity:</strong> injected sections get <code>tool_index</code>,
+      <code>mcu_name</code>, <code>display_name</code>
+      (<code>&lt;namespace&gt;&lt;index&gt;</code> — the dashboard prefix of the injected hardware
+      sections, also exposed via <code>get_status</code>; address hardware index-proof in macros
+      via <code>{tool.display_name}_logo_rgb</code>) and <code>extruder_name</code> from
+      <code>include_with</code>; static
+      <code>[vortac_tool T1]</code> sections derive them from the trailing number
+      (<code>T1</code> → index 1, <code>tool1</code>, <code>extruder1</code>,
+      <code>home_dock=dock1</code>). <code>home_dock</code> is <strong>not</strong> derived from
+      the (order-based, unstable) <code>tool_index</code> and is <strong>optional</strong> —
+      docks are established at runtime by <code>VORTAC_DETECT</code>; a manual fallback can be
+      pinned via include_with overrides (<code>vortac_tool TN.home_dock: dockX</code>).</li>
+  <li><strong>Availability &amp; ghosts:</strong> <code>available:</code> defaults to
+      <code>True</code> only when <em>both</em> sense pins are configured. A leftover
+      autosave-only section (a commented-out tool whose SAVE_CONFIG'd <code>params_*</code> dock
+      positions remain in <code>printer.cfg</code>) therefore loads harmlessly as a "ghost":
+      <code>tool_index=None</code>, <code>available=False</code>, calibration preserved until the
+      tool file returns. A genuinely sense-pin-less tool (degraded blind-unhook mode) must set
+      <code>available: True</code> explicitly.</li>
+  <li><strong>Per-dock storage:</strong> <code>params_&lt;dock&gt;_&lt;x|y|z&gt;</code>
+      (persisted via <code>configfile.set</code> + SAVE_CONFIG; keyed by tool NAME, so calibration
+      survives renumbering). Manager-facing API: <code>get_dock_pos(dock, axis)</code>,
+      <code>has_dock_pos(dock)</code>, <code>save_dock_pos(dock, x, y, z)</code>.</li>
+  <li><strong>Templates:</strong> <code>tool_activate_gcode</code> /
+      <code>tool_deactivate_gcode</code> — run by the manager around the dock motion. Jinja
+      context: <code>tool</code> (this VortacTool), <code>dock=None</code>,
+      <code>params</code>. <strong>Optional here.</strong> Absent, the manager's own templates
+      of the same name run instead (themselves optional). A tool spells one out only to deviate;
+      it then replaces the shared one for that tool (empty value = run nothing). Reported as
+      <code>has_activate_gcode</code> / <code>has_deactivate_gcode</code> in the tool's status.
+      Note these hooks carry no safety role — the temperature wait and the retract pairing are
+      the manager's, and cannot be switched off by leaving a hook empty.</li>
+</ul>
+
+<h2 id="vortac-manager">vortac_manager — [vortac_manager]</h2>
+<p>The coordinator. At <code>klippy:connect</code> it discovers all
+<code>[vortac_tool *]</code> sections (only those with <code>available=True</code>; ghosts are
+skipped), the grabber (required), and <code>[vortac_qgl_state]</code> (optional), then registers
+a <code>T&lt;tool_index&gt;</code> command for every available tool — the command comes from the
+INDEX, tool ids are names like <code>miniGrey</code>. <code>TOOL=</code> parameters
+accept the tool name (case-insensitive), <code>T&lt;n&gt;</code>, or a bare index.
+<code>VORTAC_STATUS</code> lists tools as <code>&lt;name&gt; (T&lt;index&gt;)</code>.</p>
+
+<h3>Config options</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>dock_count</code></td><td>(required)</td><td>number of docks (dock0…dockN-1, mapped to LED chain indices)</td></tr>
+<tr><td><code>argb_led</code></td><td>—</td><td>neopixel chain carrying the dock LEDs</td></tr>
+<tr><td><code>argb_channel</code></td><td>green</td><td>sense-pull channel (active-low pad)</td></tr>
+<tr><td><code>argb_status_channel</code></td><td>blue</td><td>status LED channel (<code>none</code> disables it)</td></tr>
+<tr><td><code>argb_status_mode</code></td><td>sense</td><td>what the status LED shows: <code>sense</code> (mirrors the sense pull), <code>power</code> (lit while the dock feeds its tool board), <code>detected</code> (full = tool detected, dim = confirmed empty, off = map not trustworthy)</td></tr>
+<tr><td><code>argb_status_dim</code></td><td>0.15</td><td>brightness of the &ldquo;confirmed empty&rdquo; level in <code>detected</code> mode</td></tr>
+<tr><td><code>dock_power_mode</code></td><td>off</td><td><code>off</code> / <code>occupancy</code> / <code>handover</code> &mdash; see <a href="#dock-power">Dock power</a>; any mode except <code>off</code> requires <code>argb_led</code> and a <code>dock_power_channel</code> (startup error otherwise)</td></tr>
+<tr><td><code>dock_power_channel</code></td><td>red</td><td>channel gating the parked tool board's supply</td></tr>
+<tr><td><code>dock_power_invert</code></td><td>True</td><td>channel HIGH cuts the supply, 0.0 = powered (Vortac hardware; do not flip, see below)</td></tr>
+<tr><td><code>dock_power_settle</code></td><td>0.25</td><td>seconds to wait after energizing a dock before relying on the board</td></tr>
+<tr><td><code>dock_power_watchdog</code></td><td>5.0</td><td>seconds between supply-channel checks against the policy (reverts manual <code>SET_LED</code> tampering); 0 disables</td></tr>
+<tr><td><code>dock_seat_press</code></td><td>0.0</td><td>mm of overtravel below the hooked Z after a seated hook-in, pressing the hooks into their seat before the grabber releases; 0 disables</td></tr>
+<tr><td><code>dock_strobe_time</code></td><td>0.10</td><td>seconds to wait after each strobe change</td></tr>
+<tr><td><code>auto_detect</code></td><td>True</td><td>run <code>VORTAC_DETECT</code> automatically after startup, so the dock map exists without a manual step</td></tr>
+<tr><td><code>auto_detect_delay</code></td><td>3.0</td><td>seconds after <code>klippy:ready</code> before the auto-detect runs (lets the tool boards deliver their first sense readings)</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>Identity validation</h3>
+<p>Startup fails with a clear message if two tools share a <code>tool_index</code>,
+<code>mcu_name</code>, <code>canbus_uuid</code>, or sense pin, if the non-ghost tools' indices
+are not contiguous 0..N-1 (Klipper's extruder-naming contract; holds by construction with
+order-based numbering), if an available tool lacks <code>tool_index</code>, or if a tool's
+<code>mcu_name</code> has no matching <code>[mcu …]</code> section. Klipper itself merges duplicate config sections silently (last
+value wins), so a copied-but-not-fully-renamed tool file never errors on its own — this guard
+catches the detectable leftovers.</p>
+
+<h3>Tool-change sequence (<code>_change_to</code>)</h3>
+<pre><code>_ensure_sense_active (reconcile all dock LEDs: sense pull, supply, status)
+→ tool_deactivate_gcode
+→ VORTAC_GANTRY_FLAT
+→ SET_GCODE_OFFSET X=0 Y=0 Z=0 (capture live adjustment, zero for dock motion)
+→ suspend bed mesh (move transform — would shift dock Z)
+→ _park_at_dock(current)
+→ _fetch_from_dock(target)
+→ VORTAC_GANTRY_TILT
+→ restore bed mesh
+→ ACTIVATE_EXTRUDER EXTRUDER=&lt;extruder_name&gt; (automatic)
+→ SET_GCODE_OFFSET (per-tool offsets + captured live adjustment)
+→ tool_activate_gcode</code></pre>
+
+<div class="callout">
+  <span class="callout-title">Dock motion is offset-free</span>
+  <p>Dock positions are taught in kinematic coordinates
+  (<code>toolhead.get_position()</code>), but the dock routines run as <code>G1</code> moves —
+  which the G-code offset would shift. The manager therefore zeroes the offset before any dock
+  motion: neither saved per-tool offsets, hand-set <code>SET_GCODE_OFFSET</code> values nor live
+  Z babystepping ever move the docks. The <strong>bed mesh</strong> is suspended for the same
+  reason — it is a move transform on every <code>G1</code> that would shift the dock Z by the
+  edge-clamped mesh value at the dock XY (and a mesh probed bed-tilted is invalid frame-flat
+  anyway); it is restored right after <code>VORTAC_GANTRY_TILT</code>, jump-free. The <em>live adjustment</em> — whatever the offset carried
+  beyond the leaving tool's configured values (i.e. babystepping) — is captured and re-applied
+  on top of the target tool's offsets after the change, so a first-layer tweak survives a
+  multi-tool print. If a change aborts mid-motion the offsets stay zeroed — the safe state for
+  manual recovery. The manager tracks whether the held tool's offsets are actually active
+  (<code>offsets_applied</code>): after an abort the next change treats the whole remaining
+  offset as live adjustment instead of mis-subtracting config values, re-issuing
+  <code>T&lt;n&gt;</code> for the already-held tool re-applies its offsets, and
+  <code>VORTAC_SET_CURRENT_TOOL</code> / <code>VORTAC_DETECT</code> reset the flag when they
+  (re)declare the held tool.</p>
+</div>
+
+<h3 id="probe-guard">Probe guard</h3>
+<p>At <code>klippy:connect</code> the manager wraps the <code>[probe]</code> object's entry
+points (<code>start_probe_session</code> / <code>run_probe</code>), so <strong>every</strong>
+probe-based operation — <code>QUAD_GANTRY_LEVEL</code>, <code>BED_MESH_CALIBRATE</code>,
+<code>PROBE</code>, <code>PROBE_ACCURACY</code>, <code>PROBE_CALIBRATE</code>, … — refuses while
+a tool is held (logical <code>current_tool</code> OR any tool's <code>grab_sense</code> reading
+grabbed). Reason: the probe touch point sits above the nozzle tip when a tool is grabbed, so the
+nozzle would hit the bed before the probe triggers. Park the tool
+(<code>VORTAC_UNLOAD</code>) before probing.</p>
+
+<h3 id="dock-motion-options">Dock motion options</h3>
+<p>All of the dock routine's geometry, feedrates and check parameters are
+options of <code>[vortac_manager]</code>. The values below are the built-in
+defaults — they apply unless the config overrides them. Feedrates are mm/min
+(they go straight into the <code>G1 F</code> word).</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Option</th><th>Default</th><th>Range</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>dock_y_safe</code></td><td>50.0</td><td>1 … 200</td><td>safe Y line in front of the docks</td></tr>
+<tr><td><code>dock_z_clearance</code></td><td>5.0</td><td>0.5 … 50</td><td>lift above the saved (hooked/engage) Z</td></tr>
+<tr><td><code>dock_approach_hop</code></td><td>5.0</td><td>0 … 50</td><td>relative Z hop before the Y/X travel when below the approach height</td></tr>
+<tr><td><code>dock_approach_feedrate</code></td><td>2000</td><td>60 … 30000</td><td>approach feedrate</td></tr>
+<tr><td><code>dock_slide_feedrate</code></td><td>400</td><td>10 … 6000</td><td>Y slide in/out feedrate — Y only</td></tr>
+<tr><td><code>dock_lift_feedrate</code></td><td>40</td><td>5 … 1200</td><td>checked Z lift/drop feedrate</td></tr>
+<tr><td><code>dock_backout_feedrate</code></td><td>40</td><td>5 … 1200</td><td>checked Y backout feedrate</td></tr>
+<tr><td><code>dock_check_zstep</code></td><td>1.0</td><td>&gt;0 … 10</td><td>Z per checked step (hook and unhook)</td></tr>
+<tr><td><code>dock_check_ystep</code></td><td>2.0</td><td>&gt;0 … 20</td><td>Y per checked backout step — must exceed the landing pad</td></tr>
+<tr><td><code>dock_check_steps</code></td><td>1</td><td>1 … 10</td><td>number of checked backout steps</td></tr>
+<tr><td><code>dock_retries</code></td><td>3</td><td>1 … 10</td><td>re-seat + retry attempts before aborting</td></tr>
+<tr><td><code>dock_contact_settle</code></td><td>1.0</td><td>0 … 10</td><td>s to wait for <code>dock_sense</code> after the seat press</td></tr>
+<tr><td><code>sense_settle</code></td><td><code>dock_strobe_time</code> (0.10)</td><td>0.01 … 2</td><td>s pause after each checked step before the sense pins are read</td></tr>
+<tr><td><code>retreat_drop</code></td><td>150</td><td>0 … —</td><td>mm to drop from the clearance height after a dock operation; 0 disables</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>dock_check_ystep × dock_check_steps</code> must stay within
+<code>dock_y_safe</code>, otherwise the checked backout would overshoot the
+safe line — that combination is rejected at startup.</p>
+<p>Behaviour that is the same for every tool — retract on park, standby temperature,
+wait-and-prime on pickup — belongs in <code>[vortac_manager]</code>'s own
+<code>tool_activate_gcode</code> / <code>tool_deactivate_gcode</code>, which run for every tool
+and default to <strong>empty</strong> — they are extension points for a purge bucket, a nozzle
+wipe or an LED. The retract, the standby temperature and the wait for the arriving tool are the
+module's own doing (<code>_park_temperature_and_retract</code> /
+<code>_pickup_temperature_and_prime</code>), tuned with typed options
+(<code>standby_delta</code>, <code>park_retract</code>, …) rather than gcode, because they are
+identical on every machine and a print depends on them. A <code>[vortac_tool]</code> section overrides them only where it genuinely
+deviates. <code>VORTAC_STATUS</code> reports which of the two is in effect. Saved dock positions are
+the hooked/engage position; load uses saved Z then lifts to
+Z&nbsp;+&nbsp;<code>dock_z_clearance</code>, and unload approaches at
+Z&nbsp;+&nbsp;<code>dock_z_clearance</code> before dropping to saved Z.</p>
+
+<h3 id="dock-approach">Sequential (axis-by-axis) dock approach</h3>
+<p>The move to the dock front is never a single combined <code>G1 X Y Z</code>. A
+combined move takes the shortest diagonal, and that diagonal cuts through the
+dock row: with a tool on the grabber it can clip a neighbouring tool, and it
+arrives at the target dock at an angle instead of head-on. Every approach
+(<code>_approach_dock()</code>) is therefore split into axis-aligned moves, always
+in the same order:</p>
+<ol>
+  <li><strong>Y</strong> out to the safe line (<code>y + dock_y_safe</code>) — the
+      slide-out direction, the one move that can always be made, whether the carriage
+      stands in a dock or out in the printer.</li>
+  <li><strong>X</strong> across at the safe line, clear of every dock.</li>
+  <li><strong>Z</strong> last, with X/Y already on the dock.</li>
+</ol>
+<p>Ahead of those three, a relative <code>dock_approach_hop</code> lift runs
+if the carriage sits below the approach height, so a held tool does not scrape over the
+tool plate or catch on the print during the Y/X travel. It is deliberately a small hop and
+not a lift all the way to the approach height — that would be the Z-before-Y order this
+avoids.</p>
+<p>The approach ends with a <code>wait_moves()</code> so the queued corner blending cannot
+start the Y slide-in while the approach is still running — and so the dock supply switching
+in <code>handover</code> mode still happens with the carriage standing still.</p>
+
+<h3 id="dock-retreat">Leaving the dock area (retreat)</h3>
+<p>Every dock routine <em>ends</em> on the safe line at
+<code>(dock_x, dock_y + dock_y_safe)</code>, at the clearance height. The next move belongs to
+whoever called the tool change — a slicer travel, a prime line, a macro — and as a single
+<code>G1</code> it takes the diagonal, which at dock height runs straight along (or through)
+the other tools.</p>
+<p><code>_retreat_from_dock()</code> closes the sequence as step 4b of the tool change, and it
+is the <strong>exact mirror of <code>_approach_dock()</code></strong>. The approach raises Z
+<em>last</em>, once X and Y already sit on the dock; the retreat lowers it straight back down by
+<code>retreat_drop</code>. Standing on the safe line the column below the carriage is clear by
+construction — that is what <code>dock_y_safe</code> buys — which makes the drop the move that
+can always be made here, the way Y-out always can on the way in.</p>
+<div class="callout tip">
+  <span class="callout-title">One move, and the carriage is free</span>
+  <p>The docks sit at the top of the Z travel. Drop below them and the dock row is simply not
+  in the plane of motion any more, so whatever diagonal the next <code>G1</code> takes cannot
+  touch anything. That is why there is no X/Y retreat to configure: the dock routine already
+  ends <code>dock_y_safe</code> clear of every tool, and dropping out of the dock plane
+  releases the carriage to go anywhere.</p>
+</div>
+<p><strong>The drop is relative, not an absolute height.</strong> At retreat time the carriage
+stands on the dock clearance height by construction, so the move is measured from there — nothing
+has to be invented or kept in sync with the dock positions, and moving the docks moves the retreat
+with them. It defaults to 150&nbsp;mm and is clamped to the Z axis minimum, so an oversized value
+lands on the endstop instead of aborting the tool change with an out-of-range move;
+<code>retreat_drop: 0</code> disables the retreat entirely. Pick a value deep enough to clear the
+docks and shallow enough to stay above the tallest print you run.</p>
+<p>The drop uses <code>dock_approach_feedrate</code>, the same feedrate the approach raised Z
+with, so both halves of the trip are symmetric in speed as well as in order. It runs while the
+G-code offsets are still zeroed and the bed mesh still suspended, so it is a pure kinematic move
+in the same frame the dock positions were taught in — and it runs on a plain unload (no target
+tool) too, so <code>VORTAC_UNLOAD</code> leaves the carriage clear as well.</p>
+
+<h3 id="hook-verification">Checked hook / unhook (sense-verified Z phases)</h3>
+<p>Both Z phases at the dock are stepwise and sense-verified with the same
+<code>dock_check_zstep</code>/<code>dock_lift_feedrate</code>; the checked Y backout steps use
+<code>dock_check_ystep</code>/<code>dock_backout_feedrate</code>, the free Y slides
+<code>dock_slide_feedrate</code>. Every step drains the motion queue
+(<code>wait_moves()</code>), pauses <code>sense_settle</code> seconds so the tool mcu's button
+callbacks land, and logs
+a checkpoint to <code>klippy.log</code> (<code>vortac unhook …</code>).</p>
+<ul>
+  <li><strong>Disengage before every dock entry:</strong> a fetch drives the key to
+      <code>disengage_pos</code> <em>before</em> the approach starts. A successful park leaves the
+      key out, but nothing else does — an aborted tool change, a manual
+      <code>VORTAC_ENGAGE</code>/<code>VORTAC_MOVE</code>, a calibration run or a klippy restart
+      all leave the grabber wherever it stood, and an engaged or half-turned key rams the tool on
+      the Y slide-in. Arrival is guaranteed by the grabber itself: <code>engage()</code> and
+      <code>disengage()</code> raise when the closed loop does not land within
+      <code>move_tol</code> (<a href="#vortac-grabber">vortac_grabber</a>), so a stalled stepper or a bad
+      angle reading aborts the change before any XY motion instead of travelling into the dock.
+      It can never drop a tool: the fetch path already refuses while any tool reads grabbed, and
+      the disengage re-checks that.</li>
+  <li><strong>Fetch (unhook):</strong> engage, then checked lift — <code>dock_sense</code> must
+      STAY LOW (going HIGH mid-lift = tilt/bind → lower back, re-seat, retry) — then checked Y
+      backout where <code>dock_sense</code> going HIGH is the clean release. <code>grab_sense</code>
+      HIGH at any checkpoint freezes motion (tool lost). The dock supply is <em>not</em> touched
+      during either phase &mdash; in <code>handover</code> mode it is cut afterwards, at the safe
+      line, so the release check runs against an untouched dock
+      (<a href="#dock-power">Dock power</a>). The backward step must be longer than the Y extent
+      of the dock's landing pad (<code>dock_check_ystep</code>), or the pogo pin still sits on the
+      pad after the step and a clean release reads as <em>still hooked</em>.</li>
+  <li><strong>Park (hook-in):</strong> slide in lifted — this is where the pogos mate, so
+      <code>dock_sense</code> is checked here with the dock still dead and the supply is switched
+      on before anything moves again — then the checked drop from
+      Z&nbsp;+&nbsp;<code>dock_z_clearance</code> to the hooked Z, where <code>dock_sense</code>
+      must be LOW <em>before</em> the grabber disengages; no contact
+      → lift back up and retry (<code>dock_retries</code>), final failure de-energizes the
+      dock and backs out with the tool still held. With <code>dock_seat_press</code> set, a slow
+      overtravel below the hooked Z presses the hooks into their seat after the drop — sense
+      checks are deliberately not fatal during the press (the hook unloads the grabber for a
+      moment while the tool cannot go anywhere), and dock contact is re-verified afterwards,
+      before the grabber lets go. After disengage + backout, the tool must still
+      read docked and no longer grabbed. Tools without sense pins hook in blind (slow drop, no
+      verification, supply switched on unverified).</li>
+</ul>
+
+<h3 id="detection">Dock detection (strobe-by-subtraction)</h3>
+<p>Every tool has two GPIO sense pins: <code>dock_sense_pin</code> (dock Tool_id after opto
+logic) and <code>grab_sense_pin</code> (default HIGH; pulled LOW by the grabber on the held
+tool).</p>
+<p>Each dock's ARGB LED channels have fixed roles: <strong>green</strong> actively pulls the
+<code>dock_sense</code> pad low, <strong>red</strong> gates the parked tool board's supply
+(<a href="#dock-power">Dock power</a>), and <strong>blue</strong> is a status LED whose content
+is selected by <code>argb_status_mode</code>. <code>dock_sense</code> readings are <em>only</em>
+valid while the dock's green channel is on; outside of the detection strobe, <strong>all docks
+keep the sense pull on</strong>. Every sense-dependent operation (tool change,
+<code>VORTAC_LOAD</code>/<code>VORTAC_UNLOAD</code>, calibration selection) first reconciles all
+three channels on every dock (<code>_ensure_sense_active</code> &rarr;
+<code>_apply_dock_leds</code>), so a manual <code>SET_LED</code> in between can neither silently
+disable the sense logic nor strand a tool board; the same state is asserted at
+<code>klippy:ready</code>.</p>
+<p><code>VORTAC_DETECT</code>:</p>
+<ol>
+  <li>Energizes <strong>every</strong> dock for the whole pass and drops any transient supply
+      override &mdash; a dead dock cannot report the tool sitting in it, so without this the
+      detection would only ever confirm the map it started from.</li>
+  <li>Turns the sense pull off on <strong>all</strong> docks.</li>
+  <li>Strobes one dock's sense pull on at a time
+      (<code>dock_strobe_time</code>, default 0.10&nbsp;s). The status LED mirrors the strobe
+      during a detection pass regardless of <code>argb_status_mode</code>, so you can watch it
+      walk down the docks.</li>
+  <li>Assigns the dock to any tool whose cached <code>dock_sense_pin</code> reads LOW.</li>
+  <li>Restores the normal operating state afterwards: sense pull on everywhere, supply back
+      under the occupancy policy, status LED per mode.</li>
+</ol>
+<p>Docks the pass could not resolve &mdash; ambiguous ones, and <em>all</em> docks when some
+tool went unaccounted for &mdash; are recorded as uncertain and never de-energized. An
+unaccounted-for tool makes every dock suspect precisely because that tool may be sitting in a
+dock that read empty <em>because</em> its board was already dark. More than one tool reading
+grabbed at once has the same effect: physically impossible, so at least one
+<code>grab_sense</code> is lying, and a lying grab can hide a parked tool from the
+<code>Missing</code> list.</p>
+<p>The grabbed tool is detected from <code>grab_sense_pin</code>. Detection <strong>aborts</strong>
+if any tool already reads dock LOW while all dock Tool_id channels are off (that would make the
+mapping ambiguous — see <a href="troubleshooting.html#detect-aborts">Troubleshooting</a>).</p>
+<p><strong>Docks are established at runtime</strong> by this detection — <code>home_dock</code>
+is only an optional manual fallback. A <em>grabbed</em> tool is assigned the first free dock that
+has calibrated positions for it (a previous choice — fetch origin or manual
+<code>home_dock</code> — is kept if it is still free and calibrated); if no free calibrated dock
+exists, a warning is printed: <code>VORTAC_UNLOAD</code>/tool change will fail until a dock is
+calibrated for it or a dock is freed. The manager also remembers the dock a tool was fetched from
+and parks it back there — the park-dock resolution chain is
+<em>detection map → fetch origin → optional <code>home_dock</code></em>. A tool change before any
+<code>VORTAC_DETECT</code>, for a tool without <code>home_dock</code>, fails with
+"no dock known … — run <code>VORTAC_DETECT</code> (or set <code>home_dock</code> on the tool)" —
+run detection before the first tool change (e.g. in <code>PRINT_START</code>).</p>
+
+<h3 id="dock-power">Dock power (dark power management)</h3>
+<p>The parked tool board is fed through the dock's pogo pins, gated by the dock LED's
+<strong>red</strong> channel. The channel is <strong>inverted</strong>: red HIGH cuts the
+supply, red&nbsp;<code>0.0</code> means powered.</p>
+
+<div class="callout danger">
+<p><strong>That polarity is mandatory, not a preference.</strong> Klipper sends
+<code>klippy:mcu_identify</code> — where every tool board must answer on the CAN bus — strictly
+<em>before</em> <code>klippy:connect</code>, which is when <code>neopixel.py</code> first
+transmits any colour. Nothing in Klipper can energize a dock before the tool boards are needed.
+If red HIGH meant &ldquo;powered&rdquo;, a cold boot would leave every dock dark and Klipper
+could never start. Keep <code>initial_RED: 0.0</code> in the <code>[neopixel]</code> section.</p>
+</div>
+
+<p>Because <code>dock_sense_pin</code> and <code>grab_sense_pin</code> live on the <em>tool's own
+MCU</em> and Klipper has no notion of an optional MCU, a tool board that goes dark drops off the
+bus and takes klippy down. Everything below follows from that single constraint.</p>
+
+<h4>Where the contact is made and broken</h4>
+<p>The pogo contact opens and closes on the <strong>Y slide</strong> at the dock, never on Z: the
+spring-loaded dock board rides along through the whole Z travel (that is exactly why
+<code>dock_sense</code> is expected to stay LOW during the checked lift). Hardware finding from
+the first real handover runs: <em>mating</em> live is fine — the grabber side always does — but
+<em>switching</em> the dock supply ON into pogos already mated to the grabber-fed tool trips the
+dock's fuse. Switching OFF into mated, grabber-fed pogos works too, but both switching events
+now happen <strong>open-circuit at the safe line</strong>, with the pogos separated and the
+carriage standing still:</p>
+<pre><code>park  : approach lifted -> power ON   (pogos still separated)
+        -> slide in Y (mates live)
+        -> checked Z drop -> disengage -> slide out Y
+
+fetch : approach -> slide in Y -> engage
+        -> checked Z lift -> checked Y backout  (contact opens live)
+        -> slide out Y to the safe line
+        -> power OFF   (pogos already separated)</code></pre>
+<p>The fetch cut used to sit between the checked lift and the Y backout, so the pogos separated
+dead. It was moved out to the safe line because it ran <em>inside</em> the window the release
+check evaluates: the backout reads a clean release from <code>dock_sense</code> going HIGH, and
+the sense pull sits on the same dock LED as the supply gate. Switching there put the
+measurement's own pull into the measurement. The contact now opens live on the way out &mdash;
+exactly as it already mated live on the way in.</p>
+<p>In both directions the board is fed from the other side while the dock side switches: the
+grabber carries it during the fetch, the dock carries it after the park. There is never a moment
+where both feeds are down. The grabber-side contact is always made and broken live — it has no
+switch, and cannot get one.</p>
+
+<h4>Modes</h4>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Mode</th><th>Behaviour</th><th>Requires</th></tr></thead>
+<tbody>
+<tr><td><code>off</code></td><td>the supply channel is never touched</td><td>—</td></tr>
+<tr><td><code>occupancy</code></td><td>docks positively known to be empty are de-energized; the park side energizes before the slide-in, the fetch side cuts once the occupancy map says the dock is empty</td><td>nothing — cannot lose an MCU</td></tr>
+<tr><td><code>handover</code></td><td>cuts the supply explicitly at the end of a fetch, once the tool is back out at the safe line and <code>grab_sense</code> confirms the grabber feeds it — a moment before the occupancy policy would do it anyway</td><td>the grabber must feed the held tool</td></tr>
+</tbody>
+</table>
+</div>
+
+<h4>Fail-safe rules</h4>
+<ul>
+  <li><strong>Only a dock positively known to be empty is de-energized.</strong> No detection
+      yet, an ambiguous dock, a tool the pass could not place — anything uncertain stays live
+      (<code>_policy_power</code>). &ldquo;Could not place&rdquo; is deliberately stricter than
+      the <code>Missing</code> line <code>VORTAC_DETECT</code> prints: a tool that delivers
+      <em>no</em> sense readings at all (sense pins absent but <code>available: True</code>) and
+      an <em>unavailable</em> tool whose <code>[mcu&nbsp;…]</code> is still included can never be
+      located, so they pin <strong>every</strong> dock on for the whole session.</li>
+  <li><strong>Every failure exit of a fetch re-energizes the dock.</strong> Lost grab, stuck
+      hooks, a failed re-seat: the tool may still be in that dock. On the
+      retries-exhausted path the supply is re-asserted <em>before</em> the grabber disengages,
+      because from that moment the dock is the board's only feed.</li>
+  <li><strong><code>RESTART</code> and <code>FIRMWARE_RESTART</code> are wrapped</strong> to
+      energize every dock first (<code>_install_restart_guard</code>). WS2812 latch their last
+      value across a klippy restart, so a dock left dead would still be dead at the next
+      <code>mcu_identify</code>. A full power cycle clears the latch and is the unconditional
+      recovery path. The guard only exists on the gcode path — a <em>service</em> restart
+      (<code>systemctl restart klipper</code>, the standard step after a <code>git pull</code>)
+      kills the host without running any klippy code and cannot be intercepted.</li>
+  <li><strong>A watchdog re-asserts the supply channel</strong> against the policy every
+      <code>dock_power_watchdog</code> seconds (default 5): a manual <code>SET_LED</code> that
+      cuts an occupied dock's supply is reverted within one period, which closes the window in
+      which a service restart would strand that board. It touches <em>only</em> the supply
+      channel of mismatched docks — sense pull, status LED, transient handover cuts and explicit
+      <code>FORCE=1</code> overrides are left alone — and the check is a host-side memory read,
+      so a consistent chain costs no LED traffic at all.</li>
+  <li>The supply is left alone at <code>klippy:ready</code> — every board is alive by then, and
+      nothing may be switched off before the auto-detect has established which dock is empty.</li>
+</ul>
+
+<h4>Other things this buys you</h4>
+<ul>
+  <li><strong>Dead pads at an empty dock.</strong> Exposed 24&nbsp;V pads sit exactly where
+      filament scraps and swarf land.</li>
+  <li><strong>Unambiguous CAN UUID mapping.</strong> WS2812 latch, so
+      <code>VORTAC_DOCK_POWER DOCK=dockN VALUE=1 ONLY=1 FORCE=1</code>, then
+      <code>systemctl stop klipper</code>, then <code>canbus_query.py</code> — only the one
+      powered board answers, which makes <code>flash_can.py</code> safe to aim.</li>
+  <li><strong>Bus fault isolation</strong> while debugging a board that takes the whole bus
+      down.</li>
+</ul>
+
+<div class="callout warn">
+<p><strong>Not possible, for the record:</strong> staggering the power-up to soften PSU inrush
+(the LED is programmed after the boards are needed — hardware-only problem); switching docks off
+automatically on <code>M112</code> or a shutdown (a shut-down MCU accepts no
+<code>SET_LED</code>); and saving power by de-energizing parked tools during a print (it costs an
+MCU, and it would break pre-heating the next tool while it is parked).</p>
+</div>
+
+<h3>Dock calibration context</h3>
+<p><code>VORTAC_SELECT_DOCK DOCK=dockN</code> runs detection and stores the detected dock/tool
+pair. <code>VORTAC_DOCK_CAL_SAVE</code> saves the current hooked/engage XYZ to that selected
+tool/dock and fails if no tool was detected. <code>VORTAC_DOCK_SAVE_POS</code> additionally
+refuses unless the gantry state is <code>flat</code>.</p>
+
+<h2 id="vortac-qgl-state">vortac_qgl_state — [vortac_qgl_state]</h2>
+<p>Toggles the gantry between <strong>frame-flat</strong> (dock geometry valid) and
+<strong>bed-flat</strong> (printing geometry valid) without re-probing — and with it the
+whole coordinate system, so the printer effectively has two: one for the docks and one
+for printing.</p>
+<div class="callout tip">
+  <p><strong>Two coordinate systems.</strong> The gantry orientation is only half of the
+  frame change. Everything derived from probing the <em>bed</em> is valid bed-flat and
+  wrong frame-flat, so <code>VORTAC_GANTRY_FLAT</code> enters the <strong>dock
+  frame</strong> and <code>VORTAC_GANTRY_TILT</code> restores the <strong>print
+  frame</strong>:</p>
+  <ul>
+    <li><strong>Bed mesh</strong> — a move transform on every <code>G1</code>; it would
+        shift the dock Z by the (edge-clamped) mesh value at the dock XY, and a mesh
+        probed bed-tilted is meaningless frame-flat. Suspended on FLAT, handed back on
+        TILT (a mesh loaded or probed in the meantime is never clobbered).</li>
+    <li><strong>Gcode offset</strong> — tool offsets, hand-set
+        <code>SET_GCODE_OFFSET</code> and live babystepping all shift <code>G1</code>
+        moves, and dock positions are taught in kinematic coordinates. Captured and
+        zeroed on FLAT, <em>added back on top of whatever is live</em> on TILT — an
+        offset that is taken out of the way always comes back, and babystepping done
+        inside the dock frame survives too.</li>
+    <li><strong>Probe <code>z_offset</code></strong> is <em>not</em> part of this: it is
+        not a move transform, it only applies while probing. Nothing to switch.</li>
+  </ul>
+  <p>This makes the toggle a complete frame switch for manual use as well — dock teaching
+  right after a hand-triggered <code>VORTAC_GANTRY_FLAT</code> records clean kinematic
+  positions. Set <code>manage_coordinate_system: False</code> to keep the toggle
+  gantry-only (the manager then does the zeroing and mesh suspension itself during a tool
+  change, as before).</p>
+</div>
+<p>During a tool change <code>vortac_manager</code> delegates the frame switch to this
+module and <em>takes the captured offset over</em>: TILT must not restore the leaving
+tool's offsets, the manager applies the arriving tool's offsets plus the carried
+babystep in its final step. That debt is held on the manager (not in a local), so a
+change that aborts between the two still re-applies it on the next attempt.</p>
+<ul>
+  <li><strong>Mechanic:</strong> at <code>klippy:ready</code>, hooks
+      <code>quad_gantry_level.z_helper.adjust_steppers</code> to capture each delta vector into
+      <code>stored_deltas</code>. FLAT replays <code>−stored_deltas</code>, TILT replays
+      <code>+stored_deltas</code>. Wraps <code>QUAD_GANTRY_LEVEL</code> to zero
+      <code>stored_deltas</code> when re-running while flat, so the new measurement starts
+      clean.</li>
+  <li><strong>Reset:</strong> <code>homing:home_rails_end</code> on any
+      <code>stepper_z*</code> clears state and sets it to <code>flat</code>.</li>
+  <li><strong>State is RAM only</strong> — power cycle, mid-print loss, or a fresh Z-home
+      invalidates it; the user must re-run QGL.</li>
+  <li><strong>Manager dependency:</strong> <code>VORTAC_DOCK_SAVE_POS</code> refuses unless
+      <code>state == 'flat'</code>.</li>
+  <li><strong>QGL ends tilted by definition</strong>, so the wrapped
+      <code>QUAD_GANTRY_LEVEL</code> also restores the print frame — a QGL run out of a
+      hand-triggered FLAT never leaves a silently suspended mesh behind.</li>
+  <li><strong>The frame survives a Z home:</strong> <code>home_rails_end</code> resets the
+      deltas and the state, but deliberately leaves the parked mesh and offset alone —
+      dropping them would lose them for good, and the next TILT hands them back regardless
+      of how Z was homed. Both are RAM only, like the gantry state itself.</li>
+  <li><strong>Status:</strong> <code>frame</code> (<code>print</code>|<code>dock</code>),
+      <code>saved_offset</code>, <code>mesh_suspended</code> and
+      <code>manages_frame</code> are exported alongside <code>state</code> /
+      <code>stored_deltas</code>; <code>VORTAC_QGL_STATUS</code> prints all of it.</li>
+</ul>
+
+<h2 id="include-with">include_with — [include_with &lt;namespace&gt; &lt;filename&gt;]</h2>
+<p>Loads one Klipper template under a remapped MCU namespace; auto-renames sections per
+<code>tool_index</code> so one PCB-level config can be instantiated N times. The user-facing
+behavior (rename table, overrides, skip lists, pretty names) is documented in
+<a href="configuration.html#include-with">Configuration</a>. Implementation notes:</p>
+<ul>
+  <li><strong><code>tool_index</code> is assigned by LOAD ORDER for tool templates:</strong>
+      when the template carries a (non-skipped) <code>[vortac_tool …]</code> section, each
+      <code>[include_with]</code> takes the next value from a per-printer counter — the first
+      tool include in <code>tools.cfg</code> is 0, the next 1, … Commenting a tool out renumbers
+      the ones after it, which keeps Klipper's <code>extruder</code>/<code>extruder&lt;N&gt;</code>
+      contract intact. An explicit <code>tool_index:</code> wins; templates without a
+      <code>vortac_tool</code> section fall back to the namespace's trailing number
+      (<code>tool1</code> → 1, else the option is required). Mixing explicit indices with
+      auto-numbered includes is unsupported (the counter ignores explicit values).</li>
+  <li><strong>Display-prefix renaming:</strong> every named section gets the DISPLAY prefix
+      <code>&lt;namespace&gt;&lt;tool_index&gt;</code> (<code>[neopixel logo_rgb]</code> →
+      <code>[neopixel miniGrey1_logo_rgb]</code>; <code>miniPink</code> + index 0 →
+      <code>miniPink0_logo_rgb</code>) — the index makes <code>extruder1</code> ↔
+      <code>miniGrey1_*</code> visually matchable in Mainsail/Fluidd. Legacy digit-suffixed
+      namespaces (<code>tool1</code>) stay as-is. Exceptions: <code>[mcu]</code> and
+      <code>[vortac_tool]</code> keep the pure namespace. The display prefix shifts with
+      order-based renumbering — safe, because the renamed hardware sections never hold
+      SAVE_CONFIG data; address them index-proof in macros via
+      <code>{tool.display_name}_…</code>. Full rename table in
+      <a href="configuration.html#include-with">Configuration</a>.</li>
+  <li><strong><code>[vortac_tool TN]</code> injection:</strong> the template's
+      <code>vortac_tool</code> placeholder is renamed to
+      <code>[vortac_tool &lt;namespace&gt;]</code> (PURE name, no index — this is the persistence
+      anchor for SAVE_CONFIG'd dock positions), and <code>tool_index</code>,
+      <code>mcu_name</code> (= namespace), <code>display_name</code>
+      (<code>&lt;namespace&gt;&lt;index&gt;</code>), <code>canbus_uuid</code>
+      (from the static <code>[mcu &lt;namespace&gt;]</code> section) and
+      <code>extruder_name</code> (the renamed extruder) are auto-injected. Template values and
+      overrides win over the injection. <code>home_dock</code> is optional (docks come from
+      <code>VORTAC_DETECT</code> at runtime); it can be pinned via <code>overrides:</code>
+      (<code>vortac_tool TN.home_dock: dockX</code>). If SAVE_CONFIG's autosave block already
+      created the section
+      (persisted <code>params_*</code> dock positions), the injection MERGES into it —
+      calibration data is preserved.</li>
+  <li><strong>Status mirror (UI visibility):</strong> Klipper freezes the raw config
+      snapshot (<code>printer.configfile.config</code>) in <code>read_main_config()</code>,
+      BEFORE extras run — runtime-injected sections would be invisible to it, and Mainsail,
+      Fluidd and KlipperScreen all derive their tool/heater/fan/LED lists (and KlipperScreen
+      its <code>printer.extruders.count</code> menu gates) from exactly that dict. So after
+      each <code>read_dict</code> the injected section is mirrored into
+      <code>configfile.status_raw_config</code> with the same merge semantics (autosave-seeded
+      <code>params_*</code> keys survive). <code>status_raw_config</code> is not public Klipper
+      API; if an update moves it, include_with logs a warning and everything still works —
+      the UIs just stop listing the injected sections.</li>
+  <li><strong>Value rewrite:</strong> any <code>&lt;from&gt;:</code> pin token in option values
+      becomes <code>&lt;to&gt;:</code>; whole-string section refs
+      (<code>heater: extruder</code> → <code>heater: extruder1</code>) are fixed up.</li>
+  <li><strong>Built-in skip list</strong> for <code>tool_index ≥ 1</code>:
+      <code>resonance_tester</code>, <code>input_shaper</code>, <code>shaketune</code>
+      (Klipper singletons that can't be renamed). Config sections can also pass
+      <code>skip_sections:</code> as a comma/newline list.</li>
+  <li><strong>Overrides:</strong> the config option takes <code>section.key: value</code> lines;
+      a JSON dict (<code>{"section": {"key": "value"}}</code>, <code>null</code> deletes) is also
+      accepted and is the format of the programmatic <code>overrides=</code> argument.</li>
+  <li><strong>Programmatic API</strong> (used by <code>vortac_tool</code>):
+      <code>include_with_remap(printer, parent_config, filepath, namespace, mcu_from=None,
+      tool_index=0, overrides=None, skip_sections=None, template=None)</code>.</li>
+</ul>
+
+<h2 id="lifecycle">Lifecycle &amp; dependencies</h2>
+<pre><code>config parse:
+  [vortac_grabber]    → register grabber gcode commands
+  [vortac_qgl_state]  → register FLAT/TILT (hooks attach at klippy:ready)
+  [mcu &lt;name&gt;]        → register tool MCU pin chip early
+  [include_with ...]  → take next order-based tool_index, inject remapped
+                        toolboard sections (incl. [vortac_tool &lt;name&gt;])
+  [vortac_manager]    → register VORTAC_LOAD/UNLOAD/STATUS/DOCK_SAVE_POS;
+                        defer rest to klippy:connect
+
+klippy:ready    → vortac_qgl_state hooks QGL.adjust_steppers + QUAD_GANTRY_LEVEL
+klippy:connect  → vortac_manager finds tools/grabber/qgl, validates identities,
+                  registers T&lt;index&gt; commands</code></pre>
+<p>Hard dependencies:</p>
+<ul>
+  <li><code>vortac_manager</code> requires <code>[vortac_grabber]</code>.</li>
+  <li>Each active tool requires a static <code>[mcu &lt;name&gt;]</code> section before
+      <code>[include_with]</code>.</li>
+  <li><code>vortac_qgl_state</code> requires <code>[quad_gantry_level]</code> to be defined.</li>
+</ul>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

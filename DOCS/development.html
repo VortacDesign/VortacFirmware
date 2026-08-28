@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Development — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Development</h1>
+<p class="subtitle">How changes get from your editor onto the printer, conventions to follow,
+and hard-won Klipper learnings.</p>
+
+<h2 id="deployment">Deployment model — no build, no tests</h2>
+<p>There is <strong>no build step, no test suite, and no linter configured</strong>. The code
+runs inside Klipper on a Raspberry Pi. The edit → run cycle is:</p>
+<pre><code># on your machine
+edit .py / .cfg  →  commit  →  push
+
+# on the Pi
+git pull            # systemd .path watcher re-runs install.sh automatically
+sudo systemctl restart klipper</code></pre>
+<p>Because the plugins are <em>symlinked</em> and the configs are <em>bind-mounted</em>, pulling
+is all it takes — Klipper just needs a restart to re-import the modules.</p>
+
+<details class="fold">
+  <summary>Ad-hoc iteration without committing</summary>
+  <div class="fold-body">
+    <p><code>dev_scripts/push_custom_scripts.py</code> is a quick
+    <code>sshpass</code>+<code>scp</code> pusher targeting a hardcoded Pi
+    (<code>192.168.0.188</code>, user <code>pi</code>) — useful during tight iteration loops when
+    you don't want to commit/pull for every attempt. Adjust the target inside the script for your
+    network.</p>
+  </div>
+</details>
+
+<h2 id="conventions">Conventions</h2>
+<ul>
+  <li><strong>Bilingual comments</strong> — the codebase freely mixes German and English comments
+      (<code>Zugriff auf ToolHead</code>, <code>Nun die Move-Command</code>). Don't "translate"
+      existing comments. Repo <em>documentation</em> (READMEs, these docs) is English.</li>
+  <li><strong>Persisted tunables</strong> go through
+      <code>configfile.set(self.name, key, value)</code> and require the user to run
+      <code>SAVE_CONFIG</code>. Never write to disk directly.</li>
+  <li><strong>Grabber motion</strong>: <code>force_move.manual_move(stepper, distance, speed)</code>
+      followed by <code>toolhead.wait_moves()</code> and a small <code>dwell</code> to let the
+      sensor settle. Don't drive the grabber through the kinematics path.</li>
+  <li><strong>Angle math is on a circle</strong> — always wrap to <code>[0, 360)</code> and handle
+      seam crossings. The <code>wrap360</code> / <code>wrap180</code> / <code>circ_mean</code>
+      helpers in <code>vortac_grabber.py</code> are the reference implementations.</li>
+  <li><strong>Never edit the shared PCB template for one tool</strong> — per-tool deviations go
+      into <code>overrides:</code> (see
+      <a href="configuration.html#overrides">Configuration</a>).</li>
+  <li><strong>Primary branch is <code>development</code></strong>, not <code>main</code>
+      (also <code>install.sh</code>'s default watch branch).</li>
+</ul>
+
+<h2 id="repo-layout">Repository layout</h2>
+<pre><code>VortacFirmware/
+├── klippy/extras/           Klipper plugins (symlinked into Klipper)
+│   ├── vortac_grabber.py    angle sensor + closed-loop grabber stepper
+│   ├── vortac_tool.py       logical per-tool sections [vortac_tool &lt;name&gt;]
+│   ├── vortac_manager.py    coordinator: Tn, docks, detection, probe guard
+│   ├── vortac_qgl_state.py  gantry FLAT/TILT state
+│   └── include_with.py      PCB-template instantiation
+├── configs/                 Klipper configs (vortac_configs/ is bind-mounted)
+├── dev_scripts/             plotData.py, push_custom_scripts.py, notes
+├── DOCS/                    this documentation
+├── install.sh               one-time installer (symlinks, mount, watcher)
+└── uninstall.sh             reverses everything</code></pre>
+
+<h2 id="learnings">Klipper learnings</h2>
+<details class="fold">
+  <summary>Bulk angle stream is radians × 10 000</summary>
+  <div class="fold-body">
+    <p>Angle bulk-sensor data from Klipper's <code>add_client(cb)</code> stream is in
+    <strong>radians × 10 000</strong>. To get degrees:
+    <code>(raw / 10000.0) * (180 / π)</code>. This is easy to miss and produced silently wrong
+    calibrations — which is also why <code>VORTAC_CALIBRATE</code> now uses direct SPI reads
+    instead of the bulk stream (the stream was additionally lossy at sub-bit precision).</p>
+  </div>
+</details>
+<details class="fold">
+  <summary>Klipper merges duplicate config sections silently</summary>
+  <div class="fold-body">
+    <p>Two sections with the same name don't error — the last value wins. This is why a
+    half-renamed tool file produces a "franken-tool" instead of a startup error, and why
+    <code>vortac_manager</code> validates tool identities at connect time.</p>
+  </div>
+</details>
+<details class="fold">
+  <summary>MCU pin chips register before extras run</summary>
+  <div class="fold-body">
+    <p>Anything that owns pins (<code>[mcu …]</code>) must exist as a static config section —
+    an extra like <code>include_with</code> runs too late to inject it. That's the root cause of
+    the "static <code>[mcu &lt;name&gt;]</code> + skipped template <code>[mcu EBBCan]</code>"
+    pattern.</p>
+  </div>
+</details>
+<details class="fold">
+  <summary>Extra lifecycle: config parse → klippy:ready → klippy:connect</summary>
+  <div class="fold-body">
+    <p>Register gcode commands at config parse; defer lookups of <em>other</em> objects to
+    <code>klippy:connect</code> (the manager discovers tools/grabber/qgl there); hook into
+    existing objects' internals at <code>klippy:ready</code> (qgl_state wraps
+    <code>adjust_steppers</code> there). See the full
+    <a href="modules.html#lifecycle">lifecycle diagram</a>.</p>
+  </div>
+</details>
+
+<h2 id="docs-maintenance">Maintaining this documentation</h2>
+<p>The docs live in <code>DOCS/</code> as static HTML — no build step, open
+<code>DOCS/index.html</code> in a browser (or serve the folder with
+<code>python3 -m http.server</code>).</p>
+<ul>
+  <li><strong>Shared pieces</strong>: styling in <code>assets/style.css</code>, behavior
+      (sidebar, TOC, checklists, filter, prev/next) in <code>assets/docs.js</code>.</li>
+  <li><strong>Adding a chapter</strong>: create the page (copy an existing one as skeleton) and
+      add one entry to the <code>PAGES</code> array at the top of <code>assets/docs.js</code> —
+      every page's sidebar and prev/next navigation updates automatically.</li>
+  <li><strong>Anchors &amp; TOC</strong>: give every <code>&lt;h2&gt;</code>/<code>&lt;h3&gt;</code>
+      an <code>id</code>; the sidebar TOC and the hover "#" links are generated from them.</li>
+  <li><strong>Building blocks</strong>: callouts (<code>.callout</code>, variants
+      <code>.warn</code> / <code>.tip</code> / <code>.danger</code>), collapsibles
+      (<code>details.fold</code>), persistent checklists (<code>.checklist</code> with
+      <code>data-ck</code> checkboxes), filterable tables (<code>.filterbox</code> with
+      <code>data-target</code>).</li>
+  <li><strong>Keep it in sync</strong>: when modules, configs, commands or workflows change,
+      update the matching chapter in the same commit. The READMEs and this documentation should
+      never contradict each other.</li>
+</ul>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>

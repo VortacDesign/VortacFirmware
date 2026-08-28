@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Vortac gantry FLAT: the frame (uprights + bed) with the gantry beam
+       level with the frame — the top-home reference the docks live in.
+       Shown on the button that MOVES the gantry to that state. -->
+  <g fill="none" stroke="#e8e8e8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 12 V52 M52 12 V52"/>
+    <path d="M10 52 H54"/>
+    <path d="M10 20 H54"/>
+  </g>
+</svg>

@@ -1,0 +1,19 @@
+/.idea/VortacFirmware.iml
+/.claude/*
+.DS_Store
+
+# --- User-specific configs ---------------------------------------------------
+# Pattern: real user configs are ignored; the repo ships "*.example.cfg"
+# templates instead. Klipper never reads .example files — it only loads what
+# printer.cfg pulls in via [include]. To set up: copy "<name>.example.cfg" to
+# "<name>.cfg" and edit. This applies to user-specific files (printer.cfg,
+# tools.cfg, per-tool files), NOT to general hardware configs like the MCU
+# templates under vortac_configs/mcu/.
+
+/configs/printer.cfg
+/configs/vortac_configs/tools.cfg
+/configs/vortac_configs/macros.cfg
+/configs/vortac_configs/tools/*.cfg
+
+# ...but always keep the committed templates
+!*.example.cfg

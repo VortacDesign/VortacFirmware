@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web UI — Vortac Firmware Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/docs.js" defer></script>
+</head>
+<body>
+<nav class="sidebar"></nav>
+<main><div class="content">
+
+<h1>Web UI</h1>
+<p class="subtitle">The Vortac dock panel as a browser page — served from the Pi, talking
+directly to Moonraker, and embeddable into the Mainsail dashboard as an iframe card.</p>
+
+<h2 id="architecture">How it works</h2>
+<p>Mainsail has no plugin system — its panels are compiled in. But Mainsail's webcam system has
+an official <code>iframe</code> service type that renders <em>any URL</em> as a dashboard card.
+So the Vortac UI is a normal web page that lives next to Mainsail:</p>
+<ul>
+  <li><strong><code>web/index.html</code></strong> — one self-contained page (no build step, no
+      dependencies). It speaks JSON-RPC over Moonraker's websocket and subscribes to the same
+      status objects as the KlipperScreen panel: <code>vortac_manager</code>,
+      <code>vortac_tool &lt;name&gt;</code>, <code>vortac_qgl_state</code>. Live updates, no
+      polling.</li>
+  <li><strong>nginx</strong> serves that folder on its own port (default <strong>7130</strong>) —
+      <code>install.sh</code> sets this up as a separate server block, so the Mainsail site
+      config is never touched. Override the port with <code>VORTAC_UI_PORT=… sudo ./install.sh</code>.</li>
+  <li><strong>Mainsail</strong> embeds the URL as an "iframe webcam" card, placeable on the
+      dashboard like any panel.</li>
+</ul>
+<p>Same data, same actions, same look as the <a href="klipperscreen.html#panel-preview">
+KlipperScreen panel</a> — dock tiles (tap to load/change/park/select), contextual Park/Load
+button, Detect, the contextual gantry toggle (Tilt/Flatten — the full coordinate-system
+switch, see <a href="modules.html#vortac-qgl-state">vortac_qgl_state</a>; disabled while a
+print runs),
+Engage/Disengage, Save Dock, all with confirm dialogs. Multiple browsers can be
+open at once, independent of the touchscreen.</p>
+<p>Dock supply is mirrored here too (see <a href="modules.html#dock-power">Dock power</a>): a bolt
+next to each dock name, lit while the dock feeds its tool board, and a <em>Power: n/m</em> chip in
+the header. A dock that holds a tool while its supply is off turns red and reads
+<code>NO POWER</code> — tap it to switch the supply back on. Switching a dock <em>off</em> is
+never offered from a UI: it costs an MCU and thus a klippy shutdown.</p>
+
+<h2 id="setup">Setup — step by step</h2>
+
+<div class="checklist">
+  <div class="checklist-head">
+    <h3>Web-UI checklist</h3>
+    <button class="reset" type="button">Reset checklist</button>
+  </div>
+  <label class="check"><input type="checkbox" data-ck="deploy">
+    <span class="check-text"><span class="check-title">1 — Deploy</span>
+    <span class="check-sub"><code>git pull</code> on the Pi (the watcher re-runs
+    <code>install.sh</code>, which writes the nginx site and reloads nginx). Or run
+    <code>sudo ./install.sh</code> manually once.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="direct">
+    <span class="check-text"><span class="check-title">2 — Test directly</span>
+    <span class="check-sub">Open <code>http://&lt;pi&gt;:7130/</code> in a browser. The page must
+    load; the connection chip will say "disconnected" until step 3.</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="cors">
+    <span class="check-text"><span class="check-title">3 — Allow the origin in Moonraker</span>
+    <span class="check-sub">Add the UI's origin to <code>cors_domains</code> in
+    <code>moonraker.conf</code>, restart Moonraker (see below).</span></span>
+  </label>
+  <label class="check"><input type="checkbox" data-ck="iframe">
+    <span class="check-text"><span class="check-title">4 — Embed into Mainsail</span>
+    <span class="check-sub">Settings → Webcams → add webcam, service <em>HTML Iframe</em>,
+    URL <code>http://&lt;pi&gt;:7130/</code>.</span></span>
+  </label>
+</div>
+
+<h3 id="cors">Step 3 in detail: Moonraker CORS</h3>
+<p>The page is served from port 7130 but talks to Moonraker on port 7125 — a different origin,
+so Moonraker must allow it. In <code>moonraker.conf</code>, extend the
+<code>[authorization]</code> section:</p>
+<pre><code>[authorization]
+cors_domains:
+    *://my.mainsail.xyz
+    *://*.local
+    *://*:7130        # ← add this line (the Vortac web UI)
+trusted_clients:
+    …unchanged…</code></pre>
+<p>Then restart Moonraker: <code>sudo systemctl restart moonraker</code>. Keep whatever entries
+are already there — only the <code>*://*:7130</code> line is new (match the port to
+<code>VORTAC_UI_PORT</code> if you changed it).</p>
+
+<h3 id="mainsail">Step 4 in detail: the Mainsail card</h3>
+<div class="callout warn">
+  <span class="callout-title">Requires a current Mainsail</span>
+  <p>Older Mainsail releases don't have the <em>HTML Iframe</em> service yet — their service
+  list still shows <em>IP Camera</em> in that spot. If <em>HTML Iframe</em> is missing from the
+  dropdown, update Mainsail via the Update Manager and reload the browser (clear cache).</p>
+</div>
+<ol>
+  <li>Mainsail → <strong>Settings (gear) → Webcams → Add webcam</strong>.</li>
+  <li>Name: <code>Vortac</code>. Service: <strong>HTML Iframe</strong> (leave the snapshot URL
+      empty — it is not used by this type). URL:
+      <code>http://&lt;pi&gt;:7130/</code> (use the same hostname/IP you use for Mainsail —
+      the page auto-connects to Moonraker on that same host).</li>
+  <li>Save. The card appears wherever webcams show; arrange it on the dashboard via
+      Mainsail's dashboard layout settings like any other panel.</li>
+</ol>
+
+<div class="callout tip">
+  <span class="callout-title">Standalone use</span>
+  <p>The page is a full UI on its own — bookmark <code>http://&lt;pi&gt;:7130/</code> on a phone
+  or tablet. If Moonraker runs on a non-default host/port, pass it explicitly:
+  <code>http://&lt;pi&gt;:7130/?moonraker=host:port</code>.</p>
+</div>
+
+<h2 id="webui-troubleshooting">Troubleshooting</h2>
+<details class="fold">
+  <summary>The card/page loads but says "disconnected — retrying"</summary>
+  <div class="fold-body">
+    <p>Almost always CORS: Moonraker rejects the websocket because the origin
+    (<code>http://&lt;pi&gt;:7130</code>) is not in <code>cors_domains</code>. Fix step 3 and
+    restart Moonraker. Check the browser console (F12) — a blocked origin is reported there.
+    Second candidate: the machine is reachable but Klipper is down — then the chip shows
+    <em>"klipper: shutdown/error"</em> instead.</p>
+  </div>
+</details>
+<details class="fold">
+  <summary><code>http://&lt;pi&gt;:7130/</code> is not reachable at all</summary>
+  <div class="fold-body">
+    <ul>
+      <li>nginx site missing — re-run <code>sudo ./install.sh</code> (it prints the URL on
+          success; "nginx not found" means nginx isn't installed).</li>
+      <li>Config test failed — <code>sudo nginx -t</code> shows why;
+          <code>sudo systemctl reload nginx</code> after fixing.</li>
+      <li>Port collision — some other service owns 7130: re-install with
+          <code>VORTAC_UI_PORT=7131 sudo ./install.sh</code> and adjust the CORS entry and the
+          iframe URL.</li>
+    </ul>
+  </div>
+</details>
+<details class="fold">
+  <summary>Mainsail is served via HTTPS and the card stays empty</summary>
+  <div class="fold-body">
+    <p>Browsers block plain-HTTP iframes inside an HTTPS page (mixed content). Either serve
+    Mainsail via HTTP on the LAN, or put the Vortac UI behind the same HTTPS proxy and use an
+    <code>https://</code> iframe URL — the page automatically switches to <code>wss://</code>
+    for the websocket when loaded over HTTPS.</p>
+  </div>
+</details>
+<details class="fold">
+  <summary>Tiles/status look wrong</summary>
+  <div class="fold-body">
+    <p>The page renders exactly the manager's status objects — if it disagrees with reality, the
+    KlipperScreen panel and <code>VORTAC_STATUS</code> will disagree in the same way. Debug on
+    that level (<a href="troubleshooting.html#detection-issues">detection issues</a>), not in the
+    browser.</p>
+  </div>
+</details>
+
+<div class="callout">
+  <span class="callout-title">Kept in sync</span>
+  <p>The web UI and the KlipperScreen panel share the firmware's status contract
+  (<code>get_status</code> fields). When one grows a feature, the other should follow — both are
+  thin views over the same data.</p>
+</div>
+
+<div class="page-nav" data-auto></div>
+</div></main>
+</body>
+</html>
