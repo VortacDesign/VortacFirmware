@@ -119,8 +119,9 @@ gcode:
   <p><code>PRINT_START</code> receives a single <code>HOTEND</code> value, and <code>M109</code>
   applies it to the <em>active</em> extruder. Every other tool is still cold when the first
   <code>T&lt;n&gt;</code> happens mid-print, and the slicer's first extrusion after it dies with
-  <code>Extrude below minimum temp</code>. A multi-tool print therefore needs one of the two
-  mechanisms in <a href="#orca-temps">Temperatures and ooze</a> — the shipped
+  <code>Extrude below minimum temp</code>. A multi-tool print therefore needs the per-tool temperatures
+  (<code>TEMPS=</code>) and the manager's pickup wait described in
+  <a href="#orca-temps">Temperatures and ooze</a>. The shipped
   <code>macros.example.cfg</code> implements both.</p>
 </div>
 
@@ -179,8 +180,8 @@ not a filament changer.</p>
 vector — one entry per extruder — so it has to be indexed explicitly, otherwise a two-material
 print can hand <code>PRINT_START</code> the wrong tool's temperature.
 <code>TEMPS</code> carries the first-layer temperature of <strong>every</strong> extruder, in
-extruder order; add an entry when you add a tool. That is what lets the macro preheat the tools
-it is not starting with. Verify after slicing: the first line of the G-code must read
+extruder order; add an entry when you add a tool. That is what tells the manager which temperature each
+tool heats to when it is picked up. Verify after slicing: the first line of the G-code must read
 <code>PRINT_START BED=110 TOOL=1 HOTEND=270 TEMPS=270,265</code> — plain numbers, no commas
 inside <code>HOTEND</code>.</p>
 <p><strong>Machine end G-code</strong>:</p>
@@ -232,86 +233,6 @@ SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}</code></pre>
   <em>outside</em> that logic and will crash into the dock.</p>
 </div>
 
-<h3 id="orca-temps">Temperatures and ooze</h3>
-<p>This is where a working single-tool setup breaks the moment it becomes a multi-tool one, so
-it is worth being precise about who heats what.</p>
-
-<div class="callout danger">
-  <span class="callout-title">Nothing heats the tools you are not starting with — unless you make it</span>
-  <p>Orca only emits <code>M104</code>/<code>M109</code> for the other extruders when
-  <strong>Emit temperature commands automatically</strong> (Printer Settings → Machine G-code)
-  is on. With it off — and it is off in many Klipper toolchanger profiles — the entire G-code
-  file contains no temperature command at all, and the only heating in the whole print is the
-  <code>M109</code> inside <code>PRINT_START</code>, which reaches the starting tool only.
-  The first tool change then lands on a cold nozzle:
-  <code>"extruder" not hot enough / Extrude below minimum temp</code>.</p>
-  <p>Check it yourself: slice, open the <code>.gcode</code>, search for <code>M104</code>.</p>
-</div>
-
-<p>Two independent mechanisms close that hole. Use both — they cover different failure modes.</p>
-<div class="callout warn">
-  <span class="callout-title">Leave the auto-emission OFF and pass <code>TEMPS=</code> instead</span>
-  <p>Turning it on would also work as a bare fix for the cold nozzle, but it fights the standby
-  temperature below: Orca re-sends the full print temperature for <em>every</em> extruder at the
-  start of the second layer, overriding the drop of the tool that is parked at that moment. It
-  also puts both hotends at full temperature before <code>PRINT_START</code> even runs, so they
-  drip into the docks throughout homing, levelling and meshing.</p>
-  <p>The trade-off of leaving it off: nothing switches from the first-layer temperature to the
-  normal one either, so the print runs at whatever <code>TEMPS=</code> carried. Set both to the
-  same value in the filament profile — that is the usual case anyway.</p>
-</div>
-<ul>
-  <li><strong><code>TEMPS=</code> in the start G-code</strong> (see above). <code>PRINT_START</code>
-      hands one print temperature per tool to the manager with
-      <code>VORTAC_SET_TOOL_TEMP</code>, keeps every nozzle at <code>soak_temp</code> while it
-      homes, levels and meshes, and runs <code>VORTAC_PREHEAT</code> afterwards to put the idle
-      tools on standby. This is what makes the first change fast instead of a cold start.</li>
-  <li><strong>The manager's own pickup step</strong> (see
-      <a href="#tool-hooks">Retract, standby temperature and the wait</a>). It <em>always</em>
-      waits for the arriving tool to reach temperature before anything is extruded, so a cold
-      nozzle is structurally impossible regardless of what the slicer emitted — and there is
-      nothing to configure or forget. If no temperature is known at all it aborts with that
-      reason instead of a cryptic extrusion error.</li>
-</ul>
-
-<h3 id="orca-standby">Standby temperature</h3>
-<p>A parked tool keeps its board powered — an occupied dock is never de-energized — so it holds
-whatever target it had. At ABS temperatures that means it drips into its dock for the whole
-print. The manager drops the nozzle by <code>standby_delta</code> kelvin the moment the tool is
-parked and brings it back — with a wait — on pickup.</p>
-<p>The price is heat-up time on every change: the manager cannot preheat the next tool, because
-when it parks one it does not yet know which one is coming. 40–60 K is the useful range — enough
-to stop the dripping, quick enough to come back. <code>standby_delta: 0</code> turns the drop off
-and leaves the temperature wait in place.</p>
-<p>Orca's own <strong>Ooze prevention</strong> does the same thing from the slicer side. Do not
-run both — pick one, and the firmware side is the one that also protects manual
-<code>T&lt;n&gt;</code> commands.</p>
-
-<h3 id="temp-changes">Temperature changes during the print</h3>
-<p><code>TEMPS=</code> is a starting point, not a lock. The hooks track changes rather than
-overwriting them:</p>
-<ul>
-  <li><strong>Changed while the tool is printing</strong> (temperature tower, per-object
-      temperature, a slider pull in Mainsail — all of which hit the <em>active</em> extruder):
-      the manager reads the live target when the tool is parked and memorises <em>that</em>.
-      The new value is what comes back on the next pickup.</li>
-  <li><strong>Changed while the tool is parked:</strong> on pickup the manager works out the
-      standby value it would have left behind. If the live target is something else, that is a
-      deliberate change — it wins, it is kept, and the console says so.</li>
-  <li><strong>Below <code>print_temp_min</code> never counts as deliberate.</strong> That is
-      <code>PRINT_START</code> holding the nozzles at <code>soak_temp</code> while it homes,
-      levels and meshes; coming back up from it is exactly what the pickup step is for. Keep
-      <code>soak_temp</code> at or below <code>print_temp_min</code>.</li>
-</ul>
-<div class="callout tip">
-  <span class="callout-title">Temperature towers</span>
-  <p>A tower is a single-tool calibration print, so the standby mechanism never comes into play —
-  nothing gets parked. If Orca does not emit the tower's <code>M104</code> with auto-emission
-  switched off, just switch it back on for that one print; without a second tool there is nothing
-  for it to collide with. Either way the check is the same: search the sliced file for
-  <code>M104</code>.</p>
-</div>
-
 <h3 id="orca-retract">Retraction around the change</h3>
 <p>The slicer retracts before it emits <code>T&lt;n&gt;</code>. Everything after that — the travel
 to the dock row, the stepwise hook-in, the fetch of the next tool — runs on the manager's clock,
@@ -328,6 +249,116 @@ Place it clear of the dock approach lane — the approach moves Y, then X, then 
 <p>Two tools, a tall two-colour cube, one change per layer. That tells you more about
 repeatability than a complex model — and every change happens where you can watch it.</p>
 
+<h2 id="orca-temps">3a — Temperatures and ooze</h2>
+<p>This is where a working single-tool setup breaks the moment it becomes a multi-tool one, so
+it is worth being precise about who heats what.</p>
+
+<p><strong>The rule:</strong> a tool heats when it is picked up. <code>PRINT_START</code> only
+heats the starting tool (to <code>soak_temp</code> while the machine levels, then to print
+temperature on <code>T&lt;n&gt;</code>). Every other tool stays off until its first pickup. On
+pickup the manager <em>always</em> heats the tool to its print temperature and
+<strong>waits</strong> before anything is extruded, so a cold nozzle is structurally impossible
+regardless of what the slicer emitted. If no temperature is known at all it aborts with that
+reason instead of a cryptic extrusion error.</p>
+<p>Two things are added on top of that:</p>
+<ul>
+  <li><strong><code>park_heater</code></strong> on <code>[vortac_manager]</code> decides what
+      happens to a tool when it is parked: <code>off</code> (default) switches its heater off,
+      <code>keep</code> leaves the target alone so the slicer's idle temperature applies.</li>
+  <li><strong>OrcaSlicer's Ooze prevention</strong> (Process → Multimaterial) can preheat the
+      next tool <em>Preheat time</em> seconds before the change, so the pickup wait is short.
+      Its <code>M104</code> arrives after the tool was parked, so it works with both
+      <code>park_heater</code> settings.</li>
+</ul>
+
+<h3 id="temp-states">All setups</h3>
+<table>
+  <thead><tr><th>park_heater</th><th>Orca Ooze prevention</th><th>Parked tool</th><th>At pickup</th><th>Use it for</th></tr></thead>
+  <tbody>
+    <tr><td><code>off</code></td><td>on, Preheat time set</td>
+        <td>Orca sets its idle temperature just before <code>T&lt;n&gt;</code>, then the park
+            switches the heater off. Cold until Orca's preheat <code>M104</code>, Preheat time
+            seconds before the next change.</td>
+        <td>Already hot or nearly hot, so the manager's wait is short. Orca sends its own
+            <code>M109</code> right after the <code>T&lt;n&gt;</code>.</td>
+        <td><strong>Recommended.</strong> Little ooze, short changes.</td></tr>
+    <tr><td><code>off</code></td><td>off</td>
+        <td>Off. Exception: a temperature change the slicer sends to a parked tool (Orca does
+            that at layer 2 when first-layer and normal temperatures differ) heats it early.</td>
+        <td>Full heat-up from cold, the manager waits for it.</td>
+        <td>Any slicer, few tool changes. No ooze, slow changes.</td></tr>
+    <tr><td><code>keep</code></td><td>on</td>
+        <td>Orca's idle temperature (Temperature variation, or Idle temperature in the filament
+            profile). Preheated Preheat time seconds before the next change.</td>
+        <td>Hot. Orca sends <code>M109</code> right after the <code>T&lt;n&gt;</code>.</td>
+        <td>Warm instead of cold docks.</td></tr>
+    <tr><td><code>keep</code></td><td>off</td>
+        <td>Full print temperature for the whole print.</td>
+        <td>Instant.</td>
+        <td>Not recommended: every parked tool drips into its dock.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="callout-title">Keep Orca's idle temperature at or below <code>print_temp_min</code></span>
+  <p>With Ooze prevention on, Orca lowers the leaving tool to its idle temperature
+  <em>before</em> the <code>T&lt;n&gt;</code>, so that is the target the manager sees on park.
+  Above <code>print_temp_min</code> (default 150 °C) it is memorised as the tool's print
+  temperature. The print survives that, because Orca's <code>M109</code> after the change brings the
+  tool to the right temperature. But a pickup without Orca's preheat then waits for the idle value,
+  and the park retract is given back at it, or skipped below <code>min_extrude_temp</code>.</p>
+  <p>With <code>park_heater: off</code> the idle value does not matter otherwise: set
+  <em>Temperature variation</em> far enough down, or <em>Idle temperature</em> in the filament
+  profile to e.g. 140 °C. With <code>keep</code>, pick an idle temperature at or below 150 °C, or
+  raise <code>print_temp_min</code> above it (it must stay below every real print temperature).</p>
+</div>
+
+<h3 id="orca-preheat">Orca settings for the recommended setup</h3>
+<pre><code>Process → Multimaterial → Ooze prevention : on
+    Preheat time          : heat-up time 0 °C → print temp, plus ~10 s
+    Temperature variation : so the idle temperature lands ≤ 150 °C
+                            (or Filament → Idle temperature ≤ 150)
+Machine start G-code      : PRINT_START … TEMPS=…   (see above)
+
+[vortac_manager]
+park_heater: off           # the default, no line needed</code></pre>
+<p>Measure the heat-up time once: on a cold parked tool, run
+<code>SET_HEATER_TEMPERATURE HEATER=extruder1 TARGET=…</code> and time it. Then check the sliced
+file: search for <code>; preheat</code>, there should be one before every <code>T&lt;n&gt;</code>.
+Orca only emits it with <strong>Emit temperature commands automatically</strong> (Printer
+Settings → Machine G-code) on. Without it the file has no temperature command at all, and you are
+in the "Ooze prevention off" rows of the table.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Short segments</span>
+  <p>If a tool prints for less than Preheat time between two changes, Orca may send the preheat
+  for its <em>next</em> pickup while it is still printing. With <code>park_heater: off</code>
+  the park then switches it off again, and the next pickup waits the full heat-up. That is safe,
+  just slower. Lower Preheat time if it happens a lot.</p>
+</div>
+
+<h3 id="temp-changes">Temperature changes during the print</h3>
+<p><code>TEMPS=</code> is a starting point, not a lock. The hooks track changes rather than
+overwriting them:</p>
+<ul>
+  <li><strong>Changed while the tool is printing</strong> (temperature tower, per-object
+      temperature, a slider pull in Mainsail, all of which hit the <em>active</em> extruder):
+      the manager reads the live target when the tool is parked and memorises <em>that</em>.
+      The new value is what comes back on the next pickup.</li>
+  <li><strong>Changed while the tool is parked</strong> (slicer preheat, a layer temperature
+      change, a slider pull): a live target above <code>print_temp_min</code> at pickup wins and
+      is kept. The console says so when it differs from the memorised value.</li>
+  <li><strong>At or below <code>print_temp_min</code> never counts as a print
+      temperature.</strong> That is a switched-off heater, Orca's idle temperature, or
+      <code>PRINT_START</code>'s soak. The pickup heats to the memorised value instead. Keep
+      <code>soak_temp</code> at or below <code>print_temp_min</code>.</li>
+</ul>
+<div class="callout tip">
+  <span class="callout-title">Temperature towers</span>
+  <p>A tower is a single-tool calibration print. Nothing gets parked, so none of this comes into
+  play. Check that the sliced file contains the tower's <code>M104</code> commands.</p>
+</div>
+
 <h2 id="macros">3b — The PRINT_START / PRINT_END macros</h2>
 <p><code>configs/vortac_configs/macros.example.cfg</code> ships a ready pair. Copy it,
 drop the <code>.example</code>, and include it <em>after</em> <code>tools.cfg</code>:</p>
@@ -341,8 +372,8 @@ drop the <code>.example</code>, and include it <em>after</em> <code>tools.cfg</c
   <li><code>_VORTAC_ENSURE_EMPTY</code> — parks whatever is held before anything probes
       (it homes first if PRINT_START has not, because parking is an absolute move to the
       dock). Probing itself stays refused while a tool is held.</li>
-  <li>Bed to temperature, nozzle only to <code>soak_temp</code> — hot enough not to sit cold,
-      cold enough not to ooze during homing and levelling.</li>
+  <li>Bed to temperature, only the starting tool to <code>soak_temp</code>, hot enough not to
+      sit cold, cold enough not to ooze during levelling. Every other tool stays off.</li>
   <li><code>QUAD_GANTRY_LEVEL</code> → <code>BED_MESH_*</code>, both with an empty carriage.
       <strong>No <code>G28 Z</code> after QGL</strong> — that would reset the gantry to flat
       and throw the levelling away.</li>
@@ -356,10 +387,10 @@ drop the <code>.example</code>, and include it <em>after</em> <code>tools.cfg</c
       otherwise a cancelled print leaves a tool on the carriage and the next
       <code>PRINT_START</code> cannot probe.</li>
 </ul>
-<p>Everything tunable (soak, standby delta, tool-change retract, prime line, park position)
+<p>Everything tunable (soak, prime line, park position)
 sits in <code>[gcode_macro _VORTAC_PRINT_VARS]</code>. Edit the variables, not the macros.</p>
 
-<h3 id="tool-hooks">Retract, standby temperature and the wait</h3>
+<h3 id="tool-hooks">Retract, park heater and the wait</h3>
 <p><strong>Nothing to configure.</strong> This is not a macro you have to wire up — it is
 <code>vortac_manager</code>'s own behaviour, because it is identical on every machine and a print
 depends on it. On every tool change:</p>
@@ -371,7 +402,7 @@ depends on it. On every tool change:</p>
         <td>old tool still the active extruder, its offsets still applied, mesh still active,
             toolhead still at the print position</td>
         <td>extra retract (only if the nozzle can actually extrude), memorise the print
-            temperature, drop to standby</td></tr>
+            temperature, switch the heater off (<code>park_heater: off</code>)</td></tr>
     <tr><td>pickup</td><td>last, after the fetch</td>
         <td>new tool active (<code>ACTIVATE_EXTRUDER</code> done), offsets applied, gantry tilted
             back, mesh restored</td>
@@ -382,15 +413,14 @@ depends on it. On every tool change:</p>
 <p>Tuned with plain config options on <code>[vortac_manager]</code> — all with working
 defaults, so an untouched config already does the right thing:</p>
 <pre><code>[vortac_manager]
-standby_delta:      50.0    # K below print temp while parked, 0 = off
-standby_min:       150.0
+park_heater:         off    # off | keep, see Temperatures and ooze
 print_temp_min:    150.0    # at/below this = machine idling, never memorised
 park_retract:        1.5    # mm, 0 = off
 park_retract_speed: 2400    # mm/min
 pickup_prime_extra:  0.4
 prime_speed:         300</code></pre>
 <p><code>VORTAC_STATUS</code> shows the state:</p>
-<pre><code>Tool temps   : miniGrey=270C, miniPink=265C  [-50K, floor 150C]
+<pre><code>Tool temps   : miniGrey=270C, miniPink=265C  [park_heater off]
 Change hooks : deactivate=NONE  activate=NONE</code></pre>
 
 <h3 id="tool-hook-gcode">The optional gcode hooks</h3>

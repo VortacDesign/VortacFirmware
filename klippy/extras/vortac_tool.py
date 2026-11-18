@@ -141,7 +141,7 @@ class VortacTool:
         # Activate/deactivate gcode templates. Left as None when the option
         # is absent -- vortac_manager then falls back to its OWN
         # tool_activate_gcode/tool_deactivate_gcode, which is where the
-        # shared behaviour (retract, standby temperature, prime) belongs.
+        # shared behaviour (retract, park heater, prime) belongs.
         # A tool only spells one out to DEVIATE from the shared default; an
         # empty value ("tool_activate_gcode:") is a deliberate "run nothing
         # for this tool" and is honoured as such.

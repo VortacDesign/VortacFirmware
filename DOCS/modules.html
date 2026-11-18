@@ -254,14 +254,14 @@ defaults — they apply unless the config overrides them. Feedrates are mm/min
 <p><code>dock_check_ystep × dock_check_steps</code> must stay within
 <code>dock_y_safe</code>, otherwise the checked backout would overshoot the
 safe line — that combination is rejected at startup.</p>
-<p>Behaviour that is the same for every tool — retract on park, standby temperature,
+<p>Behaviour that is the same for every tool — retract on park, park heater,
 wait-and-prime on pickup — belongs in <code>[vortac_manager]</code>'s own
 <code>tool_activate_gcode</code> / <code>tool_deactivate_gcode</code>, which run for every tool
 and default to <strong>empty</strong> — they are extension points for a purge bucket, a nozzle
-wipe or an LED. The retract, the standby temperature and the wait for the arriving tool are the
+wipe or an LED. The retract, the park heater and the wait for the arriving tool are the
 module's own doing (<code>_park_temperature_and_retract</code> /
 <code>_pickup_temperature_and_prime</code>), tuned with typed options
-(<code>standby_delta</code>, <code>park_retract</code>, …) rather than gcode, because they are
+(<code>park_heater</code>, <code>park_retract</code>, …) rather than gcode, because they are
 identical on every machine and a print depends on them. A <code>[vortac_tool]</code> section overrides them only where it genuinely
 deviates. <code>VORTAC_STATUS</code> reports which of the two is in effect. Saved dock positions are
 the hooked/engage position; load uses saved Z then lifts to

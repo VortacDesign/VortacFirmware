@@ -315,7 +315,7 @@ class VortacManager:
 
         # Shared tool-change hooks. These run for EVERY tool, which is where
         # the behaviour that is the same everywhere belongs -- retract on
-        # park, standby temperature, wait-and-prime on pickup. Repeating an
+        # park, park heater, wait-and-prime on pickup. Repeating an
         # identical block in every [vortac_tool] would be duplication with
         # nothing to gain, and the templates get the arriving/leaving tool
         # handed to them anyway ({tool.extruder_name}, {tool.tool_index}),
@@ -343,22 +343,30 @@ class VortacManager:
 
         # --- tool-change temperature and retract handling -------------------
         # A parked tool keeps its board powered, so it holds whatever target
-        # it had and drips into its dock for the whole print. standby_delta
-        # drops it on park; the pickup puts it back and WAITS before motion
-        # is handed on. That wait is the whole point: without it the first
-        # extrusion after a change hits a cold nozzle.
-        #
-        # The manager cannot preheat the NEXT tool -- when it parks one it
-        # does not yet know which is coming -- so the drop costs heat-up time
-        # on every change. standby_delta: 0 disables the drop; the wait stays.
-        self.standby_delta = config.getfloat(
-            'standby_delta', default=50.0, minval=0.0)
-        self.standby_min = config.getfloat(
-            'standby_min', default=150.0, minval=0.0)
+        # it had and drips into its dock for the whole print.
+        #   park_heater: off  -- switch the heater off on park (default). The
+        #                        tool heats again at pickup, or earlier when
+        #                        the slicer preheats it (Orca preheat_time:
+        #                        its M104 arrives after the park).
+        #   park_heater: keep -- leave the target alone; the slicer owns idle
+        #                        temperatures (Orca ooze prevention).
+        # Either way the pickup heats to the print temperature and WAITS
+        # before motion is handed on -- without that the first extrusion
+        # after a change can hit a cold nozzle.
+        for removed in ('standby_delta', 'standby_min'):
+            if config.get(removed, None) is not None:
+                raise config.error(
+                    f"[{config.get_name()}] '{removed}' was removed: parked "
+                    f"tools are now handled by 'park_heater: off|keep' "
+                    f"(default off). Delete the line -- see "
+                    f"DOCS/first-print.html#orca-temps")
+        self.park_heater = config.getchoice(
+            'park_heater', {'off': 'off', 'keep': 'keep'}, default='off')
         # Targets at or below this are the machine idling (soak during
-        # PRINT_START, cooldown at PRINT_END), never a print temperature to
-        # come back to. Deliberately NOT the macros' soak_temp: this one
-        # bounds a safety decision, that one is a comfort setting.
+        # PRINT_START, a slicer idle temperature, cooldown at PRINT_END),
+        # never a print temperature to come back to. Deliberately NOT the
+        # macros' soak_temp: this one bounds a safety decision, that one is a
+        # comfort setting.
         self.print_temp_min = config.getfloat(
             'print_temp_min', default=150.0, minval=0.0)
         # On top of the slicer's own tool-change retract, which happens
@@ -379,7 +387,7 @@ class VortacManager:
         # State (populated at klippy:connect)
         self.tools = {}             # tool_id -> VortacTool
         # tool_id -> {'print_temp': float, 'retracted': bool}
-        # print_temp is the target to come back to after standby; retracted
+        # print_temp is the target to come back to at pickup; retracted
         # records that park_retract was actually pulled, so the pickup gives
         # back exactly what was taken and never primes a tool that was not
         # retracted (which would blob at the start of a print). Keyed by tool
@@ -478,9 +486,6 @@ class VortacManager:
         gcode.register_command(
             'VORTAC_SET_TOOL_TEMP', self.cmd_VORTAC_SET_TOOL_TEMP,
             desc="Record TOOL's print temperature (TEMP=0 forgets it)")
-        gcode.register_command(
-            'VORTAC_PREHEAT', self.cmd_VORTAC_PREHEAT,
-            desc="Put every tool (except EXCEPT=<n>) on its standby temp")
 
         self.printer.register_event_handler(
             'klippy:connect', self._handle_connect)
@@ -2370,8 +2375,9 @@ class VortacManager:
 
     def _park_temperature_and_retract(self, tool, gcmd):
         """Runs as the tool leaves: extra retract, memorise the print
-        temperature, drop to standby. Called AFTER tool_deactivate_gcode so
-        a user wipe/purge still meets a hot, primed nozzle."""
+        temperature, switch the heater off (park_heater: off). Called AFTER
+        tool_deactivate_gcode so a user wipe/purge still meets a hot, primed
+        nozzle."""
         status = self._extruder_status(tool)
         if status is None:
             return
@@ -2383,18 +2389,16 @@ class VortacManager:
             self._extrude(-self.park_retract, self.park_retract_speed)
             st['retracted'] = True
         target = float(status.get('target') or 0.0)
-        if target <= self.print_temp_min:
-            # Machine idling, not a print temperature -- keep whatever we
-            # remembered from the last real one.
-            return
-        st['print_temp'] = target
-        standby = max(target - self.standby_delta, self.standby_min)
-        if standby >= target:
-            return
-        if self._set_tool_temperature(tool, standby, False):
-            gcmd.respond_info(
-                f"Vortac: {tool.tool_id} parked at {standby:.0f}C standby "
-                f"(prints at {target:.0f}C)")
+        # At or below print_temp_min the machine is idling (soak, or a
+        # slicer idle temperature set just before the T<n>) -- keep the
+        # print temperature remembered from the last real one.
+        if target > self.print_temp_min:
+            st['print_temp'] = target
+        if self.park_heater == 'off' and target > 0.0:
+            if self._set_tool_temperature(tool, 0.0, False):
+                gcmd.respond_info(
+                    f"Vortac: {tool.tool_id} parked, heater off "
+                    f"(prints at {float(st.get('print_temp') or 0.0):.0f}C)")
 
     def _pickup_temperature_and_prime(self, tool, gcmd):
         """Runs as the tool arrives: back to print temperature, WAIT, undo
@@ -2407,20 +2411,17 @@ class VortacManager:
         live = float(status.get('target') or 0.0)
         want = float(st.get('print_temp') or 0.0)
 
-        # Whose value wins? Normally the memorised one -- the tool is sitting
-        # at the standby target we put it at, and that is precisely the value
-        # that must not be restored. But a target can also have been changed
-        # on purpose while the tool was parked (temperature tower, per-object
-        # temperature, a slider pull in a UI). So: work out the standby value
-        # we would have left behind, and if the live target is something else
-        # entirely, the live one is the deliberate one and it wins.
-        # print_temp_min and below never counts as deliberate -- that is
-        # PRINT_START holding the nozzles down while it homes and probes.
-        expect = (max(want - self.standby_delta, self.standby_min)
-                  if want > 0.0 else 0.0)
-        changed = (want > 0.0 and live > self.print_temp_min
-                   and abs(live - expect) > 1.0 and abs(live - want) > 1.0)
-        target = live if changed else (want if want > 0.0 else live)
+        # Whose value wins? A live target above print_temp_min was set on
+        # purpose while the tool sat parked -- a slicer preheat, a layer
+        # temperature change, a slider pull in a UI -- and it wins. At or
+        # below print_temp_min the tool is off or idling (park_heater: off,
+        # a slicer idle temperature, PRINT_START's soak), so the memorised
+        # print temperature is the one to come back to.
+        if live > self.print_temp_min:
+            target = live
+        else:
+            target = want if want > 0.0 else live
+        changed = want > 0.0 and target == live and abs(live - want) > 1.0
 
         if target > 0.0:
             if changed:
@@ -2513,14 +2514,11 @@ class VortacManager:
             f"  Change hooks : {self._hook_line()}")
 
     def _temp_line(self):
-        """What each tool prints at, what it idles at when parked, and
+        """What each tool prints at, what happens to it when parked, and
         whether it currently owes a prime."""
         if not self.tools:
             return '(no tools)'
-        if self.standby_delta <= 0.0:
-            mode = 'standby off'
-        else:
-            mode = f"-{self.standby_delta:.0f}K, floor {self.standby_min:.0f}C"
+        mode = f"park_heater {self.park_heater}"
         parts = []
         for tid, tool in sorted(self.tools.items()):
             st = self.tool_temps.get(tid) or {}
@@ -2569,28 +2567,7 @@ class VortacManager:
             gcmd.respond_info(f"Vortac: {tool.tool_id} print temperature "
                               f"forgotten")
             return
-        gcmd.respond_info(
-            f"Vortac: {tool.tool_id} prints at {temp:.0f}C "
-            f"(standby {max(temp - self.standby_delta, self.standby_min):.0f}C)")
-
-    def cmd_VORTAC_PREHEAT(self, gcmd):
-        """Put every tool on its standby temperature, so a tool change does
-        not have to heat one all the way up from soak. EXCEPT=<index> leaves
-        one alone -- normally the tool the print starts with, which
-        PRINT_START brings to full temperature itself."""
-        skip = gcmd.get_int('EXCEPT', None)
-        done = []
-        for tid, tool in sorted(self.tools.items()):
-            if skip is not None and tool.tool_index == skip:
-                continue
-            want = float(self._temp_state(tool).get('print_temp') or 0.0)
-            if want <= 0.0:
-                continue
-            standby = max(want - self.standby_delta, self.standby_min)
-            if self._set_tool_temperature(tool, standby, False):
-                done.append(f"{tid}={standby:.0f}C")
-        gcmd.respond_info("Vortac preheat: "
-                          + (', '.join(done) if done else "nothing to do"))
+        gcmd.respond_info(f"Vortac: {tool.tool_id} prints at {temp:.0f}C")
 
     def cmd_VORTAC_LOAD(self, gcmd):
         target = self._get_tool(gcmd.get('TOOL'), gcmd)
@@ -2876,8 +2853,7 @@ class VortacManager:
             'qgl_state': self.qgl_state.state if self.qgl_state else None,
             'tool_temps': {tid: dict(st)
                            for tid, st in self.tool_temps.items()},
-            'standby_delta': self.standby_delta,
-            'standby_min': self.standby_min,
+            'park_heater': self.park_heater,
         }
 
 
